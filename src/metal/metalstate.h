@@ -9,6 +9,7 @@ struct Shader;
 
 bool32 initState(void);
 void termState(void);
+void startFrame(void);
 void beginFrameState(void);
 uint64 getFrameId(void);
 void frameCompleted(uint64 frameId);

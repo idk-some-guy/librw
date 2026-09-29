@@ -298,12 +298,14 @@ bool32
 ringAlloc(uint32 size, uint32 align, RingSpace *space)
 {
 	MetalContext *ctx = getContext();
-	id<MTLBuffer> buf = ring.buffers[ring.frame];
+	id<MTLBuffer> buf;
 	NSUInteger len;
 	uint32 off;
 
 	if(ctx == nil)
 		return 0;
+	startFrame();
+	buf = ring.buffers[ring.frame];
 	if(align == 0)
 		align = 4;
 	assert((align & (align-1)) == 0);

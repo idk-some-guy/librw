@@ -20,6 +20,7 @@ enum { MAXINSTATTRIBS = 11 };
 
 int32_t defaultVertexLayout(bool normals, bool prelit, int32_t numTexCoordSets, InstAttrib *out);
 uint32_t meshIndexOffsets(const uint32_t *numIndices, int32_t numMeshes, uint32_t *offsets);
+bool stripHasRestartIndex(const uint16_t *indices, uint32_t numIndices);
 
 }
 }

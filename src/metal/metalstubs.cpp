@@ -33,11 +33,6 @@ void im3DRenderPrimitive(PrimitiveType primType) { }
 void im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndices) { }
 void im3DEnd(void) { }
 
-int32 lightingCB(Atomic *atomic) { return 0; }
-int32 lightingCB(void) { return 0; }
-
-void drawInst_GSemu(InstanceDataHeader *header, InstanceData *inst) { }
-
 void initMatFX(void) { }
 ObjPipeline *makeMatFXPipeline(void) { return ObjPipeline::create(); }
 

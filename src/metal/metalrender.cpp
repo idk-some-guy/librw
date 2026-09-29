@@ -28,9 +28,44 @@ drawInst_simple(InstanceDataHeader *header, InstanceData *inst)
 }
 
 void
+drawInst_GSemu(InstanceDataHeader *header, InstanceData *inst)
+{
+	uint32 hasAlpha;
+	int alphafunc, alpharef, gsalpharef;
+	int zwrite;
+	hasAlpha = getAlphaBlend();
+	if(hasAlpha){
+		zwrite = rw::GetRenderState(rw::ZWRITEENABLE);
+		alphafunc = rw::GetRenderState(rw::ALPHATESTFUNC);
+		if(zwrite){
+			alpharef = rw::GetRenderState(rw::ALPHATESTREF);
+			gsalpharef = rw::GetRenderState(rw::GSALPHATESTREF);
+
+			SetRenderState(rw::ALPHATESTFUNC, rw::ALPHAGREATEREQUAL);
+			SetRenderState(rw::ALPHATESTREF, gsalpharef);
+			drawInst_simple(header, inst);
+			SetRenderState(rw::ALPHATESTFUNC, rw::ALPHALESS);
+			SetRenderState(rw::ZWRITEENABLE, 0);
+			drawInst_simple(header, inst);
+			SetRenderState(rw::ZWRITEENABLE, 1);
+			SetRenderState(rw::ALPHATESTFUNC, alphafunc);
+			SetRenderState(rw::ALPHATESTREF, alpharef);
+		}else{
+			SetRenderState(rw::ALPHATESTFUNC, rw::ALPHAALWAYS);
+			drawInst_simple(header, inst);
+			SetRenderState(rw::ALPHATESTFUNC, alphafunc);
+		}
+	}else
+		drawInst_simple(header, inst);
+}
+
+void
 drawInst(InstanceDataHeader *header, InstanceData *inst)
 {
-	drawInst_simple(header, inst);
+	if(rw::GetRenderState(rw::GSALPHATEST))
+		drawInst_GSemu(header, inst);
+	else
+		drawInst_simple(header, inst);
 }
 
 void
@@ -42,6 +77,39 @@ setupVertexInput(InstanceDataHeader *header)
 void
 teardownVertexInput(InstanceDataHeader *header)
 {
+}
+
+int32
+lightingCB(Atomic *atomic)
+{
+	WorldLights lightData;
+	Light *directionals[8];
+	Light *locals[8];
+	lightData.directionals = directionals;
+	lightData.numDirectionals = 8;
+	lightData.locals = locals;
+	lightData.numLocals = 8;
+
+	if(atomic->geometry->flags & rw::Geometry::LIGHT)
+		((World*)engine->currentWorld)->enumerateLights(atomic, &lightData);
+	else
+		memset(&lightData, 0, sizeof(lightData));
+	return setLights(&lightData);
+}
+
+int32
+lightingCB(void)
+{
+	WorldLights lightData;
+	Light *directionals[8];
+	Light *locals[8];
+	lightData.directionals = directionals;
+	lightData.numDirectionals = 8;
+	lightData.locals = locals;
+	lightData.numLocals = 8;
+
+	((World*)engine->currentWorld)->enumerateLights(&lightData);
+	return setLights(&lightData);
 }
 
 void

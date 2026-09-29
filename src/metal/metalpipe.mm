@@ -5,6 +5,8 @@
 #include "metalstate.h"
 #include "metalinst.h"
 
+#define PLUGIN_ID 0
+
 namespace rw {
 namespace metal {
 
@@ -18,6 +20,14 @@ static_assert((int)INSTATTRIB_POS == ATTRIB_POS && (int)INSTATTRIB_NORMAL == ATT
 	"attribute indices in metalinst.h");
 static_assert((int)INSTFMT_FLOAT2 == ATTRIBFMT_FLOAT2 && (int)INSTFMT_FLOAT3 == ATTRIBFMT_FLOAT3 &&
 	(int)INSTFMT_UCHAR4_NORM == ATTRIBFMT_UCHAR4_NORM, "attribute formats in metalinst.h");
+
+static InstanceStats instanceStats;
+
+InstanceStats
+getInstanceStats(void)
+{
+	return instanceStats;
+}
 
 static void
 releaseBuffer(void **buffer)
@@ -96,6 +106,9 @@ instanceMesh(Geometry *geo)
 		inst->offset = offsets[i];
 		memcpy((uint8*)header->indexBuffer + inst->offset,
 		       mesh->indices, inst->numIndex*2);
+		if(meshh->flags == 1 && stripHasRestartIndex(mesh->indices, mesh->numIndices) &&
+		   instanceStats.stripRestartMeshes++ == 0)
+			RWERROR((ERR_GENERAL, "a triangle strip uses index 0xFFFF, which restarts the strip in Metal"));
 		mesh++;
 		inst++;
 	}

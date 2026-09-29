@@ -57,5 +57,15 @@ meshIndexOffsets(const uint32_t *numIndices, int32_t numMeshes, uint32_t *offset
 	return offset;
 }
 
+bool
+stripHasRestartIndex(const uint16_t *indices, uint32_t numIndices)
+{
+	uint32_t i;
+	for(i = 0; i < numIndices; i++)
+		if(indices[i] == 0xFFFF)
+			return true;
+	return false;
+}
+
 }
 }

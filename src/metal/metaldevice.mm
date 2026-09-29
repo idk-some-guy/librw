@@ -151,15 +151,22 @@ createContext(void)
 	return 1;
 }
 
+void
+startFrame(void)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil || ctx->frameStarted)
+		return;
+	dispatch_semaphore_wait(ctx->frameSemaphore, DISPATCH_TIME_FOREVER);
+	ctx->frameStarted = true;
+	beginFrameState();
+}
+
 static id<MTLCommandBuffer>
 getCommandBuffer(MetalContext *ctx)
 {
 	if(ctx->commandBuffer == nil){
-		if(!ctx->frameStarted){
-			dispatch_semaphore_wait(ctx->frameSemaphore, DISPATCH_TIME_FOREVER);
-			ctx->frameStarted = true;
-			beginFrameState();
-		}
+		startFrame();
 		ctx->commandBuffer = [ctx->queue commandBuffer];
 	}
 	return ctx->commandBuffer;
