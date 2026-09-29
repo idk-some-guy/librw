@@ -23,17 +23,9 @@ namespace metal {
 
 // M2 rasters, textures, state, shaders, im2d
 
-int32 nativeRasterOffset;
-
-void registerNativeRaster(void) { }
-Raster *rasterCreate(Raster *raster) { return nil; }
-uint8 *rasterLock(Raster*, int32 level, int32 lockMode) { return nil; }
-void rasterUnlock(Raster*, int32) { }
-int32 rasterNumLevels(Raster*) { return 0; }
 bool32 imageFindRasterFormat(Image *img, int32 type,
 	int32 *width, int32 *height, int32 *depth, int32 *format) { return 0; }
 bool32 rasterFromImage(Raster *raster, Image *image) { return 0; }
-Image *rasterToImage(Raster *raster) { return nil; }
 void allocateDXT(Raster *raster, int32 dxt, int32 numLevels, bool32 hasAlpha) { }
 
 Texture *readNativeTexture(Stream *stream) { return nil; }

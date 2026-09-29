@@ -50,6 +50,9 @@ struct MetalGlobals
 };
 
 extern MetalGlobals metalGlobals;
+
+void forgetRasterTarget(Raster *raster);
+bool32 readRasterPixels(Raster *raster, uint8 *dst);
 #endif
 
 Raster *rasterCreate(Raster *raster);
