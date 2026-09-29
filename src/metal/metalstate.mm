@@ -428,6 +428,16 @@ setVertexLayout(uint32 layout)
 	currentLayout = layout;
 }
 
+int32
+getVertexLayout(uint32 layout, AttribDesc *attribs, int32 maxAttribs)
+{
+	if(layout == 0 || layout >= vertexLayouts.size() ||
+	   vertexLayouts[layout].numAttribs > maxAttribs)
+		return 0;
+	memcpy(attribs, vertexLayouts[layout].attribs, vertexLayouts[layout].numAttribs*sizeof(AttribDesc));
+	return vertexLayouts[layout].numAttribs;
+}
+
 static bool
 isFloatType(MTLDataType t)
 {
@@ -1570,7 +1580,6 @@ termState(void)
 	pipelineCache.clear();
 	depthStencilCache.clear();
 	samplerCache.clear();
-	vertexLayouts.clear();
 	currentLayout = 0;
 	im2dVertexLayout = 0;
 	for(i = 0; i < NUMBLOCKS; i++)

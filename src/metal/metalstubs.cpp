@@ -39,25 +39,6 @@ void im3DEnd(void) { }
 void setupVertexInput(InstanceDataHeader *header) { }
 void teardownVertexInput(InstanceDataHeader *header) { }
 
-void
-ObjPipeline::init(void)
-{
-	this->rw::ObjPipeline::init(PLATFORM_METAL);
-	this->instanceCB = nil;
-	this->uninstanceCB = nil;
-	this->renderCB = nil;
-}
-
-ObjPipeline*
-ObjPipeline::create(void)
-{
-	ObjPipeline *pipe = rwNewT(ObjPipeline, 1, MEMDUR_GLOBAL);
-	pipe->init();
-	return pipe;
-}
-
-void defaultInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance) { }
-void defaultUninstanceCB(Geometry *geo, InstanceDataHeader *header) { }
 void defaultRenderCB(Atomic *atomic, InstanceDataHeader *header) { }
 int32 lightingCB(Atomic *atomic) { return 0; }
 int32 lightingCB(void) { return 0; }
@@ -65,10 +46,6 @@ int32 lightingCB(void) { return 0; }
 void drawInst_simple(InstanceDataHeader *header, InstanceData *inst) { }
 void drawInst_GSemu(InstanceDataHeader *header, InstanceData *inst) { }
 void drawInst(InstanceDataHeader *header, InstanceData *inst) { }
-
-void *destroyNativeData(void *object, int32, int32) { return object; }
-
-ObjPipeline *makeDefaultPipeline(void) { return ObjPipeline::create(); }
 
 void initMatFX(void) { }
 ObjPipeline *makeMatFXPipeline(void) { return ObjPipeline::create(); }
