@@ -59,6 +59,21 @@ struct FrameStats
 };
 FrameStats getFrameStats(void);
 
+struct RasterStats
+{
+	uint32 directUploads;
+	uint32 stagedUploads;
+	uint32 mipmapBlits;
+	uint32 gpuWaits;
+};
+extern RasterStats rasterStats;
+RasterStats getRasterStats(void);
+
+bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
+	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);
+void encodeMipmapGeneration(void *texture);
+void waitForGPUWrites(uint64 frameId);
+
 void forgetRasterTarget(Raster *raster);
 void clearNewRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);

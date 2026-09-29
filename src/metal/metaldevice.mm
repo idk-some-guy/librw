@@ -1,6 +1,5 @@
 #ifdef RW_METAL
 #include "metalobjc.h"
-#include "metalformat.h"
 #include "metalpass.h"
 #include "metalstate.h"
 
@@ -15,6 +14,7 @@ namespace metal {
 
 MetalGlobals metalGlobals;
 MetalCaps metalCaps;
+RasterStats rasterStats;
 
 static PassManager passManager;
 static Raster *currentFrameBuffer;
@@ -186,6 +186,7 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 			dispatch_semaphore_signal(sem);
 		}];
 		[cb commit];
+		ctx->lastCommitted = cb;
 	}else{
 		frameCompleted(frameId);
 		dispatch_semaphore_signal(sem);
@@ -367,6 +368,12 @@ getFrameStats(void)
 	return frameStats;
 }
 
+RasterStats
+getRasterStats(void)
+{
+	return rasterStats;
+}
+
 int32
 getMaxFramesInFlight(void)
 {
@@ -409,6 +416,7 @@ copyTexturePixels(MetalContext *ctx, id<MTLTexture> tex, int32 x, int32 y, int32
 		destinationBytesPerRow:stride destinationBytesPerImage:size];
 	[blit endEncoding];
 	[cb commit];
+	ctx->lastCommitted = cb;
 	[cb waitUntilCompleted];
 	ctx->commandBuffer = nil;
 	if(cb.error)
@@ -479,11 +487,82 @@ writeRasterPixels(Raster *raster, const uint8 *src)
 	return 1;
 }
 
+bool32
+encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
+	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+	id<MTLBuffer> buf;
+	id<MTLBlitCommandEncoder> blit;
+
+	if(ctx == nil || tex == nil)
+		return 0;
+	@autoreleasepool {
+		buf = [ctx->device newBufferWithBytes:bytes length:bytesPerImage options:MTLResourceStorageModeShared];
+		if(buf == nil)
+			return 0;
+		passManager.flush();
+		runPassActions();
+		blit = [getCommandBuffer(ctx) blitCommandEncoder];
+		[blit copyFromBuffer:buf sourceOffset:0
+			sourceBytesPerRow:bytesPerRow sourceBytesPerImage:bytesPerImage
+			sourceSize:MTLSizeMake(width, height, 1)
+			toTexture:tex destinationSlice:0 destinationLevel:level
+			destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit endEncoding];
+	}
+	return 1;
+}
+
+void
+encodeMipmapGeneration(void *texture)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = (__bridge id<MTLTexture>)texture;
+	id<MTLBlitCommandEncoder> blit;
+
+	if(ctx == nil || tex == nil || tex.mipmapLevelCount < 2)
+		return;
+	@autoreleasepool {
+		passManager.flush();
+		runPassActions();
+		blit = [getCommandBuffer(ctx) blitCommandEncoder];
+		[blit generateMipmapsForTexture:tex];
+		[blit endEncoding];
+	}
+}
+
+void
+waitForGPUWrites(uint64 frameId)
+{
+	MetalContext *ctx = getContext();
+	id<MTLCommandBuffer> cb;
+
+	if(ctx == nil)
+		return;
+	@autoreleasepool {
+		if(frameId == getFrameId() && ctx->commandBuffer){
+			passManager.flush();
+			runPassActions();
+			cb = ctx->commandBuffer;
+			[cb commit];
+			ctx->lastCommitted = cb;
+			ctx->commandBuffer = nil;
+		}else
+			cb = ctx->lastCommitted;
+		[cb waitUntilCompleted];
+		if(cb.error)
+			fprintf(stderr, "rw::metal: command buffer error: %s\n", cb.error.localizedDescription.UTF8String);
+	}
+}
+
 static bool32
 rasterRenderFast(Raster *raster, int32 x, int32 y)
 {
 	MetalContext *ctx = getContext();
 	Raster *dst = Raster::getCurrentContext();
+	MetalRaster *natras;
 	id<MTLTexture> stex, dtex;
 	id<MTLBlitCommandEncoder> blit;
 	int32 dx, dy, w, h;
@@ -498,9 +577,9 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 		return 0;
 	dx = dst->offsetX + x;
 	dy = dst->offsetY + y;
-	w = MIN(raster->width, (int32)dtex.width - dx);
-	h = MIN(raster->height, (int32)dtex.height - dy);
-	if(dx < 0 || dy < 0 || w <= 0 || h <= 0)
+	w = MIN(MIN(raster->width, dst->width - x), (int32)dtex.width - dx);
+	h = MIN(MIN(raster->height, dst->height - y), (int32)dtex.height - dy);
+	if(x < 0 || y < 0 || dx < 0 || dy < 0 || w <= 0 || h <= 0)
 		return 0;
 	@autoreleasepool {
 		passManager.flush();
@@ -513,8 +592,17 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 			destinationOrigin:MTLOriginMake(dx, dy, 0)];
 		[blit endEncoding];
 	}
-	GETMETALRASTEREXT(dst->parent)->filledMask |= 1;
-	GETMETALRASTEREXT(dst->parent)->filledLevels = filledPrefix(GETMETALRASTEREXT(dst->parent)->filledMask);
+	natras = GETMETALRASTEREXT(dst->parent);
+	if(natras->autogenMipmap && dtex.mipmapLevelCount > 1){
+		encodeMipmapGeneration(natras->texture);
+		rasterStats.mipmapBlits++;
+		natras->filledMask = (1u << dtex.mipmapLevelCount) - 1;
+		natras->filledLevels = (int8)dtex.mipmapLevelCount;
+	}else{
+		natras->filledMask = 1;
+		natras->filledLevels = 1;
+	}
+	natras->gpuWriteFrame = getFrameId();
 	return 1;
 }
 
@@ -788,6 +876,7 @@ stopGLFW(void)
 		if(ctx){
 			ctx->encoder = nil;
 			ctx->commandBuffer = nil;
+			ctx->lastCommitted = nil;
 			ctx->layer = nil;
 			ctx->window = nil;
 		}

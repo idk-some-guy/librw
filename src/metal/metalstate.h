@@ -12,6 +12,7 @@ void termState(void);
 void beginFrameState(void);
 uint64 getFrameId(void);
 void frameCompleted(uint64 frameId);
+uint64 getCompletedFrameId(void);
 void invalidateEncoderState(void);
 void setRenderState(int32 state, void *pvalue);
 void *getRenderState(int32 state);

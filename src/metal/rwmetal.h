@@ -235,6 +235,8 @@ struct MetalRaster
 	uint8 addressU;
 	uint8 addressV;
 	int32 maxAnisotropy;
+	uint64 lastUseFrame;
+	uint64 gpuWriteFrame;
 };
 
 struct MetalCaps

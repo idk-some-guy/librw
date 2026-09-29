@@ -237,6 +237,7 @@ struct Ring
 	std::atomic<uint64> slotDone[MAXFRAMESINFLIGHT];
 };
 static Ring ring;
+static std::atomic<uint64> completedFrameId;
 
 void
 beginFrameState(void)
@@ -264,7 +265,18 @@ getFrameId(void)
 void
 frameCompleted(uint64 frameId)
 {
+	uint64 done;
+
 	ring.slotDone[frameId % MAXFRAMESINFLIGHT].store(frameId);
+	done = completedFrameId.load();
+	while(done < frameId && !completedFrameId.compare_exchange_weak(done, frameId))
+		;
+}
+
+uint64
+getCompletedFrameId(void)
+{
+	return completedFrameId.load();
 }
 
 bool32
@@ -1316,6 +1328,7 @@ bindTextures(id<MTLRenderCommandEncoder> e)
 		natras = stageExt(raster);
 		tex = natras ? (__bridge id<MTLTexture>)getRasterSampleTexture(raster) : nil;
 		if(tex){
+			GETMETALRASTEREXT(raster->parent)->lastUseFrame = getFrameId();
 			sd.filter = natras->filterMode;
 			sd.addressU = natras->addressU;
 			sd.addressV = natras->addressV;

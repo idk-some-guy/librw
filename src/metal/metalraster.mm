@@ -17,7 +17,6 @@ static_assert(RWFMT_C1555 == Raster::C1555 && RWFMT_C565 == Raster::C565 &&
 
 int32 nativeRasterOffset;
 
-static id<MTLCommandBuffer> pendingMipmaps;
 static id<MTLTexture> whiteTexture;
 
 static bool32
@@ -109,32 +108,6 @@ getLockFormat(Raster *raster, TexFormat *fmt)
 	if(natras->isCompressed)
 		return findDXTFormat(getDXT(natras->format), natras->hasAlpha, fmt);
 	return findTexFormat(raster->format, fmt) && fmt->bpp != 0;
-}
-
-static void
-waitForMipmaps(void)
-{
-	if(pendingMipmaps){
-		[pendingMipmaps waitUntilCompleted];
-		pendingMipmaps = nil;
-	}
-}
-
-static void
-generateMipmaps(id<MTLTexture> tex)
-{
-	MetalContext *ctx = getContext();
-	id<MTLCommandBuffer> cb;
-	id<MTLBlitCommandEncoder> blit;
-
-	if(tex.mipmapLevelCount < 2)
-		return;
-	cb = [ctx->queue commandBuffer];
-	blit = [cb blitCommandEncoder];
-	[blit generateMipmapsForTexture:tex];
-	[blit endEncoding];
-	[cb commit];
-	pendingMipmaps = cb;
 }
 
 static Raster*
@@ -278,16 +251,27 @@ allocateDXT(Raster *raster, int32 dxt, int32 numLevels, bool32 hasAlpha)
 	raster->flags &= ~Raster::DONTALLOCATE;
 }
 
+static void
+waitForRasterWrites(MetalRaster *natras)
+{
+	if(natras->gpuWriteFrame > getCompletedFrameId()){
+		waitForGPUWrites(natras->gpuWriteFrame);
+		natras->gpuWriteFrame = 0;
+		rasterStats.gpuWaits++;
+	}
+}
+
 static bool32
 readLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 {
+	MetalRaster *natras = GETMETALRASTEREXT(raster->parent);
 	id<MTLTexture> tex = getRasterTexture(raster->parent);
 	int32 n = raster->width*raster->height;
 	uint8 *rgba;
 	bool32 ok = 1;
 
 	if(fmt.isCompressed){
-		waitForMipmaps();
+		waitForRasterWrites(natras);
 		[tex getBytes:px bytesPerRow:levelStride(fmt, raster->width)
 			fromRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level];
 		return 1;
@@ -296,7 +280,7 @@ readLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 	if(raster->type == Raster::CAMERATEXTURE)
 		ok = readRasterPixels(raster, rgba);
 	else{
-		waitForMipmaps();
+		waitForRasterWrites(natras);
 		[tex getBytes:rgba bytesPerRow:raster->width*4
 			fromRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level];
 	}
@@ -316,17 +300,34 @@ markLevelFilled(MetalRaster *natras, int32 level)
 }
 
 static void
+uploadLevel(MetalRaster *natras, int32 level, int32 w, int32 h, const uint8 *bytes,
+	uint32 bytesPerRow, uint32 bytesPerImage, bool busy)
+{
+	id<MTLTexture> tex = (__bridge id<MTLTexture>)natras->texture;
+
+	if(busy && encodeTextureUpload(natras->texture, level, w, h, bytes, bytesPerRow, bytesPerImage)){
+		natras->gpuWriteFrame = getFrameId();
+		rasterStats.stagedUploads++;
+		return;
+	}
+	[tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level
+		withBytes:bytes bytesPerRow:bytesPerRow];
+	rasterStats.directUploads++;
+}
+
+static void
 writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 {
 	MetalRaster *natras = GETMETALRASTEREXT(raster->parent);
 	id<MTLTexture> tex = getRasterTexture(raster->parent);
 	int32 n = raster->width*raster->height;
 	uint8 *rgba;
+	uint64 done = getCompletedFrameId();
+	bool busy = natras->lastUseFrame > done || natras->gpuWriteFrame > done;
 
 	if(fmt.isCompressed){
-		waitForMipmaps();
-		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
-			withBytes:px bytesPerRow:levelStride(fmt, raster->width)];
+		uploadLevel(natras, level, raster->width, raster->height, px,
+			levelStride(fmt, raster->width), levelSize(fmt, raster->width, raster->height), busy);
 		markLevelFilled(natras, level);
 		return;
 	}
@@ -338,12 +339,13 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 	if(raster->type == Raster::CAMERATEXTURE)
 		writeRasterPixels(raster, rgba);
 	else{
-		waitForMipmaps();
-		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
-			withBytes:rgba bytesPerRow:raster->width*4];
+		uploadLevel(natras, level, raster->width, raster->height, rgba,
+			raster->width*4, n*4, busy);
 		markLevelFilled(natras, level);
-		if(level == 0 && natras->autogenMipmap){
-			generateMipmaps(tex);
+		if(level == 0 && natras->autogenMipmap && tex.mipmapLevelCount > 1){
+			encodeMipmapGeneration(natras->texture);
+			natras->gpuWriteFrame = getFrameId();
+			rasterStats.mipmapBlits++;
 			natras->filledMask = (1u << tex.mipmapLevelCount) - 1;
 			natras->filledLevels = (int8)tex.mipmapLevelCount;
 		}
@@ -396,6 +398,8 @@ rasterCreate(Raster *raster)
 	natras->numLevels = 1;
 	natras->filledLevels = 0;
 	natras->filledMask = 0;
+	natras->lastUseFrame = 0;
+	natras->gpuWriteFrame = 0;
 
 	Raster *ret = raster;
 
@@ -766,6 +770,8 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->numLevels = 1;
 	ras->filledLevels = 0;
 	ras->filledMask = 0;
+	ras->lastUseFrame = 0;
+	ras->gpuWriteFrame = 0;
 	initSampler(ras);
 	return object;
 }
@@ -836,7 +842,6 @@ getWhiteTexture(void)
 void
 termRaster(void)
 {
-	waitForMipmaps();
 	whiteTexture = nil;
 }
 

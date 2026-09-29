@@ -37,6 +37,7 @@ struct MetalContext
 	dispatch_semaphore_t frameSemaphore;
 	bool frameStarted;
 	id<MTLCommandBuffer> commandBuffer;
+	id<MTLCommandBuffer> lastCommitted;
 	id<MTLRenderCommandEncoder> encoder;
 	bool encoderHasDepth;
 	uint32 encoderWidth, encoderHeight;
