@@ -85,6 +85,11 @@ struct UniformMaterial
 	float32 surfProps[4];
 };
 
+static_assert(sizeof(UniformObject) == 64 && sizeof(UniformLights) == 528 && sizeof(UniformMaterial) == 32, "block sizes");
+static_assert(offsetof(UniformLights, lightParams) == 16 && offsetof(UniformLights, lightPosition) == 144 &&
+	offsetof(UniformLights, lightDirection) == 272 && offsetof(UniformLights, lightColor) == 400, "UniformLights layout");
+static_assert(VSLIGHT_DIRECT == LIGHTBIT_DIRECT && VSLIGHT_POINT == LIGHTBIT_POINT && VSLIGHT_SPOT == LIGHTBIT_SPOT, "light bits");
+
 static UniformState uniformState;
 static UniformScene uniformScene;
 static UniformObject uniformObject;

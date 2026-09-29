@@ -452,6 +452,49 @@ readRasterPixels(Raster *raster, uint8 *dst)
 }
 
 bool32
+readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex;
+	id<MTLBuffer> buf;
+	id<MTLCommandBuffer> cb;
+	id<MTLBlitCommandEncoder> blit;
+
+	if(ctx == nil || zbuffer == nil)
+		return 0;
+	@autoreleasepool {
+		tex = getRasterTexture(zbuffer->parent);
+		if(tex == nil || tex.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 ||
+		   x < 0 || y < 0 || x >= zbuffer->width || y >= zbuffer->height ||
+		   zbuffer->offsetX + x >= (int32)tex.width || zbuffer->offsetY + y >= (int32)tex.height)
+			return 0;
+
+		passManager.flush();
+		runPassActions();
+		buf = [ctx->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+		cb = getCommandBuffer(ctx);
+		blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0
+			sourceOrigin:MTLOriginMake(zbuffer->offsetX + x, zbuffer->offsetY + y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1)
+			toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:4 destinationBytesPerImage:4
+			options:MTLBlitOptionDepthFromDepthStencil];
+		[blit endEncoding];
+		[cb commit];
+		ctx->lastCommitted = cb;
+		[cb waitUntilCompleted];
+		ctx->commandBuffer = nil;
+		if(cb.error)
+			fprintf(stderr, "rw::metal: command buffer error: %s\n", cb.error.localizedDescription.UTF8String);
+		if(cb.status != MTLCommandBufferStatusCompleted)
+			return 0;
+		memcpy(depth, buf.contents, 4);
+	}
+	return 1;
+}
+
+bool32
 writeRasterPixels(Raster *raster, const uint8 *src)
 {
 	MetalContext *ctx = getContext();

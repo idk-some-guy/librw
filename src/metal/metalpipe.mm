@@ -153,6 +153,23 @@ render(rw::ObjPipeline *rwpipe, Atomic *atomic)
 		pipe->renderCB(atomic, (InstanceDataHeader*)geo->instData);
 }
 
+bool32
+drawIndexed(InstanceDataHeader *header, InstanceData *inst)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil || inst->numIndex == 0 || header->mtlIndexBuffer == nil || header->mtlVertexBuffer == nil)
+		return 0;
+	@autoreleasepool {
+		if(!beginDraw() || !flushCache())
+			return 0;
+		bindVertexBuffer(header->mtlVertexBuffer, 0);
+		[ctx->encoder drawIndexedPrimitives:(MTLPrimitiveType)header->primType indexCount:inst->numIndex
+			indexType:MTLIndexTypeUInt16 indexBuffer:(__bridge id<MTLBuffer>)header->mtlIndexBuffer
+			indexBufferOffset:inst->offset];
+	}
+	return 1;
+}
+
 void
 ObjPipeline::init(void)
 {
