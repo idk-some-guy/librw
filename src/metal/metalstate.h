@@ -10,6 +10,8 @@ struct Shader;
 bool32 initState(void);
 void termState(void);
 void beginFrameState(void);
+uint64 getFrameId(void);
+void frameCompleted(uint64 frameId);
 void invalidateEncoderState(void);
 void setRenderState(int32 state, void *pvalue);
 void *getRenderState(int32 state);
@@ -43,6 +45,8 @@ struct StateStats
 	uint32 blockSizeMismatches;
 	uint32 customBlockBinds;
 	uint32 ringSize;
+	uint32 ringEarlyReuses;
+	uint32 framesInFlightAtTerm;
 };
 StateStats getStateStats(void);
 uint32 checkShaderBlockSizes(Shader *shader, uint32 variant);

@@ -229,6 +229,7 @@ struct MetalRaster
 	bool hasAlpha;
 	bool autogenMipmap;
 	int8 numLevels;
+	int8 filledLevels;
 	uint8 filterMode;
 	uint8 addressU;
 	uint8 addressV;
@@ -247,6 +248,7 @@ struct MetalCaps
 extern MetalCaps metalCaps;
 
 void allocateDXT(Raster *raster, int32 dxt, int32 numLevels, bool32 hasAlpha);
+void allocateTexture(Raster *raster, int32 numLevels);
 
 Texture *readNativeTexture(Stream *stream);
 void writeNativeTexture(Texture *tex, Stream *stream);

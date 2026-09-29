@@ -150,6 +150,7 @@ struct SamplerDesc
 	uint32_t addressU, addressV;
 	uint32_t maxAnisotropy;
 	bool hasMips;
+	uint32_t maxLevel;
 };
 
 struct SamplerResolved
@@ -157,6 +158,7 @@ struct SamplerResolved
 	uint32_t minFilter, magFilter, mipFilter;
 	uint32_t addressU, addressV;
 	uint32_t maxAnisotropy;
+	uint32_t maxLevel;
 };
 
 SamplerResolved resolveSampler(const SamplerDesc &d);

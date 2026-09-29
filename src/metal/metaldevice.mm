@@ -169,6 +169,7 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 {
 	id<MTLCommandBuffer> cb = ctx->commandBuffer;
 	dispatch_semaphore_t sem = ctx->frameSemaphore;
+	uint64 frameId = getFrameId();
 
 	if(!ctx->frameStarted)
 		return;
@@ -180,11 +181,14 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 		[cb addCompletedHandler:^(id<MTLCommandBuffer> done){
 			if(done.error)
 				fprintf(stderr, "rw::metal: command buffer error: %s\n", done.error.localizedDescription.UTF8String);
+			frameCompleted(frameId);
 			dispatch_semaphore_signal(sem);
 		}];
 		[cb commit];
-	}else
+	}else{
+		frameCompleted(frameId);
 		dispatch_semaphore_signal(sem);
+	}
 	ctx->commandBuffer = nil;
 	ctx->frameStarted = false;
 }
@@ -340,6 +344,19 @@ forgetRasterTarget(Raster *raster)
 		currentFrameBuffer = nil;
 	passManager.forget(raster);
 	runPassActions();
+}
+
+void
+clearNewRasterTarget(Raster *raster)
+{
+	PassTarget t = { raster, nil };
+	PassClear c = PassClear();
+
+	c.flags = PASSCLEAR_COLOR;
+	passManager.clearOffscreen(t, c);
+	@autoreleasepool {
+		runPassActions();
+	}
 }
 
 FrameStats
@@ -683,17 +700,29 @@ startGLFW(void)
 	return 1;
 }
 
+static void
+finishGPUWork(void)
+{
+	MetalContext *ctx = getContext();
+
+	if(ctx == nil)
+		return;
+	@autoreleasepool {
+		passManager.flush();
+		runPassActions();
+		finishFrame(ctx, nil);
+		waitForFrames(ctx);
+	}
+}
+
 static int
 stopGLFW(void)
 {
 	MetalContext *ctx = getContext();
 
+	finishGPUWork();
 	@autoreleasepool {
 		if(ctx){
-			passManager.flush();
-			runPassActions();
-			finishFrame(ctx, nil);
-			waitForFrames(ctx);
 			ctx->encoder = nil;
 			ctx->commandBuffer = nil;
 			ctx->layer = nil;
@@ -719,6 +748,7 @@ initMetal(void)
 static int
 termMetal(void)
 {
+	finishGPUWork();
 	closeIm3D();
 	closeIm2D();
 	termRaster();

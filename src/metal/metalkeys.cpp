@@ -223,6 +223,7 @@ resolveSampler(const SamplerDesc &d)
 	r.addressU = addressMode(d.addressU);
 	r.addressV = addressMode(d.addressV);
 	r.maxAnisotropy = d.maxAnisotropy < 1 ? 1 : d.maxAnisotropy > 16 ? 16 : d.maxAnisotropy;
+	r.maxLevel = !d.hasMips ? 0 : d.maxLevel > 15 ? 15 : d.maxLevel;
 	return r;
 }
 
@@ -239,6 +240,7 @@ samplerKey(const SamplerDesc &d)
 	PUT(r.addressU, 3);
 	PUT(r.addressV, 3);
 	PUT(r.maxAnisotropy-1, 4);
+	PUT(r.maxLevel, 4);
 #undef PUT
 	return (uint32_t)key;
 }

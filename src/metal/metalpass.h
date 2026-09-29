@@ -68,6 +68,7 @@ struct PassManager
 
 	void beginUpdate(const PassTarget &target);
 	void clear(const PassTarget &target, const PassClear &clear);
+	void clearOffscreen(const PassTarget &target, const PassClear &clear);
 	bool draw(void);
 	void flush(void);
 	void show(void);

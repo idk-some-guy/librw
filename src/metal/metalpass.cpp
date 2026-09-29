@@ -147,6 +147,14 @@ PassManager::clear(const PassTarget &target, const PassClear &clear)
 	this->pending.flags |= clear.flags;
 }
 
+void
+PassManager::clearOffscreen(const PassTarget &target, const PassClear &clear)
+{
+	PassTarget current = this->current;
+	this->clear(target, clear);
+	this->current = current;
+}
+
 bool
 PassManager::draw(void)
 {

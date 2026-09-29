@@ -569,6 +569,22 @@ unswizzle_to_metal(uint8 *dst, uint8 *src, int32 w, int32 h, int32 bpp)
 }
 
 static rw::Raster*
+create_metal_texture(int32 width, int32 height, int32 depth, int32 format, int32 numLevels)
+{
+	using namespace rw;
+
+	Raster *newras = Raster::create(width, height, depth, format | Raster::DONTALLOCATE);
+	if(newras == nil)
+		return nil;
+	metal::allocateTexture(newras, numLevels);
+	if(newras->flags & Raster::DONTALLOCATE){
+		newras->destroy();
+		return nil;
+	}
+	return newras;
+}
+
+static rw::Raster*
 plain_to_metal(rw::Raster *ras, bool32 swizzled)
 {
 	using namespace rw;
@@ -588,7 +604,8 @@ plain_to_metal(rw::Raster *ras, bool32 swizzled)
 		return nil;
 	}
 
-	Raster *newras = Raster::create(ras->width, ras->height, ras->depth, ras->format | Raster::TEXTURE);
+	Raster *newras = create_metal_texture(ras->width, ras->height, ras->depth, ras->format | Raster::TEXTURE,
+		ras->getNumLevels());
 	if(newras == nil)
 		return nil;
 	int32 numLevels = ras->getNumLevels();
@@ -733,7 +750,13 @@ Raster::convertTexToCurrentPlatform(rw::Raster *ras)
 	img->unpalettize();
 	Raster::imageFindRasterFormat(img, Raster::TEXTURE, &width, &height, &depth, &format);
 	format |= ras->format & (Raster::MIPMAP | Raster::AUTOMIPMAP);
-	Raster *newras = Raster::create(width, height, depth, format);
+	Raster *newras;
+#ifdef RW_METAL
+	if(rw::platform == PLATFORM_METAL)
+		newras = create_metal_texture(width, height, depth, format, ras->getNumLevels());
+	else
+#endif
+	newras = Raster::create(width, height, depth, format);
 	if(newras == nil){
 		img->destroy();
 		return ras;
@@ -752,6 +775,7 @@ Raster::convertTexToCurrentPlatform(rw::Raster *ras)
 		img->unpalettize();
 		newras->lock(i, Raster::LOCKWRITE|Raster::LOCKNOFETCH);
 		newras->setFromImage(img);
+		img->destroy();
 		newras->unlock(i);
 		ras->unlock(i);
 	}

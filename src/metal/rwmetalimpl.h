@@ -61,6 +61,7 @@ struct FrameStats
 FrameStats getFrameStats(void);
 
 void forgetRasterTarget(Raster *raster);
+void clearNewRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);
 bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 bool32 writeRasterPixels(Raster *raster, const uint8 *src);

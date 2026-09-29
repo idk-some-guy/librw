@@ -1,6 +1,7 @@
 #ifdef RW_METAL
 #include <unordered_map>
 #include <vector>
+#include <atomic>
 #include "metalobjc.h"
 #include "rwmetalshader.h"
 #include "metalstate.h"
@@ -221,6 +222,9 @@ struct Ring
 	std::vector<id<MTLBuffer>> retired[MAXFRAMESINFLIGHT];
 	uint32 frame;
 	uint32 used;
+	uint64 frameId;
+	uint64 slotFrame[MAXFRAMESINFLIGHT];
+	std::atomic<uint64> slotDone[MAXFRAMESINFLIGHT];
 };
 static Ring ring;
 
@@ -228,11 +232,29 @@ void
 beginFrameState(void)
 {
 	int i;
-	ring.frame = (ring.frame+1) % MAXFRAMESINFLIGHT;
+	ring.frameId++;
+	ring.frame = ring.frameId % MAXFRAMESINFLIGHT;
+	if(ring.slotDone[ring.frame].load() != ring.slotFrame[ring.frame]){
+		stats.ringEarlyReuses++;
+		assert(0 && "ring slot reused before its frame completed");
+	}
+	ring.slotFrame[ring.frame] = ring.frameId;
 	ring.used = 0;
 	ring.retired[ring.frame].clear();
 	for(i = 0; i < NUMBLOCKS; i++)
 		blockDirty[i] = true;
+}
+
+uint64
+getFrameId(void)
+{
+	return ring.frameId;
+}
+
+void
+frameCompleted(uint64 frameId)
+{
+	ring.slotDone[frameId % MAXFRAMESINFLIGHT].store(frameId);
 }
 
 bool32
@@ -559,6 +581,7 @@ getSampler(const SamplerDesc &d)
 	desc.sAddressMode = (MTLSamplerAddressMode)r.addressU;
 	desc.tAddressMode = (MTLSamplerAddressMode)r.addressV;
 	desc.maxAnisotropy = r.maxAnisotropy;
+	desc.lodMaxClamp = r.maxLevel;
 	desc.borderColor = MTLSamplerBorderColorTransparentBlack;
 	smp = [ctx->device newSamplerStateWithDescriptor:desc];
 	samplerCache[key] = smp;
@@ -1229,6 +1252,7 @@ bindTextures(id<MTLRenderCommandEncoder> e)
 			sd.addressV = natras->addressV;
 			sd.maxAnisotropy = natras->maxAnisotropy;
 			sd.hasMips = natras->autogenMipmap || natras->numLevels > 1;
+			sd.maxLevel = natras->filledLevels > 1 ? natras->filledLevels-1 : 0;
 		}else{
 			tex = (__bridge id<MTLTexture>)getWhiteTexture();
 			sd.filter = Texture::NEAREST;
@@ -1236,6 +1260,7 @@ bindTextures(id<MTLRenderCommandEncoder> e)
 			sd.addressV = Texture::WRAP;
 			sd.maxAnisotropy = 1;
 			sd.hasMips = false;
+			sd.maxLevel = 0;
 		}
 		smp = getSampler(sd);
 		if(enc.textures[i] != tex){
@@ -1458,7 +1483,10 @@ termState(void)
 	im2dVertexLayout = 0;
 	for(i = 0; i < NUMBLOCKS; i++)
 		blockBuffer[i] = nil;
+	stats.framesInFlightAtTerm = 0;
 	for(i = 0; i < MAXFRAMESINFLIGHT; i++){
+		if(ring.slotDone[i].load() != ring.slotFrame[i])
+			stats.framesInFlightAtTerm++;
 		ring.buffers[i] = nil;
 		ring.retired[i].clear();
 	}

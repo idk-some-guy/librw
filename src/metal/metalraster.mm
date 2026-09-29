@@ -139,10 +139,11 @@ generateMipmaps(id<MTLTexture> tex)
 }
 
 static Raster*
-rasterCreateTexture(Raster *raster)
+createTextureLevels(Raster *raster, int32 numLevels)
 {
 	MetalRaster *natras = GETMETALRASTEREXT(raster);
 	TexFormat fmt;
+	int32 texLevels;
 
 	if(raster->format & (Raster::PAL4 | Raster::PAL8)){
 		RWERROR((ERR_NOTEXTURE));
@@ -159,15 +160,36 @@ rasterCreateTexture(Raster *raster)
 	raster->depth = fmt.depth;
 	raster->stride = raster->width*natras->bpp;
 
-	natras->numLevels = numLockLevels(raster->format, raster->width, raster->height);
 	natras->autogenMipmap = (raster->format & (Raster::MIPMAP|Raster::AUTOMIPMAP)) == (Raster::MIPMAP|Raster::AUTOMIPMAP);
+	texLevels = numTexLevels(raster->format, raster->width, raster->height);
+	if(!natras->autogenMipmap && numLevels < texLevels)
+		texLevels = numLevels < 1 ? 1 : numLevels;
+	natras->numLevels = numLockLevels(raster->format, raster->width, raster->height);
+	if(natras->numLevels > texLevels)
+		natras->numLevels = texLevels;
 	initSampler(natras);
 
-	if(!createSampledTexture(raster, fmt, numTexLevels(raster->format, raster->width, raster->height))){
+	if(!createSampledTexture(raster, fmt, texLevels)){
 		RWERROR((ERR_GENERAL, "can't create texture"));
 		return nil;
 	}
 	return raster;
+}
+
+static Raster*
+rasterCreateTexture(Raster *raster)
+{
+	return createTextureLevels(raster, numTexLevels(raster->format, raster->width, raster->height));
+}
+
+void
+allocateTexture(Raster *raster, int32 numLevels)
+{
+	assert(raster->type == Raster::TEXTURE);
+	if(createTextureLevels(raster, numLevels) == nil)
+		return;
+	raster->originalStride = raster->stride;
+	raster->flags &= ~Raster::DONTALLOCATE;
 }
 
 static Raster*
@@ -212,6 +234,7 @@ rasterCreateCameraTexture(Raster *raster)
 				MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleOne)];
 		natras->sampleTexture = (__bridge_retained void*)view;
 	}
+	clearNewRasterTarget(raster);
 	return raster;
 }
 
@@ -299,6 +322,8 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 		waitForMipmaps();
 		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
 			withBytes:px bytesPerRow:levelStride(fmt, raster->width)];
+		if(level == natras->filledLevels)
+			natras->filledLevels = level+1;
 		return;
 	}
 	rgba = px;
@@ -312,8 +337,12 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 		waitForMipmaps();
 		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
 			withBytes:rgba bytesPerRow:raster->width*4];
-		if(level == 0 && natras->autogenMipmap)
+		if(level == natras->filledLevels)
+			natras->filledLevels = level+1;
+		if(level == 0 && natras->autogenMipmap){
 			generateMipmaps(tex);
+			natras->filledLevels = (int8)tex.mipmapLevelCount;
+		}
 	}
 	if(rgba != px)
 		rwFree(rgba);
@@ -361,6 +390,7 @@ rasterCreate(Raster *raster)
 	natras->isCompressed = 0;
 	natras->hasAlpha = 0;
 	natras->numLevels = 1;
+	natras->filledLevels = 0;
 
 	Raster *ret = raster;
 
@@ -729,6 +759,7 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->hasAlpha = 0;
 	ras->autogenMipmap = 0;
 	ras->numLevels = 1;
+	ras->filledLevels = 0;
 	initSampler(ras);
 	ras->fboMate = nil;
 	return object;
