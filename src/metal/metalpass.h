@@ -1,3 +1,6 @@
+#ifndef RW_METAL_METALPASS_H
+#define RW_METAL_METALPASS_H
+
 #include <stdint.h>
 
 namespace rw {
@@ -80,3 +83,5 @@ private:
 
 }
 }
+
+#endif

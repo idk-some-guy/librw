@@ -1,3 +1,4 @@
+#include <assert.h>
 #include "metalpass.h"
 
 namespace rw {
@@ -15,6 +16,12 @@ static bool
 usesRaster(const PassTarget &t, const void *raster)
 {
 	return t.color == raster || t.depth == raster;
+}
+
+static bool
+sharesRaster(const PassTarget &a, const PassTarget &b)
+{
+	return (a.color && usesRaster(b, a.color)) || (a.depth && usesRaster(b, a.depth));
 }
 
 PassManager::PassManager(void)
@@ -37,6 +44,7 @@ PassManager::reset(void)
 void
 PassManager::push(PassActionType type, const PassTarget &target, const PassClear *clear)
 {
+	assert(this->numActions < MAXACTIONS);
 	PassAction *a = &this->actions[this->numActions++];
 	a->type = type;
 	a->target = target;
@@ -56,6 +64,9 @@ PassManager::end(void)
 void
 PassManager::openOn(const PassTarget &target)
 {
+	if(this->hasPending && !samePassTarget(this->pendingTarget, target) &&
+	   sharesRaster(this->pendingTarget, target))
+		resolvePending();
 	if(this->open && samePassTarget(this->openTarget, target))
 		return;
 	end();
@@ -93,6 +104,8 @@ PassManager::clear(const PassTarget &target, const PassClear &clear)
 	if(!hasTarget(target))
 		return;
 	this->current = target;
+	if(clear.flags == 0)
+		return;
 
 	if(clear.subRect || (this->open && samePassTarget(this->openTarget, target))){
 		openOn(target);

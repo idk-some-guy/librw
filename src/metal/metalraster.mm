@@ -120,7 +120,7 @@ rasterLock(Raster *raster, int32 level, int32 lockMode)
 
 	switch(raster->type){
 	case Raster::CAMERA:
-		if(level != 0 || (lockMode & Raster::LOCKWRITE) || natras->texture == nil){
+		if(level != 0 || natras->texture == nil){
 			RWERROR((ERR_INVRASTER));
 			return nil;
 		}
