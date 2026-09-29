@@ -15,6 +15,7 @@
 //#include "d3d/rwd3d8.h"
 //#include "d3d/rwd3d9.h"
 #include "gl/rwgl3.h"
+#include "metal/rwmetal.h"
 
 #define PLUGIN_ID 0
 
@@ -496,6 +497,182 @@ xbox_to_gl3(rw::Raster *ras)
 #endif
 }
 
+#ifdef RW_METAL
+static rw::Raster*
+dxt_to_metal(rw::Raster *ras, int dxt, bool32 hasAlpha)
+{
+	using namespace rw;
+
+	if(dxt == 0 || !metal::metalCaps.bcSupported)
+		return nil;
+
+	Raster *newras = Raster::create(ras->width, ras->height, ras->depth,
+		                        ras->format | Raster::TEXTURE | Raster::DONTALLOCATE);
+	if(newras == nil)
+		return nil;
+	metal::allocateDXT(newras, dxt, ras->getNumLevels(), hasAlpha);
+	if(newras->flags & Raster::DONTALLOCATE){
+		newras->destroy();
+		return nil;
+	}
+	int numLevels = newras->getNumLevels();
+	for(int i = 0; i < numLevels; i++){
+		uint8 *srcpx = ras->lock(i, Raster::LOCKREAD);
+		uint8 *dstpx = newras->lock(i, Raster::LOCKWRITE | Raster::LOCKNOFETCH);
+		if(srcpx && dstpx)
+			memcpy(dstpx, srcpx, ((newras->width+3)/4) * ((newras->height+3)/4) * (dxt == 1 ? 8 : 16));
+		if(srcpx)
+			ras->unlock(i);
+		if(dstpx)
+			newras->unlock(i);
+		if(srcpx == nil || dstpx == nil){
+			newras->destroy();
+			return nil;
+		}
+	}
+
+	return newras;
+}
+
+static void
+unswizzle_to_metal(uint8 *dst, uint8 *src, int32 w, int32 h, int32 bpp)
+{
+	uint32 maskU = 0;
+	uint32 maskV = 0;
+	int32 i = 1;
+	int32 j = 1;
+	int32 c;
+	do{
+		c = 0;
+		if(i < w){
+			maskU |= j;
+			j <<= 1;
+			c = j;
+		}
+		if(i < h){
+			maskV |= j;
+			j <<= 1;
+			c = j;
+		}
+		i <<= 1;
+	}while(c);
+	int32 x, y, u, v;
+	v = 0;
+	for(y = 0; y < h; y++){
+		u = 0;
+		for(x = 0; x < w; x++){
+			memcpy(&dst[(y*w + x)*bpp], &src[(u|v)*bpp], bpp);
+			u = (u - maskU) & maskU;
+		}
+		v = (v - maskV) & maskV;
+	}
+}
+
+static rw::Raster*
+plain_to_metal(rw::Raster *ras, bool32 swizzled)
+{
+	using namespace rw;
+
+	if(ras->format & (Raster::PAL4 | Raster::PAL8))
+		return nil;
+	int32 bpp;
+	int32 color = ras->format & 0xF00;
+	switch(color){
+	case Raster::C8888:
+	case Raster::C888: bpp = 4; break;
+	case Raster::C565:
+	case Raster::C4444:
+	case Raster::C1555: bpp = 2; break;
+	case Raster::LUM8: bpp = 1; break;
+	default:
+		return nil;
+	}
+
+	Raster *newras = Raster::create(ras->width, ras->height, ras->depth, ras->format | Raster::TEXTURE);
+	if(newras == nil)
+		return nil;
+	int32 numLevels = ras->getNumLevels();
+	if(newras->getNumLevels() < numLevels)
+		numLevels = newras->getNumLevels();
+	for(int32 i = 0; i < numLevels; i++){
+		uint8 *srcpx = ras->lock(i, Raster::LOCKREAD);
+		uint8 *dstpx = newras->lock(i, Raster::LOCKWRITE | Raster::LOCKNOFETCH);
+		int32 w = ras->width;
+		int32 h = ras->height;
+		uint8 *tmp = nil;
+		bool32 ok = srcpx && dstpx && ras->stride == w*bpp &&
+			newras->width == w && newras->height == h;
+		if(ok && swizzled){
+			tmp = (uint8*)rwMalloc(w*h*bpp, MEMDUR_FUNCTION | ID_DRIVER);
+			unswizzle_to_metal(tmp, srcpx, w, h, bpp);
+		}
+		if(ok){
+			uint8 *in = tmp ? tmp : srcpx;
+			uint8 *out = dstpx;
+			int32 n = w*h;
+			switch(color){
+			case Raster::C8888:
+				for(int32 j = 0; j < n; j++, in += 4, out += 4)
+					conv_RGBA8888_from_BGRA8888(out, in);
+				break;
+			case Raster::C888:
+				for(int32 j = 0; j < n; j++, in += 4, out += 3)
+					conv_RGB888_from_BGR888(out, in);
+				break;
+			default:
+				memcpy(out, in, n*bpp);
+				break;
+			}
+		}
+		if(tmp)
+			rwFree(tmp);
+		if(srcpx)
+			ras->unlock(i);
+		if(dstpx)
+			newras->unlock(i);
+		if(!ok){
+			newras->destroy();
+			return nil;
+		}
+	}
+	return newras;
+}
+
+static rw::Raster*
+d3d_to_metal(rw::Raster *ras)
+{
+	using namespace rw;
+
+	d3d::D3dRaster *d3dras = GETD3DRASTEREXT(ras);
+	if(!d3dras->customFormat)
+		return plain_to_metal(ras, 0);
+	int dxt = 0;
+	switch(d3dras->format){
+	case d3d::D3DFMT_DXT1: dxt = 1; break;
+	case d3d::D3DFMT_DXT3: dxt = 3; break;
+	case d3d::D3DFMT_DXT5: dxt = 5; break;
+	}
+	return dxt_to_metal(ras, dxt, d3dras->hasAlpha);
+}
+
+static rw::Raster*
+xbox_to_metal(rw::Raster *ras)
+{
+	using namespace rw;
+
+	xbox::XboxRaster *xboxras = GETXBOXRASTEREXT(ras);
+	if(!xboxras->customFormat)
+		return plain_to_metal(ras, 1);
+	int dxt = 0;
+	switch(xboxras->format){
+	case xbox::D3DFMT_DXT1: dxt = 1; break;
+	case xbox::D3DFMT_DXT3: dxt = 3; break;
+	case xbox::D3DFMT_DXT5: dxt = 5; break;
+	}
+	return dxt_to_metal(ras, dxt, xboxras->hasAlpha);
+}
+#endif
+
 rw::Raster*
 Raster::convertTexToCurrentPlatform(rw::Raster *ras)
 {
@@ -528,21 +705,44 @@ Raster::convertTexToCurrentPlatform(rw::Raster *ras)
 			return newras;
 		}
 	}
+#ifdef RW_METAL
+	if(rw::platform == PLATFORM_METAL){
+		Raster *newras = nil;
+		if(ras->platform == PLATFORM_D3D8 || ras->platform == PLATFORM_D3D9)
+			newras = d3d_to_metal(ras);
+		else if(ras->platform == PLATFORM_XBOX)
+			newras = xbox_to_metal(ras);
+		if(newras){
+			ras->destroy();
+			return newras;
+		}
+	}
+#endif
 
 	// fall back to going through Image directly
 	int32 width, height, depth, format;
 	Image *img = ras->toImage();
+	if(img == nil)
+		return ras;
 	// TODO: maybe don't *always* do this?
 	img->unpalettize();
 	Raster::imageFindRasterFormat(img, Raster::TEXTURE, &width, &height, &depth, &format);
 	format |= ras->format & (Raster::MIPMAP | Raster::AUTOMIPMAP);
 	Raster *newras = Raster::create(width, height, depth, format);
+	if(newras == nil){
+		img->destroy();
+		return ras;
+	}
 	newras->setFromImage(img);
 	img->destroy();
 	int numLevels = ras->getNumLevels();
 	for(int i = 1; i < numLevels; i++){
 		ras->lock(i, Raster::LOCKREAD);
 		img = ras->toImage();
+		if(img == nil){
+			ras->unlock(i);
+			continue;
+		}
 		// TODO: maybe don't *always* do this?
 		img->unpalettize();
 		newras->lock(i, Raster::LOCKWRITE|Raster::LOCKNOFETCH);

@@ -19,10 +19,6 @@
 namespace rw {
 namespace metal {
 
-// M1 window, device, pass manager, present
-
-// M2 rasters, textures, state, shaders, im2d
-
 Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
@@ -39,8 +35,6 @@ void im2DRenderPrimitive(PrimitiveType primType,
    void *vertices, int32 numVertices) { }
 void im2DRenderIndexedPrimitive(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices) { }
-
-// M3 instancing, default pipeline, lighting, im3d, matfx fallback
 
 Shader *defaultShader, *defaultShader_noAT;
 Shader *defaultShader_fullLight, *defaultShader_fullLight_noAT;
@@ -92,19 +86,13 @@ ObjPipeline *makeDefaultPipeline(void) { return ObjPipeline::create(); }
 void initMatFX(void) { }
 ObjPipeline *makeMatFXPipeline(void) { return ObjPipeline::create(); }
 
-// M4 skinning
-
 void initSkin(void) { }
 ObjPipeline *makeSkinPipeline(void) { return ObjPipeline::create(); }
 void skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance) { }
 void skinRenderCB(Atomic *atomic, InstanceDataHeader *header) { }
 void uploadSkinMatrices(Atomic *atomic) { }
 
-// M5 matfx environment map
-
 void matfxRenderCB(Atomic *atomic, InstanceDataHeader *header) { }
-
-// M7 post effects and droplets
 
 void im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices) { }
