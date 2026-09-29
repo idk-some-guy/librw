@@ -16,6 +16,7 @@ using namespace metal;
 #define BUFFER_STATE	4
 #define BUFFER_SKIN	5
 #define BUFFER_CUSTOM	6
+#define BUFFER_LIGHTS	7
 
 constant bool alphaTest [[function_constant(0)]];
 constant bool directionals [[function_constant(1)]];
@@ -46,6 +47,10 @@ struct Scene
 struct Object
 {
 	float4x4 world;
+};
+
+struct Lights
+{
 	float4 ambLight;
 	float4 lightParams[MAX_LIGHTS];
 	float4 lightPosition[MAX_LIGHTS];
@@ -81,34 +86,34 @@ struct FragmentIn
 };
 
 static float3
-DoDynamicLight(float3 V, float3 N, constant Object &object)
+DoDynamicLight(float3 V, float3 N, constant Lights &lights)
 {
 	float3 color = float3(0.0, 0.0, 0.0);
 	for(int i = 0; i < MAX_LIGHTS; i++){
-		if(object.lightParams[i].x == 0.0)
+		if(lights.lightParams[i].x == 0.0)
 			break;
-		if(directionals && object.lightParams[i].x == 1.0){
-			float l = max(0.0, dot(N, -object.lightDirection[i].xyz));
-			color += l*object.lightColor[i].rgb;
-		}else if(pointLights && object.lightParams[i].x == 2.0){
-			float3 dir = V - object.lightPosition[i].xyz;
+		if(directionals && lights.lightParams[i].x == 1.0){
+			float l = max(0.0, dot(N, -lights.lightDirection[i].xyz));
+			color += l*lights.lightColor[i].rgb;
+		}else if(pointLights && lights.lightParams[i].x == 2.0){
+			float3 dir = V - lights.lightPosition[i].xyz;
 			float dist = length(dir);
-			float atten = max(0.0, (1.0 - dist/object.lightParams[i].y));
+			float atten = max(0.0, (1.0 - dist/lights.lightParams[i].y));
 			float l = max(0.0, dot(N, -normalize(dir)));
-			color += l*object.lightColor[i].rgb*atten;
-		}else if(spotLights && object.lightParams[i].x == 3.0){
-			float3 dir = V - object.lightPosition[i].xyz;
+			color += l*lights.lightColor[i].rgb*atten;
+		}else if(spotLights && lights.lightParams[i].x == 3.0){
+			float3 dir = V - lights.lightPosition[i].xyz;
 			float dist = length(dir);
-			float atten = max(0.0, (1.0 - dist/object.lightParams[i].y));
+			float atten = max(0.0, (1.0 - dist/lights.lightParams[i].y));
 			dir /= dist;
 			float l = max(0.0, dot(N, -dir));
-			float pcos = dot(dir, object.lightDirection[i].xyz);
-			float ccos = -object.lightParams[i].z;
+			float pcos = dot(dir, lights.lightDirection[i].xyz);
+			float ccos = -lights.lightParams[i].z;
 			float falloff = (pcos-ccos)/(1.0-ccos);
 			if(falloff < 0.0)
 				l = 0.0;
-			l *= max(falloff, object.lightParams[i].w);
-			return l*object.lightColor[i].rgb*atten;
+			l *= max(falloff, lights.lightParams[i].w);
+			return l*lights.lightColor[i].rgb*atten;
 		}
 	}
 	return color;

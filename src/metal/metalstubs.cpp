@@ -23,9 +23,6 @@ Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
 
-Shader *defaultShader, *defaultShader_noAT;
-Shader *defaultShader_fullLight, *defaultShader_fullLight_noAT;
-
 RGBA im3dMaterialColor;
 SurfaceProperties im3dSurfaceProps;
 

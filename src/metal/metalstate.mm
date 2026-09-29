@@ -32,6 +32,7 @@ static_assert(VARIANT_DIRECTIONALS == LIGHTBIT_DIRECT << 1 && VARIANT_POINTLIGHT
 
 #include "shaders/im2d_metal.inc"
 #include "shaders/simple_metal.inc"
+#include "shaders/default_metal.inc"
 
 static int32   alphaFunc;
 static float32 alphaRef;
@@ -62,6 +63,10 @@ struct UniformScene
 struct UniformObject
 {
 	RawMatrix    world;
+};
+
+struct UniformLights
+{
 	RGBAf        ambLight;
 	struct {
 		float type;
@@ -83,6 +88,7 @@ struct UniformMaterial
 static UniformState uniformState;
 static UniformScene uniformScene;
 static UniformObject uniformObject;
+static UniformLights uniformLights;
 static UniformMaterial uniformMaterial;
 static uint8 customConstants[MAXCUSTOMCONSTANTS];
 
@@ -90,6 +96,7 @@ enum
 {
 	BLOCK_SCENE,
 	BLOCK_OBJECT,
+	BLOCK_LIGHTS,
 	BLOCK_MATERIAL,
 	BLOCK_STATE,
 	BLOCK_CUSTOM,
@@ -106,6 +113,7 @@ struct BlockInfo
 static BlockInfo blockInfo[NUMBLOCKS] = {
 	{ BUFFER_SCENE, &uniformScene, sizeof(UniformScene) },
 	{ BUFFER_OBJECT, &uniformObject, sizeof(UniformObject) },
+	{ BUFFER_LIGHTS, &uniformLights, sizeof(UniformLights) },
 	{ BUFFER_MATERIAL, &uniformMaterial, sizeof(UniformMaterial) },
 	{ BUFFER_STATE, &uniformState, sizeof(UniformState) },
 	{ BUFFER_CUSTOM, customConstants, 0 },
@@ -155,6 +163,8 @@ static RwStateCache rwStateCache;
 static int32 numStagesUsed = 1;
 
 Shader *im2dShader;
+Shader *defaultShader, *defaultShader_noAT;
+Shader *defaultShader_fullLight, *defaultShader_fullLight_noAT;
 uint32 im2dVertexLayout;
 static uint32 currentLayout;
 
@@ -1125,8 +1135,13 @@ resetRenderState(void)
 void
 setWorldMatrix(Matrix *mat, const void *object)
 {
-	convMatrix(&uniformObject.world, mat);
-	blockDirty[BLOCK_OBJECT] = true;
+	RawMatrix world;
+
+	convMatrix(&world, mat);
+	if(memcmp(&uniformObject.world, &world, sizeof(world)) != 0){
+		uniformObject.world = world;
+		blockDirty[BLOCK_OBJECT] = true;
+	}
 }
 
 int32
@@ -1135,8 +1150,9 @@ setLights(WorldLights *lightData)
 	int i, n;
 	Light *l;
 	int32 bits;
+	UniformLights lights = uniformLights;
 
-	uniformObject.ambLight = lightData->ambient;
+	lights.ambLight = lightData->ambient;
 
 	bits = 0;
 
@@ -1146,9 +1162,9 @@ setLights(WorldLights *lightData)
 	n = 0;
 	for(i = 0; i < lightData->numDirectionals && i < 8; i++){
 		l = lightData->directionals[i];
-		uniformObject.lightParams[n].type = 1.0f;
-		uniformObject.lightColor[n] = l->color;
-		memcpy(&uniformObject.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
+		lights.lightParams[n].type = 1.0f;
+		lights.lightColor[n] = l->color;
+		memcpy(&lights.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
 		bits |= VSLIGHT_DIRECT;
 		n++;
 		if(n >= MAX_LIGHTS)
@@ -1160,10 +1176,10 @@ setLights(WorldLights *lightData)
 
 		switch(l->getType()){
 		case Light::POINT:
-			uniformObject.lightParams[n].type = 2.0f;
-			uniformObject.lightParams[n].radius = l->radius;
-			uniformObject.lightColor[n] = l->color;
-			memcpy(&uniformObject.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
+			lights.lightParams[n].type = 2.0f;
+			lights.lightParams[n].radius = l->radius;
+			lights.lightColor[n] = l->color;
+			memcpy(&lights.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
 			bits |= VSLIGHT_POINT;
 			n++;
 			if(n >= MAX_LIGHTS)
@@ -1171,16 +1187,16 @@ setLights(WorldLights *lightData)
 			break;
 		case Light::SPOT:
 		case Light::SOFTSPOT:
-			uniformObject.lightParams[n].type = 3.0f;
-			uniformObject.lightParams[n].minusCosAngle = l->minusCosAngle;
-			uniformObject.lightParams[n].radius = l->radius;
-			uniformObject.lightColor[n] = l->color;
-			memcpy(&uniformObject.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
-			memcpy(&uniformObject.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
+			lights.lightParams[n].type = 3.0f;
+			lights.lightParams[n].minusCosAngle = l->minusCosAngle;
+			lights.lightParams[n].radius = l->radius;
+			lights.lightColor[n] = l->color;
+			memcpy(&lights.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
+			memcpy(&lights.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
 			if(l->getType() == Light::SOFTSPOT)
-				uniformObject.lightParams[n].hardSpot = 0.0f;
+				lights.lightParams[n].hardSpot = 0.0f;
 			else
-				uniformObject.lightParams[n].hardSpot = 1.0f;
+				lights.lightParams[n].hardSpot = 1.0f;
 			bits |= VSLIGHT_SPOT;
 			n++;
 			if(n >= MAX_LIGHTS)
@@ -1189,9 +1205,12 @@ setLights(WorldLights *lightData)
 		}
 	}
 
-	uniformObject.lightParams[n].type = 0.0f;
+	lights.lightParams[n].type = 0.0f;
 out:
-	blockDirty[BLOCK_OBJECT] = true;
+	if(memcmp(&uniformLights, &lights, sizeof(lights)) != 0){
+		uniformLights = lights;
+		blockDirty[BLOCK_LIGHTS] = true;
+	}
 	return bits;
 }
 
@@ -1234,12 +1253,17 @@ setFogPlanes(float32 fogStart, float32 fogEnd)
 void
 setMaterial(const RGBA &color, const SurfaceProperties &surfaceprops, float extraSurfProp)
 {
-	convColor(&uniformMaterial.matColor, &color);
-	uniformMaterial.surfProps[0] = surfaceprops.ambient;
-	uniformMaterial.surfProps[1] = surfaceprops.specular;
-	uniformMaterial.surfProps[2] = surfaceprops.diffuse;
-	uniformMaterial.surfProps[3] = extraSurfProp;
-	blockDirty[BLOCK_MATERIAL] = true;
+	UniformMaterial mat;
+
+	convColor(&mat.matColor, &color);
+	mat.surfProps[0] = surfaceprops.ambient;
+	mat.surfProps[1] = surfaceprops.specular;
+	mat.surfProps[2] = surfaceprops.diffuse;
+	mat.surfProps[3] = extraSurfProp;
+	if(memcmp(&uniformMaterial, &mat, sizeof(mat)) != 0){
+		uniformMaterial = mat;
+		blockDirty[BLOCK_MATERIAL] = true;
+	}
 }
 
 void
@@ -1547,6 +1571,7 @@ initState(void)
 {
 	MetalContext *ctx = getContext();
 	const char *im2dSrc[] = { header_metal_src, im2d_metal_src, simple_metal_src, nil };
+	const char *defaultSrc[] = { header_metal_src, default_metal_src, simple_metal_src, nil };
 
 	if(ctx == nil)
 		return 0;
@@ -1555,6 +1580,12 @@ initState(void)
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
 		if(im2dShader == nil)
 			return 0;
+		defaultShader = Shader::create(defaultSrc, "defaultVS", "simpleFS", VARIANT_ALL);
+		if(defaultShader == nil)
+			return 0;
+		defaultShader_noAT = defaultShader;
+		defaultShader_fullLight = defaultShader;
+		defaultShader_fullLight_noAT = defaultShader;
 		im2dVertexLayout = registerVertexLayout(im2dAttribDesc, nelem(im2dAttribDesc));
 		resetRenderState();
 		invalidateEncoderState();
@@ -1572,6 +1603,12 @@ termState(void)
 		im2dShader->destroy();
 		im2dShader = nil;
 	}
+	if(defaultShader)
+		defaultShader->destroy();
+	defaultShader = nil;
+	defaultShader_noAT = nil;
+	defaultShader_fullLight = nil;
+	defaultShader_fullLight_noAT = nil;
 	currentShader = nil;
 	lastPipeKey = 0;
 	lastPipe = nil;
