@@ -1,4 +1,4 @@
-all: header_metal.inc im2d_metal.inc simple_metal.inc default_metal.inc
+all: header_metal.inc im2d_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc
 
 header_metal.inc: header.metal
 	(echo 'const char *header_metal_src =';\
@@ -19,3 +19,8 @@ default_metal.inc: default.metal
 	(echo 'const char *default_metal_src =';\
 	 sed 's/..*/"&\\n"/' default.metal;\
 	 echo ';') >default_metal.inc
+
+im3d_metal.inc: im3d.metal
+	(echo 'const char *im3d_metal_src =';\
+	 sed 's/..*/"&\\n"/' im3d.metal;\
+	 echo ';') >im3d_metal.inc

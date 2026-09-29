@@ -2,6 +2,7 @@
 #include "metalobjc.h"
 #include "rwmetalshader.h"
 #include "metalstate.h"
+#include "metalkeys.h"
 #include "metalfan.h"
 
 #define PLUGIN_ID 0
@@ -182,6 +183,146 @@ im2DRenderIndexedPrimitive(PrimitiveType primType,
 			indexType:MTLIndexTypeUInt16
 			indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
 	}
+}
+
+// Im3D
+
+Shader *im3dShader;
+uint32 im3dVertexLayout;
+static AttribDesc im3dAttribDesc[4] = {
+	{ ATTRIB_POS,        ATTRIBFMT_FLOAT3,      sizeof(Im3DVertex), 0 },
+	{ ATTRIB_NORMAL,     ATTRIBFMT_FLOAT3,      sizeof(Im3DVertex), offsetof(Im3DVertex, normal) },
+	{ ATTRIB_COLOR,      ATTRIBFMT_UCHAR4_NORM, sizeof(Im3DVertex), offsetof(Im3DVertex, r) },
+	{ ATTRIB_TEXCOORDS0, ATTRIBFMT_FLOAT2,      sizeof(Im3DVertex), offsetof(Im3DVertex, u) },
+};
+static Im3DVertex *im3dVertices;
+static int32 im3dNumVertices;
+static int32 im3dMaxVertices;
+static bool im3dLit;
+static int32 im3dBits;
+static uint64 im3dUploadFrame;
+static RingSpace im3dUpload;
+
+void
+openIm3D(void)
+{
+#include "shaders/im3d_metal.inc"
+#include "shaders/simple_metal.inc"
+	const char *src[] = { header_metal_src, im3d_metal_src, simple_metal_src, nil };
+	@autoreleasepool {
+		im3dShader = Shader::create(src, "im3dVS", "simpleFS", VARIANT_ALPHATEST);
+	}
+	assert(im3dShader);
+	im3dVertexLayout = registerVertexLayout(im3dAttribDesc, nelem(im3dAttribDesc));
+}
+
+void
+closeIm3D(void)
+{
+	if(im3dShader)
+		im3dShader->destroy();
+	im3dShader = nil;
+	im3dVertexLayout = 0;
+	rwFree(im3dVertices);
+	im3dVertices = nil;
+	im3dNumVertices = 0;
+	im3dMaxVertices = 0;
+	im3dUploadFrame = 0;
+}
+
+RGBA im3dMaterialColor = { 255, 255, 255, 255 };
+SurfaceProperties im3dSurfaceProps = { 1.0f, 1.0f, 1.0f };
+
+void
+im3DTransform(void *vertices, int32 numVertices, Matrix *world, uint32 flags)
+{
+	if(world == nil){
+		static Matrix ident;
+		ident.setIdentity();
+		world = &ident;
+	}
+	setWorldMatrix(world);
+	im3dLit = (flags & im3d::LIGHTING) != 0;
+	if(im3dLit){
+		setMaterial(im3dMaterialColor, im3dSurfaceProps);
+		im3dBits = lightingCB();
+	}
+
+	if((flags & im3d::VERTEXUV) == 0)
+		SetRenderStatePtr(TEXTURERASTER, nil);
+
+	if(numVertices < 0)
+		numVertices = 0;
+	if(numVertices > im3dMaxVertices){
+		im3dVertices = (Im3DVertex*)rwResize(im3dVertices, numVertices*sizeof(Im3DVertex), MEMDUR_EVENT | ID_DRIVER);
+		im3dMaxVertices = numVertices;
+	}
+	memcpy(im3dVertices, vertices, numVertices*sizeof(Im3DVertex));
+	im3dNumVertices = numVertices;
+	im3dUploadFrame = 0;
+}
+
+static bool32
+im3DBegin(void)
+{
+	uint32 size;
+
+	if(im3dShader == nil || im3dNumVertices == 0 || !beginDraw())
+		return 0;
+	if(im3dLit)
+		defaultShader->use(shaderVariant(im3dBits & VSLIGHT_MASK, getAlphaTest()));
+	else
+		im3dShader->use(getAlphaTest() ? VARIANT_ALPHATEST : 0);
+	setVertexLayout(im3dVertexLayout);
+	if(!flushCache())
+		return 0;
+
+	if(im3dUploadFrame != getFrameId()){
+		size = im3dNumVertices*sizeof(Im3DVertex);
+		if(!ringAlloc(size, 16, &im3dUpload))
+			return 0;
+		memcpy(im3dUpload.cpu, im3dVertices, size);
+		im3dUploadFrame = getFrameId();
+	}
+	bindVertexBuffer(im3dUpload.buffer, im3dUpload.offset);
+	return 1;
+}
+
+void
+im3DRenderPrimitive(PrimitiveType primType)
+{
+	MetalContext *ctx = getContext();
+	int32 count;
+
+	count = drawElementCount(primType, im3dNumVertices);
+	if(ctx == nil || count == 0)
+		return;
+	@autoreleasepool {
+		if(!im3DBegin())
+			return;
+		drawRingPrimitive(ctx, primType, count, im3dNumVertices);
+	}
+}
+
+void
+im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndices)
+{
+	MetalContext *ctx = getContext();
+	int32 count;
+
+	count = drawElementCount(primType, numIndices);
+	if(ctx == nil || count == 0)
+		return;
+	@autoreleasepool {
+		if(!im3DBegin())
+			return;
+		drawRingIndexedPrimitive(ctx, primType, count, indices, numIndices);
+	}
+}
+
+void
+im3DEnd(void)
+{
 }
 
 }

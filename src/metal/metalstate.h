@@ -37,7 +37,9 @@ bool32 ringAlloc(uint32 size, uint32 align, RingSpace *space);
 void bindVertexBuffer(void *buffer, uint32 offset);
 
 extern Shader *im2dShader;
+extern Shader *im3dShader;
 extern uint32 im2dVertexLayout;
+extern uint32 im3dVertexLayout;
 
 struct StateStats
 {
