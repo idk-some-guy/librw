@@ -170,6 +170,12 @@ pipelineKey(const PipelineDesc &d)
 	return key;
 }
 
+uint32_t
+shaderVariant(uint32_t lightBits, bool alphaTest)
+{
+	return (alphaTest ? 1u : 0u) | (lightBits & 7u) << 1;
+}
+
 DepthStencilResolved
 resolveDepthStencil(const DepthStencilDesc &d)
 {

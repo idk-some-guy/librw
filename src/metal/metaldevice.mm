@@ -266,7 +266,6 @@ drawClearQuad(MetalContext *ctx, const PassAction *a)
 	int writeStencil = ctx->encoderHasDepth && (c->flags & PASSCLEAR_STENCIL);
 	int32 x0 = 0, y0 = 0, x1 = ctx->encoderWidth, y1 = ctx->encoderHeight;
 	MTLViewport vp = { 0.0, 0.0, (double)ctx->encoderWidth, (double)ctx->encoderHeight, 0.0, 1.0 };
-	MTLScissorRect full = { 0, 0, ctx->encoderWidth, ctx->encoderHeight };
 	MTLScissorRect r;
 	float depth = c->depth;
 
@@ -297,7 +296,6 @@ drawClearQuad(MetalContext *ctx, const PassAction *a)
 	[enc setFragmentBytes:c->color length:sizeof(c->color) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	invalidateEncoderState();
-	[enc setScissorRect:full];
 	setViewport(ctx, (Raster*)a->target.color);
 }
 
@@ -920,6 +918,7 @@ static void
 clearCamera(Camera *cam, RGBA *col, uint32 mode)
 {
 	Raster *fb = cam->frameBuffer;
+	Raster *prev;
 	PassClear clear = PassClear();
 	RGBAf colf;
 
@@ -947,10 +946,15 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
 		clear.h = fb->height;
 	}
 
+	prev = currentFrameBuffer;
 	currentFrameBuffer = fb;
 	@autoreleasepool {
 		passManager.clear(getCameraTarget(cam), clear);
 		runPassActions();
+		currentFrameBuffer = prev;
+		MetalContext *ctx = getContext();
+		if(ctx && ctx->encoder)
+			setViewport(ctx, (Raster*)passManager.openTarget.color);
 	}
 }
 

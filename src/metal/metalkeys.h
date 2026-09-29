@@ -121,6 +121,10 @@ enum
 
 uint64_t pipelineKey(const PipelineDesc &d);
 
+enum { LIGHTBIT_DIRECT = 1, LIGHTBIT_POINT = 2, LIGHTBIT_SPOT = 4 };
+
+uint32_t shaderVariant(uint32_t lightBits, bool alphaTest);
+
 struct DepthStencilDesc
 {
 	bool hasDepth;

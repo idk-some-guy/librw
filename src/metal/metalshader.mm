@@ -12,6 +12,7 @@ namespace metal {
 #include "shaders/header_metal.inc"
 
 Shader *currentShader;
+uint32 currentVariant;
 static uint32 shaderIds[(1<<PIPEKEY_SHADERBITS)/32] = { 1 };
 
 static uint32
@@ -54,7 +55,7 @@ specialise(id<MTLLibrary> lib, const char *name, uint32 variant)
 }
 
 Shader*
-Shader::create(const char **src, const char *vs, const char *fs, uint32 variant)
+Shader::create(const char **src, const char *vs, const char *fs, uint32 variantMask)
 {
 	MetalContext *ctx = getContext();
 	NSMutableString *all;
@@ -90,8 +91,8 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variant)
 		sh->vertexName = copyString(vs);
 		sh->fragmentName = copyString(fs);
 		sh->shaderId = sid;
-		sh->variant = variant;
-		if(!sh->getFunctions(variant, &vfn, &ffn)){
+		sh->variantMask = variantMask & (NUMVARIANTS-1);
+		if(!sh->getFunctions(0, &vfn, &ffn) || !sh->getFunctions(sh->variantMask, &vfn, &ffn)){
 			sh->destroy();
 			return nil;
 		}
@@ -124,9 +125,10 @@ Shader::getFunctions(uint32 variant, void **vs, void **fs)
 }
 
 void
-Shader::use(void)
+Shader::use(uint32 variant)
 {
 	currentShader = this;
+	currentVariant = variant & this->variantMask;
 }
 
 void

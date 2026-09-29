@@ -27,6 +27,8 @@ static_assert(MTLADDR_REPEAT == (int)MTLSamplerAddressModeRepeat &&
 	MTLADDR_CLAMPTOBORDER == (int)MTLSamplerAddressModeClampToBorderColor, "address modes");
 static_assert(BLENDSRCALPHASAT == 11 && STENCILDEC == 8 && STENCILALWAYS == 8 && CULLFRONT == 3 &&
 	Texture::BORDER == 4 && Texture::LINEARMIPLINEAR == 6 && ALPHALESS == 2, "RenderWare values in metalkeys.cpp");
+static_assert(VARIANT_DIRECTIONALS == LIGHTBIT_DIRECT << 1 && VARIANT_POINTLIGHTS == LIGHTBIT_POINT << 1 &&
+	VARIANT_SPOTLIGHTS == LIGHTBIT_SPOT << 1, "variants");
 
 #include "shaders/im2d_metal.inc"
 #include "shaders/simple_metal.inc"
@@ -97,23 +99,23 @@ enum
 struct BlockInfo
 {
 	uint32 index;
-	bool vertex, fragment;
 	void *data;
 	uint32 size;
 };
 
 static BlockInfo blockInfo[NUMBLOCKS] = {
-	{ BUFFER_SCENE, true, false, &uniformScene, sizeof(UniformScene) },
-	{ BUFFER_OBJECT, true, false, &uniformObject, sizeof(UniformObject) },
-	{ BUFFER_MATERIAL, true, true, &uniformMaterial, sizeof(UniformMaterial) },
-	{ BUFFER_STATE, true, true, &uniformState, sizeof(UniformState) },
-	{ BUFFER_CUSTOM, true, true, customConstants, 0 },
+	{ BUFFER_SCENE, &uniformScene, sizeof(UniformScene) },
+	{ BUFFER_OBJECT, &uniformObject, sizeof(UniformObject) },
+	{ BUFFER_MATERIAL, &uniformMaterial, sizeof(UniformMaterial) },
+	{ BUFFER_STATE, &uniformState, sizeof(UniformState) },
+	{ BUFFER_CUSTOM, customConstants, 0 },
 };
 
 static bool32 stateDirty = 1;
 static bool blockDirty[NUMBLOCKS];
 static id<MTLBuffer> blockBuffer[NUMBLOCKS];
 static uint32 blockOffset[NUMBLOCKS];
+static uint32 blockBufferSize[NUMBLOCKS];
 
 struct RwRasterStateCache {
 	Raster *raster;
@@ -176,9 +178,16 @@ struct PipelineEntry
 {
 	id<MTLRenderPipelineState> state;
 	bool defaultAttribs;
+	uint8 vertexBlocks;
+	uint8 fragmentBlocks;
+	uint32 blockSizes[NUMBLOCKS];
 };
 static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
 static std::unordered_map<uint64_t, id<MTLDepthStencilState>> depthStencilCache;
+static uint64 lastPipeKey;
+static PipelineEntry *lastPipe;
+static uint64 lastDepthKey;
+static id<MTLDepthStencilState> lastDepth;
 static std::unordered_map<uint32_t, id<MTLSamplerState>> samplerCache;
 static bool prewarming;
 static StateStats stats;
@@ -197,6 +206,7 @@ struct EncoderState
 	id<MTLDepthStencilState> depthStencil;
 	int32 cull;
 	bool winding;
+	bool scissorKnown;
 	int32 stencilRef;
 	bool viewportKnown;
 	MTLViewport viewport;
@@ -300,8 +310,9 @@ invalidateEncoderState(void)
 	enc.encoder = ctx ? ctx->encoder : nil;
 	enc.pipeline = nil;
 	enc.depthStencil = nil;
-	enc.cull = MTLCULL_NONE;
+	enc.cull = -1;
 	enc.winding = false;
+	enc.scissorKnown = false;
 	enc.stencilRef = -1;
 	enc.viewportKnown = false;
 	enc.defaultAttribs = false;
@@ -484,13 +495,43 @@ makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults
 	return pd;
 }
 
+static void
+reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
+{
+	uint8 *masks[2] = { &e->vertexBlocks, &e->fragmentBlocks };
+	NSArray<id<MTLBinding>> *stages[2] = { refl.vertexBindings, refl.fragmentBindings };
+	uint32 size;
+	int s, i;
+
+	for(s = 0; s < 2; s++)
+		for(id<MTLBinding> b in stages[s]){
+			if(b.type != MTLBindingTypeBuffer || !b.used)
+				continue;
+			for(i = 0; i < NUMBLOCKS; i++){
+				if(blockInfo[i].index != b.index)
+					continue;
+				*masks[s] |= 1<<i;
+				size = (uint32)((id<MTLBufferBinding>)b).bufferDataSize;
+				if(size > e->blockSizes[i])
+					e->blockSizes[i] = size;
+				if(i == BLOCK_CUSTOM)
+					continue;
+				if(size == blockInfo[i].size)
+					continue;
+				printf("rw::metal: uniform block %d is %u bytes, shader expects %u\n", i,
+					blockInfo[i].size, size);
+				stats.blockSizeMismatches++;
+			}
+		}
+}
+
 static PipelineEntry*
-getPipeline(Shader *shader, const PipelineDesc &d)
+getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 {
 	MetalContext *ctx = getContext();
-	uint64_t key = pipelineKey(d);
 	MTLRenderPipelineDescriptor *pd;
-	PipelineEntry e = { nil, false };
+	MTLRenderPipelineReflection *refl = nil;
+	PipelineEntry e = { nil, false, 0, 0 };
 	NSError *err = nil;
 
 	auto it = pipelineCache.find(key);
@@ -500,8 +541,17 @@ getPipeline(Shader *shader, const PipelineDesc &d)
 	@autoreleasepool {
 		pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
 		if(pd)
-			e.state = [ctx->device newRenderPipelineStateWithDescriptor:pd error:&err];
-		if(e.state == nil){
+			e.state = [ctx->device newRenderPipelineStateWithDescriptor:pd
+				options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+				reflection:&refl error:&err];
+		if(e.state){
+			reflectBlocks(refl, &e);
+			if(e.blockSizes[BLOCK_CUSTOM] > MAXCUSTOMCONSTANTS){
+				e.state = nil;
+				stats.pipelineFailures++;
+				RWERROR((ERR_GENERAL, "custom constant block larger than MAXCUSTOMCONSTANTS"));
+			}
+		}else{
 			stats.pipelineFailures++;
 			RWERROR((ERR_GENERAL, err ? err.localizedDescription.UTF8String : "no shader functions"));
 		}
@@ -516,9 +566,20 @@ getPipeline(Shader *shader, const PipelineDesc &d)
 	return e.state ? &pipelineCache[key] : nil;
 }
 
+bool32
+pipelineCached(uint64 key)
+{
+	auto it = pipelineCache.find(key);
+	return it != pipelineCache.end() && it->second.state != nil;
+}
+
 void
 forgetShaderPipelines(uint32 shaderId)
 {
+	lastPipeKey = 0;
+	lastPipe = nil;
+	lastDepthKey = 0;
+	lastDepth = nil;
 	auto it = pipelineCache.begin();
 	while(it != pipelineCache.end()){
 		if((it->first & ((1<<PIPEKEY_SHADERBITS)-1)) == shaderId)
@@ -529,13 +590,12 @@ forgetShaderPipelines(uint32 shaderId)
 }
 
 static id<MTLDepthStencilState>
-getDepthStencil(const DepthStencilDesc &d, const DepthStencilResolved &r)
+getDepthStencil(uint64 key, const DepthStencilResolved &r)
 {
 	MetalContext *ctx = getContext();
 	MTLDepthStencilDescriptor *desc;
 	MTLStencilDescriptor *stencil;
 	id<MTLDepthStencilState> ds;
-	uint64_t key = depthStencilKey(d);
 
 	auto it = depthStencilCache.find(key);
 	if(it != depthStencilCache.end())
@@ -1188,30 +1248,37 @@ updateStateBlock(void)
 	stateDirty = 0;
 }
 
-static void
-bindBlocks(id<MTLRenderCommandEncoder> e)
+static bool
+bindBlocks(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 {
 	RingSpace space;
 	id<MTLBuffer> buf;
-	uint32 off;
+	uint32 off, size;
 	int i;
 
 	for(i = 0; i < NUMBLOCKS; i++){
-		if(blockInfo[i].size == 0)
+		if(((pipe->vertexBlocks | pipe->fragmentBlocks) & (1<<i)) == 0)
 			continue;
+		size = blockInfo[i].size;
+		if(pipe->blockSizes[i] > size)
+			size = pipe->blockSizes[i];
 		if(i == BLOCK_CUSTOM)
 			stats.customBlockBinds++;
-		if(blockDirty[i] || blockBuffer[i] == nil){
-			if(!ringAlloc(blockInfo[i].size, 256, &space))
-				continue;
+		if(blockDirty[i] || blockBuffer[i] == nil || blockBufferSize[i] < size){
+			if(!ringAlloc(size, 256, &space))
+				return false;
 			memcpy(space.cpu, blockInfo[i].data, blockInfo[i].size);
+			memset(space.cpu + blockInfo[i].size, 0, size - blockInfo[i].size);
 			blockBuffer[i] = (__bridge id<MTLBuffer>)space.buffer;
 			blockOffset[i] = space.offset;
+			blockBufferSize[i] = size;
 			blockDirty[i] = false;
+			stats.blockUploads[blockInfo[i].index]++;
 		}
 		buf = blockBuffer[i];
 		off = blockOffset[i];
-		if(blockInfo[i].vertex){
+		if(pipe->vertexBlocks & (1<<i)){
+			stats.vertexBlockBinds[blockInfo[i].index]++;
 			if(enc.vertexBuffers[i] == buf){
 				if(enc.vertexOffsets[i] != off)
 					[e setVertexBufferOffset:off atIndex:blockInfo[i].index];
@@ -1220,7 +1287,8 @@ bindBlocks(id<MTLRenderCommandEncoder> e)
 			enc.vertexBuffers[i] = buf;
 			enc.vertexOffsets[i] = off;
 		}
-		if(blockInfo[i].fragment){
+		if(pipe->fragmentBlocks & (1<<i)){
+			stats.fragmentBlockBinds[blockInfo[i].index]++;
 			if(enc.fragmentBuffers[i] == buf){
 				if(enc.fragmentOffsets[i] != off)
 					[e setFragmentBufferOffset:off atIndex:blockInfo[i].index];
@@ -1230,6 +1298,7 @@ bindBlocks(id<MTLRenderCommandEncoder> e)
 			enc.fragmentOffsets[i] = off;
 		}
 	}
+	return true;
 }
 
 static void
@@ -1284,6 +1353,7 @@ flushCache(void)
 	DepthStencilDesc dd;
 	DepthStencilResolved dr;
 	id<MTLDepthStencilState> ds;
+	uint64 key;
 	int32 cull;
 
 	if(ctx == nil || ctx->encoder == nil || currentShader == nil)
@@ -1292,7 +1362,7 @@ flushCache(void)
 	e = ctx->encoder;
 
 	pd.shader = currentShader->shaderId;
-	pd.variant = currentShader->variant;
+	pd.variant = currentVariant;
 	pd.vertexLayout = currentLayout;
 	pd.blendEnable = rwStateCache.blendEnable;
 	pd.srcBlend = rwStateCache.srcblend;
@@ -1301,7 +1371,14 @@ flushCache(void)
 	pd.colorFormat = COLORFMT_RGBA8;
 	pd.depthFormat = ctx->encoderHasDepth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
 	pd.sampleCount = 1;
-	pipe = getPipeline(currentShader, pd);
+	key = pipelineKey(pd);
+	if(key == lastPipeKey && lastPipe)
+		pipe = lastPipe;
+	else{
+		pipe = getPipeline(currentShader, pd, key);
+		lastPipeKey = key;
+		lastPipe = pipe;
+	}
 	if(pipe == nil)
 		return 0;
 	if(enc.pipeline != pipe->state){
@@ -1324,7 +1401,14 @@ flushCache(void)
 	dd.stencilMask = rwStateCache.stencilmask;
 	dd.stencilWriteMask = rwStateCache.stencilwritemask;
 	dr = resolveDepthStencil(dd);
-	ds = getDepthStencil(dd, dr);
+	key = depthStencilKey(dd);
+	if(key == lastDepthKey && lastDepth)
+		ds = lastDepth;
+	else{
+		ds = getDepthStencil(key, dr);
+		lastDepthKey = key;
+		lastDepth = ds;
+	}
 	if(enc.depthStencil != ds){
 		[e setDepthStencilState:ds];
 		enc.depthStencil = ds;
@@ -1338,6 +1422,11 @@ flushCache(void)
 		[e setFrontFacingWinding:MTLWindingCounterClockwise];
 		enc.winding = true;
 	}
+	if(!enc.scissorKnown){
+		MTLScissorRect full = { 0, 0, ctx->encoderWidth, ctx->encoderHeight };
+		[e setScissorRect:full];
+		enc.scissorKnown = true;
+	}
 	cull = cullMode(rwStateCache.cullmode);
 	if(enc.cull != cull){
 		[e setCullMode:(MTLCullMode)cull];
@@ -1347,8 +1436,7 @@ flushCache(void)
 
 	bindTextures(e);
 	updateStateBlock();
-	bindBlocks(e);
-	return 1;
+	return bindBlocks(e, pipe);
 }
 
 static uint32
@@ -1356,11 +1444,11 @@ checkBlockSizes(MetalContext *ctx, Shader *shader, const PipelineDesc &d)
 {
 	MTLRenderPipelineDescriptor *pd;
 	MTLRenderPipelineReflection *refl = nil;
-	bool usesDefaults;
-	uint32 matched = 0;
+	PipelineEntry e = { nil, false, 0, 0 };
+	uint32 used = 0;
 	int i;
 
-	pd = makePipelineDescriptor(shader, d, &usesDefaults);
+	pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
 	if(pd == nil)
 		return 0;
 	[ctx->device newRenderPipelineStateWithDescriptor:pd
@@ -1368,23 +1456,11 @@ checkBlockSizes(MetalContext *ctx, Shader *shader, const PipelineDesc &d)
 		reflection:&refl error:nil];
 	if(refl == nil)
 		return 0;
-	for(NSArray<id<MTLBinding>> *bindings in @[refl.vertexBindings, refl.fragmentBindings])
-		for(id<MTLBinding> b in bindings){
-			if(b.type != MTLBindingTypeBuffer)
-				continue;
-			for(i = 0; i < NUMBLOCKS; i++){
-				if(blockInfo[i].index != b.index || i == BLOCK_CUSTOM)
-					continue;
-				if(((id<MTLBufferBinding>)b).bufferDataSize == blockInfo[i].size){
-					matched |= 1<<blockInfo[i].index;
-					continue;
-				}
-				printf("rw::metal: uniform block %d is %u bytes, shader expects %u\n", i,
-					blockInfo[i].size, (uint32)((id<MTLBufferBinding>)b).bufferDataSize);
-				stats.blockSizeMismatches++;
-			}
-		}
-	return matched;
+	reflectBlocks(refl, &e);
+	for(i = 0; i < NUMBLOCKS; i++)
+		if((e.vertexBlocks | e.fragmentBlocks) & (1<<i))
+			used |= 1<<blockInfo[i].index;
+	return used;
 }
 
 uint32
@@ -1392,7 +1468,7 @@ checkShaderBlockSizes(Shader *shader, uint32 variant)
 {
 	MetalContext *ctx = getContext();
 	PipelineDesc d;
-	uint32 matched;
+	uint32 used;
 
 	if(ctx == nil || shader == nil)
 		return 0;
@@ -1407,9 +1483,9 @@ checkShaderBlockSizes(Shader *shader, uint32 variant)
 	d.depthFormat = DEPTHFMT_NONE;
 	d.sampleCount = 1;
 	@autoreleasepool {
-		matched = checkBlockSizes(ctx, shader, d);
+		used = checkBlockSizes(ctx, shader, d);
 	}
-	return matched;
+	return used;
 }
 
 static void
@@ -1420,6 +1496,7 @@ prewarm(MetalContext *ctx)
 		{ BLENDSRCALPHA, BLENDINVSRCALPHA },
 		{ BLENDSRCALPHA, BLENDONE },
 		{ BLENDONE, BLENDONE },
+		{ BLENDZERO, BLENDONE },
 	};
 	PipelineDesc d;
 	int i, depth;
@@ -1428,7 +1505,7 @@ prewarm(MetalContext *ctx)
 	for(depth = 0; depth < 2; depth++)
 		for(i = 0; i < (int)nelem(blends); i++){
 			d.shader = im2dShader->shaderId;
-			d.variant = im2dShader->variant;
+			d.variant = VARIANT_ALPHATEST & im2dShader->variantMask;
 			d.vertexLayout = im2dVertexLayout;
 			d.blendEnable = blends[i][0] != 0;
 			d.srcBlend = blends[i][0];
@@ -1437,9 +1514,7 @@ prewarm(MetalContext *ctx)
 			d.colorFormat = COLORFMT_RGBA8;
 			d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
 			d.sampleCount = 1;
-			getPipeline(im2dShader, d);
-			if(i == 0 && depth == 1)
-				checkBlockSizes(ctx, im2dShader, d);
+			getPipeline(im2dShader, d, pipelineKey(d));
 		}
 	prewarming = false;
 }
@@ -1475,6 +1550,10 @@ termState(void)
 		im2dShader = nil;
 	}
 	currentShader = nil;
+	lastPipeKey = 0;
+	lastPipe = nil;
+	lastDepthKey = 0;
+	lastDepth = nil;
 	pipelineCache.clear();
 	depthStencilCache.clear();
 	samplerCache.clear();
