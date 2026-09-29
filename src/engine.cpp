@@ -17,6 +17,7 @@
 #include "d3d/rwd3d9.h"
 #include "gl/rwgl3.h"
 #include "gl/rwwdgl.h"
+#include "metal/rwmetal.h"
 
 #define PLUGIN_ID 0
 
@@ -236,6 +237,9 @@ Engine::init(MemoryFunctions *memfuncs)
 	d3d9::registerPlatformPlugins();
 	wdgl::registerPlatformPlugins();
 	gl3::registerPlatformPlugins();
+#ifdef RW_METAL
+	metal::registerPlatformPlugins();
+#endif
 
 	Engine::state = Initialized;
 	return 1;
@@ -268,6 +272,8 @@ Engine::open(EngineOpenParams *p)
 	engine->device = ps2::renderdevice;
 #elif RW_GL3
 	engine->device = gl3::renderdevice;
+#elif RW_METAL
+	engine->device = metal::renderdevice;
 #elif RW_D3D9
 	engine->device = d3d::renderdevice;
 #else

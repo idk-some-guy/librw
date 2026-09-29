@@ -18,6 +18,7 @@
 #include "d3d/rwd3d9.h"
 #include "gl/rwwdgl.h"
 #include "gl/rwgl3.h"
+#include "metal/rwmetal.h"
 
 #define PLUGIN_ID 2
 
@@ -251,6 +252,10 @@ destroyNativeData(void *object, int32 offset, int32 size)
 		return d3d9::destroyNativeData(object, offset, size);
 	if(geometry->instData->platform == PLATFORM_GL3)
 		return gl3::destroyNativeData(object, offset, size);
+#ifdef RW_METAL
+	if(geometry->instData->platform == PLATFORM_METAL)
+		return metal::destroyNativeData(object, offset, size);
+#endif
 	return object;
 }
 
