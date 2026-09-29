@@ -2,6 +2,8 @@
 #include <stddef.h>
 
 #include "metalobjc.h"
+#include "../rwanim.h"
+#include "../rwplugins.h"
 #include "metalstate.h"
 #include "metalinst.h"
 
@@ -159,6 +161,10 @@ render(rw::ObjPipeline *rwpipe, Atomic *atomic)
 {
 	ObjPipeline *pipe = (ObjPipeline*)rwpipe;
 	Geometry *geo = atomic->geometry;
+	if(skinGlobals.geoOffset > 0 && Skin::get(geo) != nil){
+		countSkinnedSkipped();
+		return;
+	}
 	pipe->instance(atomic);
 	assert(geo->instData != nil);
 	assert(geo->instData->platform == PLATFORM_METAL);

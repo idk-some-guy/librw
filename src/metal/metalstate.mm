@@ -6,6 +6,7 @@
 #include "rwmetalshader.h"
 #include "metalstate.h"
 #include "metalkeys.h"
+#include "metalinst.h"
 
 #define PLUGIN_ID 0
 
@@ -196,6 +197,7 @@ struct PipelineEntry
 	uint8 vertexBlocks;
 	uint8 fragmentBlocks;
 	uint32 blockSizes[NUMBLOCKS];
+	uint8 textureStages;
 };
 static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
 static std::unordered_map<uint64_t, id<MTLDepthStencilState>> depthStencilCache;
@@ -544,7 +546,12 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 
 	for(s = 0; s < 2; s++)
 		for(id<MTLBinding> b in stages[s]){
-			if(b.type != MTLBindingTypeBuffer || !b.used)
+			if(!b.used)
+				continue;
+			if(s == 1 && (b.type == MTLBindingTypeTexture || b.type == MTLBindingTypeSampler) &&
+			   b.index < MAXNUMSTAGES)
+				e->textureStages |= 1<<b.index;
+			if(b.type != MTLBindingTypeBuffer)
 				continue;
 			for(i = 0; i < NUMBLOCKS; i++){
 				if(blockInfo[i].index != b.index)
@@ -1355,7 +1362,7 @@ bindBlocks(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 }
 
 static void
-bindTextures(id<MTLRenderCommandEncoder> e)
+bindTextures(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 {
 	id<MTLTexture> tex;
 	id<MTLSamplerState> smp;
@@ -1364,7 +1371,10 @@ bindTextures(id<MTLRenderCommandEncoder> e)
 	Raster *raster;
 	int i;
 
-	for(i = 0; i < numStagesUsed; i++){
+	for(i = 0; i < MAXNUMSTAGES; i++){
+		if((pipe->textureStages & 1<<i) == 0)
+			continue;
+		stats.textureStageBinds++;
 		raster = rwStateCache.texstage[i].raster;
 		natras = stageExt(raster);
 		tex = natras ? (__bridge id<MTLTexture>)getRasterSampleTexture(raster) : nil;
@@ -1488,7 +1498,7 @@ flushCache(void)
 	}
 	applyViewport(ctx);
 
-	bindTextures(e);
+	bindTextures(e, pipe);
 	updateStateBlock();
 	return bindBlocks(e, pipe);
 }
@@ -1542,34 +1552,126 @@ checkShaderBlockSizes(Shader *shader, uint32 variant)
 	return used;
 }
 
-static void
-prewarm(MetalContext *ctx)
+enum
 {
-	static const uint32 blends[][2] = {
-		{ 0, 0 },
-		{ BLENDSRCALPHA, BLENDINVSRCALPHA },
-		{ BLENDSRCALPHA, BLENDONE },
-		{ BLENDONE, BLENDONE },
-		{ BLENDZERO, BLENDONE },
-	};
-	PipelineDesc d;
-	int i, depth;
+	BLEND_OFF,
+	BLEND_ALPHA,
+	BLEND_ALPHAADD,
+	BLEND_ADD,
+	BLEND_DEPTHONLY,
+	BLEND_DARKEN,
+	BLEND_REPLACE,
+	NUMPREWARMBLENDS
+};
 
+static const uint32 prewarmBlends[NUMPREWARMBLENDS][2] = {
+	{ 0, 0 },
+	{ BLENDSRCALPHA, BLENDINVSRCALPHA },
+	{ BLENDSRCALPHA, BLENDONE },
+	{ BLENDONE, BLENDONE },
+	{ BLENDZERO, BLENDONE },
+	{ BLENDZERO, BLENDINVSRCCOLOR },
+	{ BLENDONE, BLENDZERO },
+};
+
+struct PrewarmState
+{
+	uint32 variant;
+	int32 blend;
+};
+
+struct WorldLayout
+{
+	bool normals;
+	bool prelit;
+	int32 numTexCoords;
+	const PrewarmState *states;
+	int32 numStates;
+};
+
+static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
+static const PrewarmState buildingStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+	{ VARIANT_ALPHATEST, BLEND_ALPHAADD },
+};
+static const PrewarmState litStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+	{ VARIANT_DIRECTIONALS, BLEND_OFF },
+	{ VARIANT_DIRECTIONALS | VARIANT_ALPHATEST, BLEND_ALPHA },
+};
+static const PrewarmState unlitStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+};
+static const PrewarmState waterStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+	{ VARIANT_ALPHATEST, BLEND_REPLACE },
+};
+static const WorldLayout worldLayouts[] = {
+	{ false, true, 1, buildingStates, nelem(buildingStates) },
+	{ true, false, 1, litStates, nelem(litStates) },
+	{ true, true, 1, waterStates, nelem(waterStates) },
+	{ false, true, 0, unlitStates, nelem(unlitStates) },
+	{ true, false, 0, litStates, nelem(litStates) },
+};
+static const PrewarmState im3dStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+	{ VARIANT_ALPHATEST, BLEND_ADD },
+	{ VARIANT_ALPHATEST, BLEND_DEPTHONLY },
+	{ VARIANT_ALPHATEST, BLEND_DARKEN },
+	{ VARIANT_ALPHATEST, BLEND_REPLACE },
+};
+
+static void
+prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthFormat)
+{
+	PipelineDesc d;
+
+	d.shader = shader->shaderId;
+	d.variant = variant & shader->variantMask;
+	d.vertexLayout = layout;
+	d.blendEnable = blend != BLEND_OFF;
+	d.srcBlend = prewarmBlends[blend][0];
+	d.destBlend = prewarmBlends[blend][1];
+	d.writeMask = MTLColorWriteMaskAll;
+	d.colorFormat = COLORFMT_RGBA8;
+	d.depthFormat = depthFormat;
+	d.sampleCount = 1;
+	getPipeline(shader, d, pipelineKey(d));
+}
+
+void
+prewarmPipelines(void)
+{
+	InstAttrib attribs[MAXINSTATTRIBS];
+	AttribDesc descs[MAXINSTATTRIBS];
+	uint32 layout;
+	int32 i, j, n, depth;
+
+	if(getContext() == nil || im2dShader == nil || defaultShader == nil)
+		return;
 	prewarming = true;
-	for(depth = 0; depth < 2; depth++)
-		for(i = 0; i < (int)nelem(blends); i++){
-			d.shader = im2dShader->shaderId;
-			d.variant = VARIANT_ALPHATEST & im2dShader->variantMask;
-			d.vertexLayout = im2dVertexLayout;
-			d.blendEnable = blends[i][0] != 0;
-			d.srcBlend = blends[i][0];
-			d.destBlend = blends[i][1];
-			d.writeMask = MTLColorWriteMaskAll;
-			d.colorFormat = COLORFMT_RGBA8;
-			d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
-			d.sampleCount = 1;
-			getPipeline(im2dShader, d, pipelineKey(d));
+	@autoreleasepool {
+		for(depth = 0; depth < 2; depth++)
+			for(i = 0; i < (int32)nelem(im2dBlends); i++)
+				prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
+					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE);
+		for(i = 0; i < (int32)nelem(worldLayouts); i++){
+			const WorldLayout &w = worldLayouts[i];
+			n = defaultVertexLayout(w.normals, w.prelit, w.numTexCoords, attribs);
+			memcpy(descs, attribs, n*sizeof(AttribDesc));
+			layout = registerVertexLayout(descs, n);
+			for(j = 0; j < w.numStates; j++)
+				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
 		}
+		if(im3dShader)
+			for(i = 0; i < (int32)nelem(im3dStates); i++)
+				prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8);
+	}
 	prewarming = false;
 }
 
@@ -1596,7 +1698,6 @@ initState(void)
 		im2dVertexLayout = registerVertexLayout(im2dAttribDesc, nelem(im2dAttribDesc));
 		resetRenderState();
 		invalidateEncoderState();
-		prewarm(ctx);
 	}
 	return 1;
 }
@@ -1664,6 +1765,12 @@ getStateStats(void)
 {
 	stats.ringSize = ring.buffers[ring.frame] ? (uint32)ring.buffers[ring.frame].length : 0;
 	return stats;
+}
+
+void
+countSkinnedSkipped(void)
+{
+	stats.skinnedSkipped++;
 }
 
 }

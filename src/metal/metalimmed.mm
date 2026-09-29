@@ -27,16 +27,6 @@ static MTLPrimitiveType primTypeMap[] = {
 	MTLPrimitiveTypePoint
 };
 
-void
-openIm2D(void)
-{
-}
-
-void
-closeIm2D(void)
-{
-}
-
 static Im2DVertex tmpprimbuf[3];
 
 void
@@ -184,8 +174,6 @@ im2DRenderIndexedPrimitive(PrimitiveType primType,
 			indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
 	}
 }
-
-// Im3D
 
 Shader *im3dShader;
 uint32 im3dVertexLayout;

@@ -3,8 +3,6 @@ namespace metal {
 
 #ifdef RW_METAL
 
-void openIm2D(void);
-void closeIm2D(void);
 void im2DRenderLine(void *vertices, int32 numVertices,
   int32 vert1, int32 vert2);
 void im2DRenderTriangle(void *vertices, int32 numVertices,

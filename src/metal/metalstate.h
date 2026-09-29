@@ -8,6 +8,7 @@ struct Shader;
 #define MAXNUMSTAGES 8
 
 bool32 initState(void);
+void prewarmPipelines(void);
 void termState(void);
 void startFrame(void);
 void beginFrameState(void);
@@ -51,11 +52,14 @@ struct StateStats
 	uint32 ringSize;
 	uint32 ringEarlyReuses;
 	uint32 framesInFlightAtTerm;
+	uint32 skinnedSkipped;
+	uint32 textureStageBinds;
 	uint32 blockUploads[8];
 	uint32 vertexBlockBinds[8];
 	uint32 fragmentBlockBinds[8];
 };
 StateStats getStateStats(void);
+void countSkinnedSkipped(void);
 uint32 checkShaderBlockSizes(Shader *shader, uint32 variant);
 bool32 pipelineCached(uint64 key);
 

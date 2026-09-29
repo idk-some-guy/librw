@@ -942,8 +942,8 @@ initMetal(void)
 {
 	if(!initState())
 		return 0;
-	openIm2D();
 	openIm3D();
+	prewarmPipelines();
 	return 1;
 }
 
@@ -952,7 +952,6 @@ termMetal(void)
 {
 	finishGPUWork();
 	closeIm3D();
-	closeIm2D();
 	termRaster();
 	termState();
 	return 1;
