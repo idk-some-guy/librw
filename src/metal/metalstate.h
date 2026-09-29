@@ -54,12 +54,21 @@ struct StateStats
 	uint32 framesInFlightAtTerm;
 	uint32 skinnedSkipped;
 	uint32 textureStageBinds;
+	uint32 draws;
+	uint32 droppedDraws;
+	uint32 ringGrows;
+	uint32 ringPeakBytes;
 	uint32 blockUploads[8];
 	uint32 vertexBlockBinds[8];
 	uint32 fragmentBlockBinds[8];
 };
 StateStats getStateStats(void);
 void countSkinnedSkipped(void);
+void countDroppedDraw(void);
+void logStats(void);
+void logStatsIfDue(void);
+const char *getPrewarmLine(void);
+const char *getStatsLine(void);
 uint32 checkShaderBlockSizes(Shader *shader, uint32 variant);
 bool32 pipelineCached(uint64 key);
 

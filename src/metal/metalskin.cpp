@@ -20,48 +20,42 @@
 namespace rw {
 namespace metal {
 
-static ObjPipeline *matfxPipe;
-
-void
-matfxRenderCB(Atomic *atomic, InstanceDataHeader *header)
-{
-	defaultRenderCB(atomic, header);
-}
+static ObjPipeline *skinPipe;
 
 ObjPipeline*
-makeMatFXPipeline(void)
+makeSkinPipeline(void)
 {
 	ObjPipeline *pipe = ObjPipeline::create();
 	pipe->instanceCB = defaultInstanceCB;
 	pipe->uninstanceCB = defaultUninstanceCB;
-	pipe->renderCB = matfxRenderCB;
-	pipe->pluginID = ID_MATFX;
-	pipe->pluginData = 0;
+	pipe->renderCB = skinRenderCB;
+	pipe->pluginID = ID_SKIN;
+	pipe->pluginData = 1;
 	return pipe;
 }
 
 static void*
-matfxOpen(void *o, int32, int32)
+skinOpen(void *o, int32, int32)
 {
-	if(matfxPipe == nil)
-		matfxPipe = makeMatFXPipeline();
-	matFXGlobals.pipelines[PLATFORM_METAL] = matfxPipe;
+	if(skinPipe == nil)
+		skinPipe = makeSkinPipeline();
+	skinGlobals.pipelines[PLATFORM_METAL] = skinPipe;
 	return o;
 }
 
 // atomics keep this pipeline across an engine restart, so it lives for the process
 static void*
-matfxClose(void *o, int32, int32)
+skinClose(void *o, int32, int32)
 {
-	matFXGlobals.pipelines[PLATFORM_METAL] = nil;
+	skinGlobals.pipelines[PLATFORM_METAL] = nil;
 	return o;
 }
 
 void
-initMatFX(void)
+initSkin(void)
 {
-	Driver::registerPlugin(PLATFORM_METAL, 0, ID_MATFX,
-	                       matfxOpen, matfxClose);
+	Driver::registerPlugin(PLATFORM_METAL, 0, ID_SKIN,
+	                       skinOpen, skinClose);
 }
 
 }

@@ -78,7 +78,7 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variantM
 			return nil;
 		}
 		if(err)
-			printf("rw::metal: shader %s/%s: %s\n", vs, fs, err.localizedDescription.UTF8String);
+			fprintf(stderr, "rw::metal: shader %s/%s: %s\n", vs, fs, err.localizedDescription.UTF8String);
 		sid = allocShaderId();
 		if(sid == 0){
 			RWERROR((ERR_GENERAL, "too many shaders"));

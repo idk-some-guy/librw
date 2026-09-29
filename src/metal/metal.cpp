@@ -18,10 +18,14 @@
 namespace rw {
 namespace metal {
 
+static ObjPipeline *defaultPipe;
+
 static void*
 driverOpen(void *o, int32, int32)
 {
-	engine->driver[PLATFORM_METAL]->defaultPipeline = makeDefaultPipeline();
+	if(defaultPipe == nil)
+		defaultPipe = makeDefaultPipeline();
+	engine->driver[PLATFORM_METAL]->defaultPipeline = defaultPipe;
 	engine->driver[PLATFORM_METAL]->rasterNativeOffset = nativeRasterOffset;
 	engine->driver[PLATFORM_METAL]->rasterCreate       = rasterCreate;
 	engine->driver[PLATFORM_METAL]->rasterLock         = rasterLock;

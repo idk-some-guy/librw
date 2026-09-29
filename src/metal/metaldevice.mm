@@ -693,8 +693,10 @@ beginDraw(void)
 	Raster *raster;
 	int32 i;
 
-	if(ctx == nil)
+	if(ctx == nil){
+		countDroppedDraw();
 		return 0;
+	}
 	for(i = 0; i < MAXNUMSTAGES; i++){
 		raster = getStageRaster(i);
 		if(raster == nil || raster->platform != PLATFORM_METAL)
@@ -704,17 +706,24 @@ beginDraw(void)
 				feedbackReported = true;
 				RWERROR((ERR_GENERAL, "draw samples the raster it renders into"));
 			}
+			countDroppedDraw();
 			return 0;
 		}
 		if(rasterHasPendingWork(raster))
 			resolveRasterTarget(raster);
 	}
 	@autoreleasepool {
-		if(!passManager.draw())
+		if(!passManager.draw()){
+			countDroppedDraw();
 			return 0;
+		}
 		runPassActions();
 	}
-	return ctx->encoder != nil;
+	if(ctx->encoder == nil){
+		countDroppedDraw();
+		return 0;
+	}
+	return 1;
 }
 
 static void
@@ -951,6 +960,7 @@ static int
 termMetal(void)
 {
 	finishGPUWork();
+	logStats();
 	closeIm3D();
 	termRaster();
 	termState();
@@ -1254,6 +1264,8 @@ showRaster(Raster *raster, uint32 flags)
 			}
 		}
 		frameStats.framesShown++;
+		if((frameStats.framesShown & 63) == 0)
+			logStatsIfDue();
 		finishFrame(ctx, drawable);
 		if(drawable == nil)
 			waitWithoutDrawable(ctx);

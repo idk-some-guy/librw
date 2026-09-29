@@ -2,6 +2,7 @@
 #include <unordered_map>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include "metalobjc.h"
 #include "rwmetalshader.h"
 #include "metalstate.h"
@@ -256,6 +257,22 @@ struct Ring
 static Ring ring;
 static std::atomic<uint64> completedFrameId;
 
+struct StatsLog
+{
+	std::chrono::steady_clock::time_point time;
+	uint32 framesAtStart;
+	uint32 frames;
+	uint32 draws;
+	uint32 frameBytes;
+	uint32 ringPeak;
+	RasterStats raster;
+	InstanceStats instance;
+};
+static StatsLog statsLog;
+static void resetStatsLog(void);
+static char prewarmLine[128];
+static char statsLine[512];
+
 void
 beginFrameState(void)
 {
@@ -266,6 +283,11 @@ beginFrameState(void)
 		stats.ringEarlyReuses++;
 		assert(0 && "ring slot reused before its frame completed");
 	}
+	if(statsLog.frameBytes > statsLog.ringPeak)
+		statsLog.ringPeak = statsLog.frameBytes;
+	if(statsLog.frameBytes > stats.ringPeakBytes)
+		stats.ringPeakBytes = statsLog.frameBytes;
+	statsLog.frameBytes = 0;
 	ring.slotFrame[ring.frame] = ring.frameId;
 	ring.used = 0;
 	ring.retired[ring.frame].clear();
@@ -320,12 +342,15 @@ ringAlloc(uint32 size, uint32 align, RingSpace *space)
 			options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
 		if(buf == nil)
 			return 0;
-		if(ring.buffers[ring.frame])
+		if(ring.buffers[ring.frame]){
 			ring.retired[ring.frame].push_back(ring.buffers[ring.frame]);
+			stats.ringGrows++;
+		}
 		ring.buffers[ring.frame] = buf;
 		off = 0;
 	}
 	ring.used = off + size;
+	statsLog.frameBytes += size;
 	space->cpu = (uint8*)buf.contents + off;
 	space->buffer = (__bridge void*)buf;
 	space->offset = off;
@@ -564,7 +589,7 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 					continue;
 				if(size == blockInfo[i].size)
 					continue;
-				printf("rw::metal: uniform block %d is %u bytes, shader expects %u\n", i,
+				fprintf(stderr, "rw::metal: uniform block %d is %u bytes, shader expects %u\n", i,
 					blockInfo[i].size, size);
 				stats.blockSizeMismatches++;
 			}
@@ -606,7 +631,7 @@ getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 		stats.pipelinesAtInit++;
 	else{
 		stats.pipelinesLate++;
-		printf("rw::metal: pipeline %016llx created after init\n", (unsigned long long)key);
+		fprintf(stderr, "rw::metal: pipeline %016llx created after init\n", (unsigned long long)key);
 	}
 	pipelineCache[key] = e;
 	return e.state ? &pipelineCache[key] : nil;
@@ -1420,8 +1445,10 @@ flushCache(void)
 	uint64 key;
 	int32 cull;
 
-	if(ctx == nil || ctx->encoder == nil || currentShader == nil)
+	if(ctx == nil || ctx->encoder == nil || currentShader == nil){
+		stats.droppedDraws++;
 		return 0;
+	}
 	syncEncoder(ctx);
 	e = ctx->encoder;
 
@@ -1443,8 +1470,10 @@ flushCache(void)
 		lastPipeKey = key;
 		lastPipe = pipe;
 	}
-	if(pipe == nil)
+	if(pipe == nil){
+		stats.droppedDraws++;
 		return 0;
+	}
 	if(enc.pipeline != pipe->state){
 		[e setRenderPipelineState:pipe->state];
 		enc.pipeline = pipe->state;
@@ -1500,7 +1529,12 @@ flushCache(void)
 
 	bindTextures(e, pipe);
 	updateStateBlock();
-	return bindBlocks(e, pipe);
+	if(!bindBlocks(e, pipe)){
+		stats.droppedDraws++;
+		return 0;
+	}
+	stats.draws++;
+	return 1;
 }
 
 static uint32
@@ -1654,6 +1688,8 @@ prewarmPipelines(void)
 
 	if(getContext() == nil || im2dShader == nil || defaultShader == nil)
 		return;
+	auto start = std::chrono::steady_clock::now();
+	uint32 before = stats.pipelinesAtInit;
 	prewarming = true;
 	@autoreleasepool {
 		for(depth = 0; depth < 2; depth++)
@@ -1673,6 +1709,9 @@ prewarmPipelines(void)
 				prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8);
 	}
 	prewarming = false;
+	snprintf(prewarmLine, sizeof(prewarmLine), "rw::metal: prewarm %u pipelines in %.1f ms\n", stats.pipelinesAtInit - before,
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+	fprintf(stderr, "%s", prewarmLine);
 }
 
 bool32
@@ -1685,6 +1724,7 @@ initState(void)
 	if(ctx == nil)
 		return 0;
 	memset(&stats, 0, sizeof(stats));
+	resetStatsLog();
 	@autoreleasepool {
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
 		if(im2dShader == nil)
@@ -1771,6 +1811,70 @@ void
 countSkinnedSkipped(void)
 {
 	stats.skinnedSkipped++;
+}
+
+void
+countDroppedDraw(void)
+{
+	stats.droppedDraws++;
+}
+
+static void
+resetStatsLog(void)
+{
+	statsLog.time = std::chrono::steady_clock::now();
+	statsLog.framesAtStart = getFrameStats().framesShown;
+	statsLog.frames = statsLog.framesAtStart;
+	statsLog.draws = 0;
+	statsLog.frameBytes = 0;
+	statsLog.ringPeak = 0;
+	statsLog.raster = getRasterStats();
+	statsLog.instance = getInstanceStats();
+}
+
+void
+logStats(void)
+{
+	uint32 frames = getFrameStats().framesShown;
+	uint32 interval = frames - statsLog.frames;
+	uint32 peak = statsLog.frameBytes > statsLog.ringPeak ? statsLog.frameBytes : statsLog.ringPeak;
+	RasterStats r = getRasterStats();
+	InstanceStats in = getInstanceStats();
+
+	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
+		"late pipelines %u skinned skipped %u strip restarts %u staged uploads %u direct uploads %u "
+		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u\n",
+		frames - statsLog.framesAtStart,
+		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
+		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.skinnedSkipped,
+		in.stripRestartMeshes - statsLog.instance.stripRestartMeshes,
+		r.stagedUploads - statsLog.raster.stagedUploads, r.directUploads - statsLog.raster.directUploads,
+		r.mipmapBlits - statsLog.raster.mipmapBlits, r.gpuWaits - statsLog.raster.gpuWaits,
+		stats.blockSizeMismatches, stats.droppedDraws);
+	fprintf(stderr, "%s", statsLine);
+	statsLog.time = std::chrono::steady_clock::now();
+	statsLog.frames = frames;
+	statsLog.draws = stats.draws;
+	statsLog.ringPeak = 0;
+}
+
+void
+logStatsIfDue(void)
+{
+	if(std::chrono::steady_clock::now() - statsLog.time >= std::chrono::seconds(10))
+		logStats();
+}
+
+const char*
+getPrewarmLine(void)
+{
+	return prewarmLine;
+}
+
+const char*
+getStatsLine(void)
+{
+	return statsLine;
 }
 
 }
