@@ -423,6 +423,24 @@ makeVideoModeList(GLFWmonitor *monitor)
 	}
 }
 
+static void
+makeWindowedModeList(int width, int height)
+{
+	rwFree(metalGlobals.modes);
+	metalGlobals.modes = rwNewT(DisplayMode, 1, ID_DRIVER | MEMDUR_EVENT);
+
+	metalGlobals.modes[0].mode.width = width;
+	metalGlobals.modes[0].mode.height = height;
+	metalGlobals.modes[0].mode.redBits = 8;
+	metalGlobals.modes[0].mode.greenBits = 8;
+	metalGlobals.modes[0].mode.blueBits = 8;
+	metalGlobals.modes[0].mode.refreshRate = GLFW_DONT_CARE;
+	metalGlobals.modes[0].depth = 32;
+	metalGlobals.modes[0].flags = 0;
+	metalGlobals.numModes = 1;
+	metalGlobals.currentMode = 0;
+}
+
 static int
 openGLFW(EngineOpenParams *openparams)
 {
@@ -445,6 +463,12 @@ openGLFW(EngineOpenParams *openparams)
 		}
 
 		monitors = glfwGetMonitors(&metalGlobals.numMonitors);
+		if(metalGlobals.numMonitors == 0 && metalGlobals.winHidden){
+			metalGlobals.monitor = nil;
+			metalGlobals.currentMonitor = 0;
+			makeWindowedModeList(metalGlobals.winWidth, metalGlobals.winHeight);
+			return 1;
+		}
 		if(metalGlobals.numMonitors == 0){
 			RWERROR((ERR_GENERAL, "no monitor found"));
 			rwFree(metalGlobals.modes);
