@@ -1,3 +1,4 @@
+#ifdef RW_METAL
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -137,3 +138,4 @@ void im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
 
 }
 }
+#endif

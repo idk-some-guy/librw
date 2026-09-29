@@ -1,11 +1,9 @@
 #ifdef RW_METAL
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
-#endif
 
 namespace rw {
 
-#ifdef RW_METAL
 struct EngineOpenParams
 {
 	GLFWwindow **window;
@@ -13,7 +11,6 @@ struct EngineOpenParams
 	const char *windowtitle;
 	bool hidden = false;
 };
-#endif
 
 namespace metal {
 
@@ -84,8 +81,6 @@ struct InstanceDataHeader : rw::InstanceDataHeader
 
 	InstanceData *inst;
 };
-
-#ifdef RW_METAL
 
 struct Shader;
 
@@ -197,8 +192,6 @@ void setCustomConstants(const void *data, uint32 size);
 
 void flushCache(void);
 
-#endif
-
 class ObjPipeline : public rw::ObjPipeline
 {
 public:
@@ -264,3 +257,4 @@ void registerNativeRaster(void);
 
 }
 }
+#endif

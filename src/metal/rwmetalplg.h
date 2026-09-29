@@ -1,3 +1,4 @@
+#ifdef RW_METAL
 namespace rw {
 namespace metal {
 
@@ -13,3 +14,4 @@ void uploadSkinMatrices(Atomic *atomic);
 
 }
 }
+#endif
