@@ -250,5 +250,14 @@ convertFromRGBA8(int32_t conv, uint8_t *dst, const uint8_t *src, int32_t n)
 	return false;
 }
 
+int32_t
+filledPrefix(uint32_t mask)
+{
+	int32_t n = 0;
+	while(n < 16 && (mask >> n) & 1)
+		n++;
+	return n;
+}
+
 }
 }

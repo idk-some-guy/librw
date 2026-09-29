@@ -943,7 +943,10 @@ rasterToImage(Raster *raster)
 		uint8 *imgrow = imgpixels;
 		uint8 *rasrow = pixels;
 		for(x = 0; x < image->width; x++){
-			conv(imgrow, rasrow);
+			if(pallength)
+				*imgrow = *rasrow;
+			else
+				conv(imgrow, rasrow);
 			imgrow += image->bpp;
 			rasrow += natras->bpp;
 		}

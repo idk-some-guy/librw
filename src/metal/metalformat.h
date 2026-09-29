@@ -63,6 +63,7 @@ int32_t numTexLevels(int32_t rasterFormat, int32_t width, int32_t height);
 int32_t numLockLevels(int32_t rasterFormat, int32_t width, int32_t height);
 uint32_t levelStride(const TexFormat &fmt, int32_t levelWidth);
 uint32_t levelSize(const TexFormat &fmt, int32_t levelWidth, int32_t levelHeight);
+int32_t filledPrefix(uint32_t mask);
 
 bool convertToRGBA8(int32_t conv, uint8_t *dst, const uint8_t *src, int32_t n);
 bool convertFromRGBA8(int32_t conv, uint8_t *dst, const uint8_t *src, int32_t n);

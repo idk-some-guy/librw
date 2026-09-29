@@ -230,13 +230,11 @@ struct MetalRaster
 	bool autogenMipmap;
 	int8 numLevels;
 	int8 filledLevels;
+	uint16 filledMask;
 	uint8 filterMode;
 	uint8 addressU;
 	uint8 addressV;
 	int32 maxAnisotropy;
-	uint32 samplerKey;
-
-	Raster *fboMate;
 };
 
 struct MetalCaps

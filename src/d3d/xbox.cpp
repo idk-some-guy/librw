@@ -925,8 +925,11 @@ readNativeTexture(Stream *stream)
 	                                     ras->format);
 		ras->customFormat = 1;
 		raster->flags &= ~Raster::DONTALLOCATE;
-	}else
+	}else{
 		raster = Raster::create(width, height, depth, format | type, PLATFORM_XBOX);
+		if(numLevels >= 1 && numLevels < raster->getNumLevels())
+			((RasterLevels*)GETXBOXRASTEREXT(raster)->texture)->numlevels = numLevels;
+	}
 	XboxRaster *ras = GETXBOXRASTEREXT(raster);
 	tex->raster = raster;
 

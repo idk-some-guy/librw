@@ -89,7 +89,6 @@ initSampler(MetalRaster *natras)
 	natras->addressU = 0;
 	natras->addressV = 0;
 	natras->maxAnisotropy = 1;
-	natras->samplerKey = 0;
 }
 
 static int32
@@ -220,7 +219,6 @@ rasterCreateCameraTexture(Raster *raster)
 	raster->stride = raster->width*natras->bpp;
 	natras->autogenMipmap = (raster->format & (Raster::MIPMAP|Raster::AUTOMIPMAP)) == (Raster::MIPMAP|Raster::AUTOMIPMAP);
 	initSampler(natras);
-	natras->fboMate = nil;
 
 	if(!createTexture(raster, MTLPixelFormatRGBA8Unorm)){
 		RWERROR((ERR_GENERAL, "can't create camera texture"));
@@ -311,6 +309,13 @@ readLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 }
 
 static void
+markLevelFilled(MetalRaster *natras, int32 level)
+{
+	natras->filledMask |= 1u << level;
+	natras->filledLevels = filledPrefix(natras->filledMask);
+}
+
+static void
 writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 {
 	MetalRaster *natras = GETMETALRASTEREXT(raster->parent);
@@ -322,8 +327,7 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 		waitForMipmaps();
 		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
 			withBytes:px bytesPerRow:levelStride(fmt, raster->width)];
-		if(level == natras->filledLevels)
-			natras->filledLevels = level+1;
+		markLevelFilled(natras, level);
 		return;
 	}
 	rgba = px;
@@ -337,10 +341,10 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 		waitForMipmaps();
 		[tex replaceRegion:MTLRegionMake2D(0, 0, raster->width, raster->height) mipmapLevel:level
 			withBytes:rgba bytesPerRow:raster->width*4];
-		if(level == natras->filledLevels)
-			natras->filledLevels = level+1;
+		markLevelFilled(natras, level);
 		if(level == 0 && natras->autogenMipmap){
 			generateMipmaps(tex);
+			natras->filledMask = (1u << tex.mipmapLevelCount) - 1;
 			natras->filledLevels = (int8)tex.mipmapLevelCount;
 		}
 	}
@@ -391,6 +395,7 @@ rasterCreate(Raster *raster)
 	natras->hasAlpha = 0;
 	natras->numLevels = 1;
 	natras->filledLevels = 0;
+	natras->filledMask = 0;
 
 	Raster *ret = raster;
 
@@ -760,8 +765,8 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->autogenMipmap = 0;
 	ras->numLevels = 1;
 	ras->filledLevels = 0;
+	ras->filledMask = 0;
 	initSampler(ras);
-	ras->fboMate = nil;
 	return object;
 }
 
@@ -785,7 +790,6 @@ destroyNativeRaster(void *object, int32 offset, int32)
 			natras->sampleTexture = nil;
 		}
 	}
-	natras->fboMate = nil;
 	return object;
 }
 
@@ -795,7 +799,6 @@ copyNativeRaster(void *dst, void *, int32 offset, int32)
 	MetalRaster *d = PLUGINOFFSET(MetalRaster, dst, offset);
 	d->texture = nil;
 	d->sampleTexture = nil;
-	d->fboMate = nil;
 	return dst;
 }
 

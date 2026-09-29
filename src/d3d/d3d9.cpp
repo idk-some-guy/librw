@@ -762,6 +762,10 @@ readNativeTexture(Stream *stream)
 		raster = Raster::create(width, height, depth, format | type, PLATFORM_D3D9);
 		assert(raster);
 		ext = GETD3DRASTEREXT(raster);
+#ifndef RW_D3D9
+		if(numLevels >= 1 && numLevels < raster->getNumLevels())
+			((RasterLevels*)ext->texture)->numlevels = numLevels;
+#endif
 	}
 	tex->raster = raster;
 
