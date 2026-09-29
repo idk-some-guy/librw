@@ -1262,8 +1262,6 @@ bindBlocks(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 		size = blockInfo[i].size;
 		if(pipe->blockSizes[i] > size)
 			size = pipe->blockSizes[i];
-		if(i == BLOCK_CUSTOM)
-			stats.customBlockBinds++;
 		if(blockDirty[i] || blockBuffer[i] == nil || blockBufferSize[i] < size){
 			if(!ringAlloc(size, 256, &space))
 				return false;
@@ -1275,6 +1273,8 @@ bindBlocks(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 			blockDirty[i] = false;
 			stats.blockUploads[blockInfo[i].index]++;
 		}
+		if(i == BLOCK_CUSTOM)
+			stats.customBlockBinds++;
 		buf = blockBuffer[i];
 		off = blockOffset[i];
 		if(pipe->vertexBlocks & (1<<i)){

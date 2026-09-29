@@ -1,5 +1,6 @@
 #ifdef RW_METAL
 #include "metalobjc.h"
+#include "metalformat.h"
 #include "metalpass.h"
 #include "metalstate.h"
 
@@ -227,16 +228,18 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	MTLRenderPassDescriptor *desc;
 	const PassClear *c = &a->clear;
 
-	if(color == nil)
+	if(color == nil && depth == nil)
 		return;
-	if(depth && (depth.width != color.width || depth.height != color.height))
+	if(color && depth && (depth.width != color.width || depth.height != color.height))
 		depth = nil;
 
 	desc = [MTLRenderPassDescriptor renderPassDescriptor];
-	desc.colorAttachments[0].texture = color;
-	desc.colorAttachments[0].loadAction = c->flags & PASSCLEAR_COLOR ? MTLLoadActionClear : MTLLoadActionLoad;
-	desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-	desc.colorAttachments[0].clearColor = MTLClearColorMake(c->color[0], c->color[1], c->color[2], c->color[3]);
+	if(color){
+		desc.colorAttachments[0].texture = color;
+		desc.colorAttachments[0].loadAction = c->flags & PASSCLEAR_COLOR ? MTLLoadActionClear : MTLLoadActionLoad;
+		desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+		desc.colorAttachments[0].clearColor = MTLClearColorMake(c->color[0], c->color[1], c->color[2], c->color[3]);
+	}
 	if(depth){
 		desc.depthAttachment.texture = depth;
 		desc.depthAttachment.loadAction = c->flags & PASSCLEAR_DEPTH ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -251,9 +254,10 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	ctx->encoder = [getCommandBuffer(ctx) renderCommandEncoderWithDescriptor:desc];
 	invalidateEncoderState();
 	ctx->encoderHasDepth = depth != nil;
-	ctx->encoderWidth = (uint32)color.width;
-	ctx->encoderHeight = (uint32)color.height;
-	setViewport(ctx, fb);
+	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
+	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
+	if(fb)
+		setViewport(ctx, fb);
 }
 
 static void
@@ -363,6 +367,28 @@ getFrameStats(void)
 	return frameStats;
 }
 
+int32
+getMaxFramesInFlight(void)
+{
+	return MAXFRAMESINFLIGHT;
+}
+
+void
+holdFrameForTest(double seconds)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil)
+		return;
+	@autoreleasepool {
+		passManager.flush();
+		runPassActions();
+		id<MTLSharedEvent> ev = [ctx->device newSharedEvent];
+		[getCommandBuffer(ctx) encodeWaitForEvent:ev value:1];
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds*NSEC_PER_SEC)),
+			dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ ev.signaledValue = 1; });
+	}
+}
+
 static bool32
 copyTexturePixels(MetalContext *ctx, id<MTLTexture> tex, int32 x, int32 y, int32 w, int32 h, uint8 *dst)
 {
@@ -450,6 +476,45 @@ writeRasterPixels(Raster *raster, const uint8 *src)
 			destinationOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)];
 		[blit endEncoding];
 	}
+	return 1;
+}
+
+static bool32
+rasterRenderFast(Raster *raster, int32 x, int32 y)
+{
+	MetalContext *ctx = getContext();
+	Raster *dst = Raster::getCurrentContext();
+	id<MTLTexture> stex, dtex;
+	id<MTLBlitCommandEncoder> blit;
+	int32 dx, dy, w, h;
+
+	if(ctx == nil || raster == nil || dst == nil || raster->type != Raster::CAMERA)
+		return 0;
+	if(dst->type != Raster::NORMAL && dst->type != Raster::TEXTURE && dst->type != Raster::CAMERATEXTURE)
+		return 0;
+	stex = getRasterTexture(raster->parent);
+	dtex = getRasterTexture(dst->parent);
+	if(stex == nil || dtex == nil || dtex.pixelFormat != MTLPixelFormatRGBA8Unorm)
+		return 0;
+	dx = dst->offsetX + x;
+	dy = dst->offsetY + y;
+	w = MIN(raster->width, (int32)dtex.width - dx);
+	h = MIN(raster->height, (int32)dtex.height - dy);
+	if(dx < 0 || dy < 0 || w <= 0 || h <= 0)
+		return 0;
+	@autoreleasepool {
+		passManager.flush();
+		runPassActions();
+		blit = [getCommandBuffer(ctx) blitCommandEncoder];
+		[blit copyFromTexture:stex sourceSlice:0 sourceLevel:0
+			sourceOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)
+			sourceSize:MTLSizeMake(w, h, 1)
+			toTexture:dtex destinationSlice:0 destinationLevel:0
+			destinationOrigin:MTLOriginMake(dx, dy, 0)];
+		[blit endEncoding];
+	}
+	GETMETALRASTEREXT(dst->parent)->filledMask |= 1;
+	GETMETALRASTEREXT(dst->parent)->filledLevels = filledPrefix(GETMETALRASTEREXT(dst->parent)->filledMask);
 	return 1;
 }
 
@@ -1064,7 +1129,7 @@ Device renderdevice = {
 	metal::endUpdate,
 	metal::clearCamera,
 	metal::showRaster,
-	null::rasterRenderFast,
+	metal::rasterRenderFast,
 	metal::setRenderState,
 	metal::getRenderState,
 	metal::im2DRenderLine,

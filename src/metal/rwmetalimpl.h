@@ -57,7 +57,6 @@ struct FrameStats
 	uint32 drawablesAcquired;
 	uint32 framesPresented;
 };
-
 FrameStats getFrameStats(void);
 
 void forgetRasterTarget(Raster *raster);

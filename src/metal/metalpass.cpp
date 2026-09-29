@@ -93,6 +93,11 @@ PassManager::resolvePending(void)
 	if(!this->hasPending)
 		return;
 	if(!hasTarget(this->pendingTarget)){
+		if(this->pendingTarget.depth && (this->pending.flags & (PASSCLEAR_DEPTH|PASSCLEAR_STENCIL))){
+			end();
+			push(PASSACTION_BEGIN, this->pendingTarget, &this->pending);
+			push(PASSACTION_END, this->pendingTarget, nullptr);
+		}
 		this->hasPending = false;
 		return;
 	}
