@@ -20,35 +20,6 @@ namespace metal {
 
 // M1 window, device, pass manager, present
 
-MetalGlobals metalGlobals;
-MetalCaps metalCaps;
-
-static int
-deviceSystem(DeviceReq req, void *arg, int32 n)
-{
-	return 0;
-}
-
-Device renderdevice = {
-	-1.0f, 1.0f,
-	null::beginUpdate,
-	null::endUpdate,
-	null::clearCamera,
-	null::showRaster,
-	null::rasterRenderFast,
-	null::setRenderState,
-	null::getRenderState,
-	metal::im2DRenderLine,
-	metal::im2DRenderTriangle,
-	metal::im2DRenderPrimitive,
-	metal::im2DRenderIndexedPrimitive,
-	metal::im3DTransform,
-	metal::im3DRenderPrimitive,
-	metal::im3DRenderIndexedPrimitive,
-	metal::im3DEnd,
-	deviceSystem
-};
-
 // M2 rasters, textures, state, shaders, im2d
 
 int32 nativeRasterOffset;
