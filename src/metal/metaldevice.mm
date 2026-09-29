@@ -16,6 +16,7 @@ MetalCaps metalCaps;
 
 static PassManager passManager;
 static Raster *currentFrameBuffer;
+static FrameStats frameStats;
 
 static const char *frameShaderSrc =
 "#include <metal_stdlib>\n"
@@ -170,9 +171,15 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 	if(!ctx->frameStarted)
 		return;
 	if(cb){
-		if(drawable)
+		if(drawable){
 			[cb presentDrawable:drawable];
-		[cb addCompletedHandler:^(id<MTLCommandBuffer>){ dispatch_semaphore_signal(sem); }];
+			frameStats.framesPresented++;
+		}
+		[cb addCompletedHandler:^(id<MTLCommandBuffer> done){
+			if(done.error)
+				fprintf(stderr, "rw::metal: command buffer error: %s\n", done.error.localizedDescription.UTF8String);
+			dispatch_semaphore_signal(sem);
+		}];
 		[cb commit];
 	}else
 		dispatch_semaphore_signal(sem);
@@ -331,15 +338,47 @@ forgetRasterTarget(Raster *raster)
 	runPassActions();
 }
 
+FrameStats
+getFrameStats(void)
+{
+	return frameStats;
+}
+
+static bool32
+copyTexturePixels(MetalContext *ctx, id<MTLTexture> tex, int32 x, int32 y, int32 w, int32 h, uint8 *dst)
+{
+	id<MTLBuffer> buf;
+	id<MTLCommandBuffer> cb;
+	id<MTLBlitCommandEncoder> blit;
+	uint32 stride, size;
+
+	stride = w*4;
+	size = stride*h;
+	buf = [ctx->device newBufferWithLength:size options:MTLResourceStorageModeShared];
+	cb = getCommandBuffer(ctx);
+	blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0
+		sourceOrigin:MTLOriginMake(x, y, 0)
+		sourceSize:MTLSizeMake(w, h, 1)
+		toBuffer:buf destinationOffset:0
+		destinationBytesPerRow:stride destinationBytesPerImage:size];
+	[blit endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	ctx->commandBuffer = nil;
+	if(cb.error)
+		fprintf(stderr, "rw::metal: command buffer error: %s\n", cb.error.localizedDescription.UTF8String);
+	if(cb.status != MTLCommandBufferStatusCompleted)
+		return 0;
+	memcpy(dst, buf.contents, size);
+	return 1;
+}
+
 bool32
 readRasterPixels(Raster *raster, uint8 *dst)
 {
 	MetalContext *ctx = getContext();
 	id<MTLTexture> tex;
-	id<MTLBuffer> buf;
-	id<MTLCommandBuffer> cb;
-	id<MTLBlitCommandEncoder> blit;
-	uint32 stride, size;
 
 	if(ctx == nil)
 		return 0;
@@ -354,26 +393,9 @@ readRasterPixels(Raster *raster, uint8 *dst)
 
 		passManager.flush();
 		runPassActions();
-
-		stride = raster->width*4;
-		size = stride*raster->height;
-		buf = [ctx->device newBufferWithLength:size options:MTLResourceStorageModeShared];
-		cb = getCommandBuffer(ctx);
-		blit = [cb blitCommandEncoder];
-		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0
-			sourceOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)
-			sourceSize:MTLSizeMake(raster->width, raster->height, 1)
-			toBuffer:buf destinationOffset:0
-			destinationBytesPerRow:stride destinationBytesPerImage:size];
-		[blit endEncoding];
-		[cb commit];
-		[cb waitUntilCompleted];
-		ctx->commandBuffer = nil;
-		if(cb.status != MTLCommandBufferStatusCompleted)
-			return 0;
-		memcpy(dst, buf.contents, size);
+		return copyTexturePixels(ctx, tex, raster->offsetX, raster->offsetY,
+			raster->width, raster->height, dst);
 	}
-	return 1;
 }
 
 static void
@@ -834,6 +856,39 @@ composite(MetalContext *ctx, Raster *raster, id<MTLTexture> target)
 	[enc endEncoding];
 }
 
+bool32
+compositeCameraPixels(Raster *raster, uint8 *dst)
+{
+	MetalContext *ctx = getContext();
+	MTLTextureDescriptor *desc;
+	id<MTLTexture> tex;
+
+	if(ctx == nil || raster == nil || raster->parent->type != Raster::CAMERA)
+		return 0;
+	@autoreleasepool {
+		desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+			width:raster->parent->width height:raster->parent->height mipmapped:NO];
+		desc.usage = MTLTextureUsageRenderTarget;
+		desc.storageMode = MTLStorageModePrivate;
+		tex = [ctx->device newTextureWithDescriptor:desc];
+		if(tex == nil)
+			return 0;
+		passManager.flush();
+		runPassActions();
+		composite(ctx, raster, tex);
+		return copyTexturePixels(ctx, tex, 0, 0, raster->parent->width, raster->parent->height, dst);
+	}
+}
+
+static void
+waitWithoutDrawable(MetalContext *ctx)
+{
+	NSWindow *nswin = ctx->window ? (NSWindow*)glfwGetCocoaWindow(ctx->window) : nil;
+	NSScreen *screen = nswin.screen;
+	NSInteger fps = screen && screen.maximumFramesPerSecond > 0 ? screen.maximumFramesPerSecond : 60;
+	[NSThread sleepForTimeInterval:1.0/fps];
+}
+
 static void
 showRaster(Raster *raster, uint32 flags)
 {
@@ -850,10 +905,15 @@ showRaster(Raster *raster, uint32 flags)
 			ctx->layer.displaySyncEnabled = (flags & Raster::FLIPWAITVSYNCH) != 0;
 			if(ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0)
 				drawable = [ctx->layer nextDrawable];
-			if(drawable)
+			if(drawable){
+				frameStats.drawablesAcquired++;
 				composite(ctx, raster, drawable.texture);
+			}
 		}
+		frameStats.framesShown++;
 		finishFrame(ctx, drawable);
+		if(drawable == nil)
+			waitWithoutDrawable(ctx);
 		drawable = nil;
 	}
 }

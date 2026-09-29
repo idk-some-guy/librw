@@ -51,8 +51,18 @@ struct MetalGlobals
 
 extern MetalGlobals metalGlobals;
 
+struct FrameStats
+{
+	uint32 framesShown;
+	uint32 drawablesAcquired;
+	uint32 framesPresented;
+};
+
+FrameStats getFrameStats(void);
+
 void forgetRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);
+bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 #endif
 
 Raster *rasterCreate(Raster *raster);
