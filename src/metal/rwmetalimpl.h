@@ -63,6 +63,12 @@ FrameStats getFrameStats(void);
 void forgetRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);
 bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
+bool32 writeRasterPixels(Raster *raster, const uint8 *src);
+void resolveRasterTarget(Raster *raster);
+bool32 rasterHasPendingWork(Raster *raster);
+void *getRasterSampleTexture(Raster *raster);
+void *getWhiteTexture(void);
+void termRaster(void);
 #endif
 
 Raster *rasterCreate(Raster *raster);

@@ -24,4 +24,5 @@
 #include "src/gl/rwgl3shader.h"
 #include "src/gl/rwgl3plg.h"
 #include "src/metal/rwmetal.h"
+#include "src/metal/rwmetalshader.h"
 #include "src/metal/rwmetalplg.h"

@@ -1,0 +1,1455 @@
+#ifdef RW_METAL
+#include <unordered_map>
+#include <vector>
+#include "metalobjc.h"
+#include "rwmetalshader.h"
+#include "metalstate.h"
+#include "metalkeys.h"
+
+#define PLUGIN_ID 0
+
+namespace rw {
+namespace metal {
+
+static_assert(MTLBLEND_SRCALPHASAT == (int)MTLBlendFactorSourceAlphaSaturated &&
+	MTLBLEND_INVDESTALPHA == (int)MTLBlendFactorOneMinusDestinationAlpha &&
+	MTLBLEND_DESTCOLOR == (int)MTLBlendFactorDestinationColor, "blend factors");
+static_assert(MTLCMP_ALWAYS == (int)MTLCompareFunctionAlways &&
+	MTLCMP_LESSEQUAL == (int)MTLCompareFunctionLessEqual, "compare functions");
+static_assert(MTLSTENCIL_DECWRAP == (int)MTLStencilOperationDecrementWrap &&
+	MTLSTENCIL_INCCLAMP == (int)MTLStencilOperationIncrementClamp, "stencil operations");
+static_assert(MTLCULL_FRONT == (int)MTLCullModeFront && MTLCULL_BACK == (int)MTLCullModeBack, "cull modes");
+static_assert(MTLFILTER_LINEAR == (int)MTLSamplerMinMagFilterLinear &&
+	MTLMIP_LINEAR == (int)MTLSamplerMipFilterLinear, "filters");
+static_assert(MTLADDR_REPEAT == (int)MTLSamplerAddressModeRepeat &&
+	MTLADDR_MIRRORREPEAT == (int)MTLSamplerAddressModeMirrorRepeat &&
+	MTLADDR_CLAMPTOBORDER == (int)MTLSamplerAddressModeClampToBorderColor, "address modes");
+static_assert(BLENDSRCALPHASAT == 11 && STENCILDEC == 8 && STENCILALWAYS == 8 && CULLFRONT == 3 &&
+	Texture::BORDER == 4 && Texture::LINEARMIPLINEAR == 6 && ALPHALESS == 2, "RenderWare values in metalkeys.cpp");
+
+#include "shaders/im2d_metal.inc"
+#include "shaders/simple_metal.inc"
+
+static int32   alphaFunc;
+static float32 alphaRef;
+
+struct UniformState
+{
+	float32 alphaRefLow;
+	float32 alphaRefHigh;
+	int32   pad[2];
+
+	float32 fogStart;
+	float32 fogEnd;
+	float32 fogRange;
+	float32 fogDisable;
+
+	RGBAf   fogColor;
+};
+
+struct UniformScene
+{
+	float32 proj[16];
+	float32 view[16];
+	float32 xform[4];
+};
+
+#define MAX_LIGHTS 8
+
+struct UniformObject
+{
+	RawMatrix    world;
+	RGBAf        ambLight;
+	struct {
+		float type;
+		float radius;
+		float minusCosAngle;
+		float hardSpot;
+	} lightParams[MAX_LIGHTS];
+	V4d lightPosition[MAX_LIGHTS];
+	V4d lightDirection[MAX_LIGHTS];
+	RGBAf lightColor[MAX_LIGHTS];
+};
+
+struct UniformMaterial
+{
+	RGBAf   matColor;
+	float32 surfProps[4];
+};
+
+static UniformState uniformState;
+static UniformScene uniformScene;
+static UniformObject uniformObject;
+static UniformMaterial uniformMaterial;
+static uint8 customConstants[MAXCUSTOMCONSTANTS];
+
+enum
+{
+	BLOCK_SCENE,
+	BLOCK_OBJECT,
+	BLOCK_MATERIAL,
+	BLOCK_STATE,
+	BLOCK_CUSTOM,
+	NUMBLOCKS
+};
+
+struct BlockInfo
+{
+	uint32 index;
+	bool vertex, fragment;
+	void *data;
+	uint32 size;
+};
+
+static BlockInfo blockInfo[NUMBLOCKS] = {
+	{ BUFFER_SCENE, true, false, &uniformScene, sizeof(UniformScene) },
+	{ BUFFER_OBJECT, true, false, &uniformObject, sizeof(UniformObject) },
+	{ BUFFER_MATERIAL, true, true, &uniformMaterial, sizeof(UniformMaterial) },
+	{ BUFFER_STATE, true, true, &uniformState, sizeof(UniformState) },
+	{ BUFFER_CUSTOM, true, true, customConstants, 0 },
+};
+
+static bool32 stateDirty = 1;
+static bool blockDirty[NUMBLOCKS];
+static id<MTLBuffer> blockBuffer[NUMBLOCKS];
+static uint32 blockOffset[NUMBLOCKS];
+
+struct RwRasterStateCache {
+	Raster *raster;
+	Texture::Addressing addressingU;
+	Texture::Addressing addressingV;
+	Texture::FilterMode filter;
+};
+
+#define MAXNUMSTAGES 8
+
+struct RwStateCache {
+	bool32 vertexAlpha;
+	uint32 alphaTestEnable;
+	uint32 alphaFunc;
+	bool32 textureAlpha;
+	bool32 blendEnable;
+	uint32 srcblend, destblend;
+	uint32 zwrite;
+	uint32 ztest;
+	uint32 cullmode;
+	uint32 stencilenable;
+	uint32 stencilpass;
+	uint32 stencilfail;
+	uint32 stencilzfail;
+	uint32 stencilfunc;
+	uint32 stencilref;
+	uint32 stencilmask;
+	uint32 stencilwritemask;
+	uint32 fogEnable;
+	float32 fogStart;
+	float32 fogEnd;
+
+	bool32 gsalpha;
+	uint32 gsalpharef;
+
+	RwRasterStateCache texstage[MAXNUMSTAGES];
+};
+static RwStateCache rwStateCache;
+static int32 numStagesUsed = 1;
+
+Shader *im2dShader;
+uint32 im2dVertexLayout;
+static uint32 currentLayout;
+
+static AttribDesc im2dAttribDesc[3] = {
+	{ ATTRIB_POS,        ATTRIBFMT_FLOAT4,      sizeof(Im2DVertex), 0 },
+	{ ATTRIB_COLOR,      ATTRIBFMT_UCHAR4_NORM, sizeof(Im2DVertex), offsetof(Im2DVertex, r) },
+	{ ATTRIB_TEXCOORDS0, ATTRIBFMT_FLOAT2,      sizeof(Im2DVertex), offsetof(Im2DVertex, u) },
+};
+
+enum { MAXATTRIBS = 16 };
+
+struct VertexLayout
+{
+	AttribDesc attribs[MAXATTRIBS];
+	int32 numAttribs;
+	MTLVertexDescriptor *desc;
+};
+static std::vector<VertexLayout> vertexLayouts;
+
+struct PipelineEntry
+{
+	id<MTLRenderPipelineState> state;
+	bool defaultAttribs;
+};
+static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
+static std::unordered_map<uint64_t, id<MTLDepthStencilState>> depthStencilCache;
+static std::unordered_map<uint32_t, id<MTLSamplerState>> samplerCache;
+static bool prewarming;
+static StateStats stats;
+
+struct DefaultAttribs
+{
+	float32 f[4];
+	uint8 u[4];
+};
+static const DefaultAttribs defaultAttribs = { { 0.0f, 0.0f, 0.0f, 1.0f }, { 0, 0, 0, 1 } };
+
+struct EncoderState
+{
+	id<MTLRenderCommandEncoder> encoder;
+	id<MTLRenderPipelineState> pipeline;
+	id<MTLDepthStencilState> depthStencil;
+	int32 cull;
+	bool winding;
+	int32 stencilRef;
+	bool viewportKnown;
+	MTLViewport viewport;
+	bool defaultAttribs;
+	id<MTLBuffer> vertexBuffers[NUMBLOCKS];
+	id<MTLBuffer> fragmentBuffers[NUMBLOCKS];
+	uint32 vertexOffsets[NUMBLOCKS];
+	uint32 fragmentOffsets[NUMBLOCKS];
+	id<MTLTexture> textures[MAXNUMSTAGES];
+	id<MTLSamplerState> samplers[MAXNUMSTAGES];
+};
+static EncoderState enc;
+static bool haveViewport;
+static MTLViewport wantViewport;
+
+enum { RINGSTARTSIZE = 8<<20 };
+
+struct Ring
+{
+	id<MTLBuffer> buffers[MAXFRAMESINFLIGHT];
+	std::vector<id<MTLBuffer>> retired[MAXFRAMESINFLIGHT];
+	uint32 frame;
+	uint32 used;
+};
+static Ring ring;
+
+void
+beginFrameState(void)
+{
+	int i;
+	ring.frame = (ring.frame+1) % MAXFRAMESINFLIGHT;
+	ring.used = 0;
+	ring.retired[ring.frame].clear();
+	for(i = 0; i < NUMBLOCKS; i++)
+		blockDirty[i] = true;
+}
+
+bool32
+ringAlloc(uint32 size, uint32 align, RingSpace *space)
+{
+	MetalContext *ctx = getContext();
+	id<MTLBuffer> buf = ring.buffers[ring.frame];
+	NSUInteger len;
+	uint32 off;
+
+	if(ctx == nil)
+		return 0;
+	if(align == 0)
+		align = 4;
+	assert((align & (align-1)) == 0);
+	off = (ring.used + align-1) & ~(align-1);
+	if(buf == nil || off + size > buf.length){
+		len = buf ? buf.length*2 : RINGSTARTSIZE;
+		while(len < size)
+			len *= 2;
+		buf = [ctx->device newBufferWithLength:len
+			options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+		if(buf == nil)
+			return 0;
+		if(ring.buffers[ring.frame])
+			ring.retired[ring.frame].push_back(ring.buffers[ring.frame]);
+		ring.buffers[ring.frame] = buf;
+		off = 0;
+	}
+	ring.used = off + size;
+	space->cpu = (uint8*)buf.contents + off;
+	space->buffer = (__bridge void*)buf;
+	space->offset = off;
+	return 1;
+}
+
+void
+invalidateEncoderState(void)
+{
+	MetalContext *ctx = getContext();
+	int i;
+
+	enc.encoder = ctx ? ctx->encoder : nil;
+	enc.pipeline = nil;
+	enc.depthStencil = nil;
+	enc.cull = MTLCULL_NONE;
+	enc.winding = false;
+	enc.stencilRef = -1;
+	enc.viewportKnown = false;
+	enc.defaultAttribs = false;
+	for(i = 0; i < NUMBLOCKS; i++){
+		enc.vertexBuffers[i] = nil;
+		enc.fragmentBuffers[i] = nil;
+	}
+	for(i = 0; i < MAXNUMSTAGES; i++){
+		enc.textures[i] = nil;
+		enc.samplers[i] = nil;
+	}
+}
+
+static void
+syncEncoder(MetalContext *ctx)
+{
+	if(ctx->encoder != enc.encoder)
+		invalidateEncoderState();
+}
+
+static bool
+sameViewport(const MTLViewport &a, const MTLViewport &b)
+{
+	return a.originX == b.originX && a.originY == b.originY &&
+		a.width == b.width && a.height == b.height &&
+		a.znear == b.znear && a.zfar == b.zfar;
+}
+
+static void
+applyViewport(MetalContext *ctx)
+{
+	if(!haveViewport || ctx->encoder == nil)
+		return;
+	syncEncoder(ctx);
+	if(enc.viewportKnown && sameViewport(enc.viewport, wantViewport))
+		return;
+	[ctx->encoder setViewport:wantViewport];
+	enc.viewport = wantViewport;
+	enc.viewportKnown = true;
+}
+
+void
+setEncoderViewport(double x, double y, double w, double h)
+{
+	MetalContext *ctx = getContext();
+	wantViewport.originX = x;
+	wantViewport.originY = y;
+	wantViewport.width = w;
+	wantViewport.height = h;
+	wantViewport.znear = 0.0;
+	wantViewport.zfar = 1.0;
+	haveViewport = true;
+	if(ctx)
+		applyViewport(ctx);
+}
+
+static MTLVertexFormat attribFormatMap[] = {
+	MTLVertexFormatFloat2,
+	MTLVertexFormatFloat3,
+	MTLVertexFormatFloat4,
+	MTLVertexFormatUChar4,
+	MTLVertexFormatUChar4Normalized
+};
+
+uint32
+registerVertexLayout(const AttribDesc *attribs, int32 numAttribs)
+{
+	VertexLayout l;
+	uint32 i;
+	int32 j;
+
+	if(numAttribs > MAXATTRIBS)
+		return 0;
+	if(vertexLayouts.empty())
+		vertexLayouts.push_back(VertexLayout());
+	for(i = 1; i < vertexLayouts.size(); i++)
+		if(vertexLayouts[i].numAttribs == numAttribs &&
+		   memcmp(vertexLayouts[i].attribs, attribs, numAttribs*sizeof(AttribDesc)) == 0)
+			return i;
+	if(vertexLayouts.size() >= (1<<PIPEKEY_LAYOUTBITS))
+		return 0;
+
+	memset(l.attribs, 0, sizeof(l.attribs));
+	memcpy(l.attribs, attribs, numAttribs*sizeof(AttribDesc));
+	l.numAttribs = numAttribs;
+	l.desc = [MTLVertexDescriptor vertexDescriptor];
+	for(j = 0; j < numAttribs; j++){
+		l.desc.attributes[attribs[j].index].format = attribFormatMap[attribs[j].format];
+		l.desc.attributes[attribs[j].index].offset = attribs[j].offset;
+		l.desc.attributes[attribs[j].index].bufferIndex = BUFFER_VERTEX;
+		l.desc.layouts[BUFFER_VERTEX].stride = attribs[j].stride;
+	}
+	vertexLayouts.push_back(l);
+	return vertexLayouts.size()-1;
+}
+
+void
+setVertexLayout(uint32 layout)
+{
+	currentLayout = layout;
+}
+
+static bool
+isFloatType(MTLDataType t)
+{
+	return (t >= MTLDataTypeFloat && t <= MTLDataTypeFloat4) ||
+		(t >= MTLDataTypeHalf && t <= MTLDataTypeHalf4);
+}
+
+static MTLVertexDescriptor*
+makeVertexDescriptor(uint32 layout, id<MTLFunction> vs, bool *usesDefaults)
+{
+	MTLVertexDescriptor *vd;
+	NSUInteger i;
+	bool integer;
+
+	if(layout > 0 && layout < vertexLayouts.size())
+		vd = [vertexLayouts[layout].desc copy];
+	else
+		vd = [MTLVertexDescriptor vertexDescriptor];
+	*usesDefaults = false;
+	for(MTLVertexAttribute *a in vs.vertexAttributes){
+		i = a.attributeIndex;
+		if(vd.attributes[i].format != MTLVertexFormatInvalid)
+			continue;
+		integer = !isFloatType(a.attributeType);
+		vd.attributes[i].format = integer ? MTLVertexFormatUChar4 : MTLVertexFormatFloat4;
+		vd.attributes[i].offset = integer ? offsetof(DefaultAttribs, u) : 0;
+		vd.attributes[i].bufferIndex = BUFFER_DEFAULTATTRIBS;
+		*usesDefaults = true;
+	}
+	if(*usesDefaults){
+		vd.layouts[BUFFER_DEFAULTATTRIBS].stride = sizeof(defaultAttribs);
+		vd.layouts[BUFFER_DEFAULTATTRIBS].stepFunction = MTLVertexStepFunctionConstant;
+		vd.layouts[BUFFER_DEFAULTATTRIBS].stepRate = 0;
+	}
+	return vd;
+}
+
+static MTLPixelFormat colorFormatMap[] = {
+	MTLPixelFormatInvalid,
+	MTLPixelFormatRGBA8Unorm,
+	MTLPixelFormatBGRA8Unorm
+};
+
+static MTLPixelFormat depthFormatMap[] = {
+	MTLPixelFormatInvalid,
+	MTLPixelFormatDepth32Float_Stencil8
+};
+
+static MTLRenderPipelineDescriptor*
+makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults)
+{
+	MTLRenderPipelineDescriptor *pd;
+	void *vfn, *ffn;
+	id<MTLFunction> vs, fs;
+
+	if(!shader->getFunctions(d.variant, &vfn, &ffn))
+		return nil;
+	vs = (__bridge id<MTLFunction>)vfn;
+	fs = (__bridge id<MTLFunction>)ffn;
+
+	pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = vs;
+	pd.fragmentFunction = fs;
+	pd.vertexDescriptor = makeVertexDescriptor(d.vertexLayout, vs, usesDefaults);
+	pd.colorAttachments[0].pixelFormat = colorFormatMap[d.colorFormat];
+	pd.colorAttachments[0].writeMask = (MTLColorWriteMask)d.writeMask;
+	if(d.blendEnable){
+		pd.colorAttachments[0].blendingEnabled = YES;
+		pd.colorAttachments[0].sourceRGBBlendFactor = (MTLBlendFactor)blendFactor(d.srcBlend);
+		pd.colorAttachments[0].sourceAlphaBlendFactor = (MTLBlendFactor)blendFactor(d.srcBlend);
+		pd.colorAttachments[0].destinationRGBBlendFactor = (MTLBlendFactor)blendFactor(d.destBlend);
+		pd.colorAttachments[0].destinationAlphaBlendFactor = (MTLBlendFactor)blendFactor(d.destBlend);
+	}
+	pd.depthAttachmentPixelFormat = depthFormatMap[d.depthFormat];
+	pd.stencilAttachmentPixelFormat = depthFormatMap[d.depthFormat];
+	pd.rasterSampleCount = d.sampleCount;
+	return pd;
+}
+
+static PipelineEntry*
+getPipeline(Shader *shader, const PipelineDesc &d)
+{
+	MetalContext *ctx = getContext();
+	uint64_t key = pipelineKey(d);
+	MTLRenderPipelineDescriptor *pd;
+	PipelineEntry e = { nil, false };
+	NSError *err = nil;
+
+	auto it = pipelineCache.find(key);
+	if(it != pipelineCache.end())
+		return it->second.state ? &it->second : nil;
+
+	@autoreleasepool {
+		pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
+		if(pd)
+			e.state = [ctx->device newRenderPipelineStateWithDescriptor:pd error:&err];
+		if(e.state == nil){
+			stats.pipelineFailures++;
+			RWERROR((ERR_GENERAL, err ? err.localizedDescription.UTF8String : "no shader functions"));
+		}
+	}
+	if(prewarming)
+		stats.pipelinesAtInit++;
+	else{
+		stats.pipelinesLate++;
+		printf("rw::metal: pipeline %016llx created after init\n", (unsigned long long)key);
+	}
+	pipelineCache[key] = e;
+	return e.state ? &pipelineCache[key] : nil;
+}
+
+void
+forgetShaderPipelines(uint32 shaderId)
+{
+	auto it = pipelineCache.begin();
+	while(it != pipelineCache.end()){
+		if((it->first & ((1<<PIPEKEY_SHADERBITS)-1)) == shaderId)
+			it = pipelineCache.erase(it);
+		else
+			++it;
+	}
+}
+
+static id<MTLDepthStencilState>
+getDepthStencil(const DepthStencilDesc &d, const DepthStencilResolved &r)
+{
+	MetalContext *ctx = getContext();
+	MTLDepthStencilDescriptor *desc;
+	MTLStencilDescriptor *stencil;
+	id<MTLDepthStencilState> ds;
+	uint64_t key = depthStencilKey(d);
+
+	auto it = depthStencilCache.find(key);
+	if(it != depthStencilCache.end())
+		return it->second;
+
+	desc = [MTLDepthStencilDescriptor new];
+	desc.depthCompareFunction = (MTLCompareFunction)r.depthCompare;
+	desc.depthWriteEnabled = r.depthWrite;
+	if(r.stencilEnable){
+		stencil = [MTLStencilDescriptor new];
+		stencil.stencilCompareFunction = (MTLCompareFunction)r.stencilCompare;
+		stencil.stencilFailureOperation = (MTLStencilOperation)r.stencilFail;
+		stencil.depthFailureOperation = (MTLStencilOperation)r.depthFail;
+		stencil.depthStencilPassOperation = (MTLStencilOperation)r.depthStencilPass;
+		stencil.readMask = r.readMask;
+		stencil.writeMask = r.writeMask;
+		desc.frontFaceStencil = stencil;
+		desc.backFaceStencil = stencil;
+	}
+	ds = [ctx->device newDepthStencilStateWithDescriptor:desc];
+	depthStencilCache[key] = ds;
+	return ds;
+}
+
+static id<MTLSamplerState>
+getSampler(const SamplerDesc &d)
+{
+	MetalContext *ctx = getContext();
+	MTLSamplerDescriptor *desc;
+	id<MTLSamplerState> smp;
+	uint32_t key = samplerKey(d);
+	SamplerResolved r;
+
+	auto it = samplerCache.find(key);
+	if(it != samplerCache.end())
+		return it->second;
+
+	r = resolveSampler(d);
+	desc = [MTLSamplerDescriptor new];
+	desc.minFilter = (MTLSamplerMinMagFilter)r.minFilter;
+	desc.magFilter = (MTLSamplerMinMagFilter)r.magFilter;
+	desc.mipFilter = (MTLSamplerMipFilter)r.mipFilter;
+	desc.sAddressMode = (MTLSamplerAddressMode)r.addressU;
+	desc.tAddressMode = (MTLSamplerAddressMode)r.addressV;
+	desc.maxAnisotropy = r.maxAnisotropy;
+	desc.borderColor = MTLSamplerBorderColorTransparentBlack;
+	smp = [ctx->device newSamplerStateWithDescriptor:desc];
+	samplerCache[key] = smp;
+	return smp;
+}
+
+void
+setAlphaBlend(bool32 enable)
+{
+	if(rwStateCache.blendEnable != enable)
+		rwStateCache.blendEnable = enable;
+}
+
+bool32
+getAlphaBlend(void)
+{
+	return rwStateCache.blendEnable;
+}
+
+bool32 getAlphaTest(void) { return rwStateCache.alphaTestEnable; }
+
+static void
+setDepthTest(bool32 enable)
+{
+	if(rwStateCache.ztest != enable)
+		rwStateCache.ztest = enable;
+}
+
+static void
+setDepthWrite(bool32 enable)
+{
+	enable = enable ? 1 : 0;
+	if(rwStateCache.zwrite != enable)
+		rwStateCache.zwrite = enable;
+}
+
+static void
+setAlphaTest(bool32 enable)
+{
+	uint32 shaderfunc;
+	if(rwStateCache.alphaTestEnable != enable){
+		rwStateCache.alphaTestEnable = enable;
+		shaderfunc = rwStateCache.alphaTestEnable ? rwStateCache.alphaFunc : ALPHAALWAYS;
+		if(alphaFunc != shaderfunc){
+			alphaFunc = shaderfunc;
+			stateDirty = 1;
+		}
+	}
+}
+
+static void
+setAlphaTestFunction(uint32 function)
+{
+	uint32 shaderfunc;
+	if(rwStateCache.alphaFunc != function){
+		rwStateCache.alphaFunc = function;
+		shaderfunc = rwStateCache.alphaTestEnable ? rwStateCache.alphaFunc : ALPHAALWAYS;
+		if(alphaFunc != shaderfunc){
+			alphaFunc = shaderfunc;
+			stateDirty = 1;
+		}
+	}
+}
+
+static void
+setVertexAlpha(bool32 enable)
+{
+	if(rwStateCache.vertexAlpha != enable){
+		if(!rwStateCache.textureAlpha){
+			setAlphaBlend(enable);
+			setAlphaTest(enable);
+		}
+		rwStateCache.vertexAlpha = enable;
+	}
+}
+
+static void
+setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
+{
+	if(rwStateCache.texstage[stage].filter != (Texture::FilterMode)filter){
+		rwStateCache.texstage[stage].filter = (Texture::FilterMode)filter;
+		Raster *raster = rwStateCache.texstage[stage].raster;
+		if(raster){
+			MetalRaster *natras = GETMETALRASTEREXT(raster);
+			if(natras->filterMode != filter)
+				natras->filterMode = filter;
+			if(natras->maxAnisotropy != maxAniso)
+				natras->maxAnisotropy = maxAniso;
+		}
+	}
+}
+
+static void
+setAddressU(uint32 stage, int32 addressing)
+{
+	if(rwStateCache.texstage[stage].addressingU != (Texture::Addressing)addressing){
+		rwStateCache.texstage[stage].addressingU = (Texture::Addressing)addressing;
+		Raster *raster = rwStateCache.texstage[stage].raster;
+		if(raster){
+			MetalRaster *natras = GETMETALRASTEREXT(raster);
+			natras->addressU = addressOnSet(natras->addressU, addressing, gl3Addressing);
+		}
+	}
+}
+
+static void
+setAddressV(uint32 stage, int32 addressing)
+{
+	if(rwStateCache.texstage[stage].addressingV != (Texture::Addressing)addressing){
+		rwStateCache.texstage[stage].addressingV = (Texture::Addressing)addressing;
+		Raster *raster = rwStateCache.texstage[stage].raster;
+		if(raster){
+			MetalRaster *natras = GETMETALRASTEREXT(raster);
+			natras->addressV = addressOnSet(natras->addressV, addressing, gl3Addressing);
+		}
+	}
+}
+
+static void
+setStageAlpha(uint32 stage, bool32 alpha)
+{
+	if(stage == 0){
+		if(alpha != rwStateCache.textureAlpha){
+			rwStateCache.textureAlpha = alpha;
+			if(!rwStateCache.vertexAlpha){
+				setAlphaBlend(alpha);
+				setAlphaTest(alpha);
+			}
+		}
+	}
+}
+
+static void
+setRasterStageOnly(uint32 stage, Raster *raster)
+{
+	bool32 alpha;
+	if(raster != rwStateCache.texstage[stage].raster){
+		rwStateCache.texstage[stage].raster = raster;
+		if((int32)stage >= numStagesUsed)
+			numStagesUsed = stage+1;
+		if(raster){
+			assert(raster->platform == PLATFORM_METAL);
+			MetalRaster *natras = GETMETALRASTEREXT(raster);
+
+			rwStateCache.texstage[stage].filter = (rw::Texture::FilterMode)natras->filterMode;
+			rwStateCache.texstage[stage].addressingU = (rw::Texture::Addressing)natras->addressU;
+			rwStateCache.texstage[stage].addressingV = (rw::Texture::Addressing)natras->addressV;
+
+			alpha = natras->hasAlpha;
+		}else
+			alpha = 0;
+		setStageAlpha(stage, alpha);
+	}
+}
+
+static void
+setRasterStage(uint32 stage, Raster *raster)
+{
+	bool32 alpha;
+	if(raster != rwStateCache.texstage[stage].raster){
+		rwStateCache.texstage[stage].raster = raster;
+		if((int32)stage >= numStagesUsed)
+			numStagesUsed = stage+1;
+		if(raster){
+			assert(raster->platform == PLATFORM_METAL);
+			MetalRaster *natras = GETMETALRASTEREXT(raster);
+			natras->filterMode = rwStateCache.texstage[stage].filter;
+			natras->addressU = rwStateCache.texstage[stage].addressingU;
+			natras->addressV = rwStateCache.texstage[stage].addressingV;
+			alpha = natras->hasAlpha;
+		}else
+			alpha = 0;
+		setStageAlpha(stage, alpha);
+	}
+}
+
+void
+evictRaster(Raster *raster)
+{
+	int i;
+	for(i = 0; i < MAXNUMSTAGES; i++){
+		if(rwStateCache.texstage[i].raster != raster)
+			continue;
+		setRasterStage(i, nil);
+	}
+}
+
+void
+setTexture(int32 stage, Texture *tex)
+{
+	if(tex == nil || tex->raster == nil){
+		setRasterStage(stage, nil);
+		return;
+	}
+	setRasterStageOnly(stage, tex->raster);
+	setFilterMode(stage, tex->getFilter(), tex->getMaxAnisotropy());
+	setAddressU(stage, tex->getAddressU());
+	setAddressV(stage, tex->getAddressV());
+}
+
+void
+setRenderState(int32 state, void *pvalue)
+{
+	uint32 value = (uint32)(uintptr)pvalue;
+	switch(state){
+	case TEXTURERASTER:
+		setRasterStage(0, (Raster*)pvalue);
+		break;
+	case TEXTUREADDRESS:
+		setAddressU(0, value);
+		setAddressV(0, value);
+		break;
+	case TEXTUREADDRESSU:
+		setAddressU(0, value);
+		break;
+	case TEXTUREADDRESSV:
+		setAddressV(0, value);
+		break;
+	case TEXTUREFILTER:
+		setFilterMode(0, value);
+		break;
+	case VERTEXALPHA:
+		setVertexAlpha(value);
+		break;
+	case SRCBLEND:
+		rwStateCache.srcblend = value;
+		break;
+	case DESTBLEND:
+		rwStateCache.destblend = value;
+		break;
+	case ZTESTENABLE:
+		setDepthTest(value);
+		break;
+	case ZWRITEENABLE:
+		setDepthWrite(value);
+		break;
+	case FOGENABLE:
+		if(rwStateCache.fogEnable != value){
+			rwStateCache.fogEnable = value;
+			stateDirty = 1;
+		}
+		break;
+	case FOGCOLOR:
+		RGBA c;
+		c.red = value;
+		c.green = value>>8;
+		c.blue = value>>16;
+		c.alpha = value>>24;
+		convColor(&uniformState.fogColor, &c);
+		stateDirty = 1;
+		break;
+	case CULLMODE:
+		rwStateCache.cullmode = value;
+		break;
+
+	case STENCILENABLE:
+		rwStateCache.stencilenable = value;
+		break;
+	case STENCILFAIL:
+		rwStateCache.stencilfail = value;
+		break;
+	case STENCILZFAIL:
+		rwStateCache.stencilzfail = value;
+		break;
+	case STENCILPASS:
+		rwStateCache.stencilpass = value;
+		break;
+	case STENCILFUNCTION:
+		rwStateCache.stencilfunc = value;
+		break;
+	case STENCILFUNCTIONREF:
+		rwStateCache.stencilref = value;
+		break;
+	case STENCILFUNCTIONMASK:
+		rwStateCache.stencilmask = value;
+		break;
+	case STENCILFUNCTIONWRITEMASK:
+		rwStateCache.stencilwritemask = value;
+		break;
+
+	case ALPHATESTFUNC:
+		setAlphaTestFunction(value);
+		break;
+	case ALPHATESTREF:
+		if(alphaRef != value/255.0f){
+			alphaRef = value/255.0f;
+			stateDirty = 1;
+		}
+		break;
+	case GSALPHATEST:
+		rwStateCache.gsalpha = value;
+		break;
+	case GSALPHATESTREF:
+		rwStateCache.gsalpharef = value;
+	}
+}
+
+void*
+getRenderState(int32 state)
+{
+	uint32 val;
+	RGBA rgba;
+	switch(state){
+	case TEXTURERASTER:
+		return rwStateCache.texstage[0].raster;
+	case TEXTUREADDRESS:
+		if(rwStateCache.texstage[0].addressingU == rwStateCache.texstage[0].addressingV)
+			val = rwStateCache.texstage[0].addressingU;
+		else
+			val = 0;
+		break;
+	case TEXTUREADDRESSU:
+		val = rwStateCache.texstage[0].addressingU;
+		break;
+	case TEXTUREADDRESSV:
+		val = rwStateCache.texstage[0].addressingV;
+		break;
+	case TEXTUREFILTER:
+		val = rwStateCache.texstage[0].filter;
+		break;
+
+	case VERTEXALPHA:
+		val = rwStateCache.vertexAlpha;
+		break;
+	case SRCBLEND:
+		val = rwStateCache.srcblend;
+		break;
+	case DESTBLEND:
+		val = rwStateCache.destblend;
+		break;
+	case ZTESTENABLE:
+		val = rwStateCache.ztest;
+		break;
+	case ZWRITEENABLE:
+		val = rwStateCache.zwrite;
+		break;
+	case FOGENABLE:
+		val = rwStateCache.fogEnable;
+		break;
+	case FOGCOLOR:
+		convColor(&rgba, &uniformState.fogColor);
+		val = RWRGBAINT(rgba.red, rgba.green, rgba.blue, rgba.alpha);
+		break;
+	case CULLMODE:
+		val = rwStateCache.cullmode;
+		break;
+
+	case STENCILENABLE:
+		val = rwStateCache.stencilenable;
+		break;
+	case STENCILFAIL:
+		val = rwStateCache.stencilfail;
+		break;
+	case STENCILZFAIL:
+		val = rwStateCache.stencilzfail;
+		break;
+	case STENCILPASS:
+		val = rwStateCache.stencilpass;
+		break;
+	case STENCILFUNCTION:
+		val = rwStateCache.stencilfunc;
+		break;
+	case STENCILFUNCTIONREF:
+		val = rwStateCache.stencilref;
+		break;
+	case STENCILFUNCTIONMASK:
+		val = rwStateCache.stencilmask;
+		break;
+	case STENCILFUNCTIONWRITEMASK:
+		val = rwStateCache.stencilwritemask;
+		break;
+
+	case ALPHATESTFUNC:
+		val = rwStateCache.alphaFunc;
+		break;
+	case ALPHATESTREF:
+		val = (uint32)(alphaRef*255.0f);
+		break;
+	case GSALPHATEST:
+		val = rwStateCache.gsalpha;
+		break;
+	case GSALPHATESTREF:
+		val = rwStateCache.gsalpharef;
+		break;
+	default:
+		val = 0;
+	}
+	return (void*)(uintptr)val;
+}
+
+static void
+resetRenderState(void)
+{
+	int i;
+
+	rwStateCache.alphaFunc = ALPHAGREATEREQUAL;
+	alphaFunc = 0;
+	alphaRef = 10.0f/255.0f;
+	uniformState.fogDisable = 1.0f;
+	uniformState.fogStart = 0.0f;
+	uniformState.fogEnd = 0.0f;
+	uniformState.fogRange = 0.0f;
+	uniformState.fogColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+	rwStateCache.gsalpha = 0;
+	rwStateCache.gsalpharef = 128;
+	stateDirty = 1;
+
+	rwStateCache.vertexAlpha = 0;
+	rwStateCache.textureAlpha = 0;
+	rwStateCache.alphaTestEnable = 0;
+
+	rwStateCache.blendEnable = 0;
+	rwStateCache.srcblend = BLENDSRCALPHA;
+	rwStateCache.destblend = BLENDINVSRCALPHA;
+
+	rwStateCache.zwrite = 1;
+	rwStateCache.ztest = 1;
+
+	rwStateCache.cullmode = CULLNONE;
+
+	rwStateCache.stencilenable = 0;
+	rwStateCache.stencilfail = STENCILKEEP;
+	rwStateCache.stencilzfail = STENCILKEEP;
+	rwStateCache.stencilpass = STENCILKEEP;
+	rwStateCache.stencilfunc = STENCILALWAYS;
+	rwStateCache.stencilref = 0;
+	rwStateCache.stencilmask = 0xFFFFFFFF;
+	rwStateCache.stencilwritemask = 0xFFFFFFFF;
+
+	for(i = 0; i < MAXNUMSTAGES; i++)
+		rwStateCache.texstage[i].raster = nil;
+	numStagesUsed = 1;
+	for(i = 0; i < NUMBLOCKS; i++)
+		blockDirty[i] = true;
+}
+
+void
+setWorldMatrix(Matrix *mat, const void *object)
+{
+	convMatrix(&uniformObject.world, mat);
+	blockDirty[BLOCK_OBJECT] = true;
+}
+
+int32
+setLights(WorldLights *lightData)
+{
+	int i, n;
+	Light *l;
+	int32 bits;
+
+	uniformObject.ambLight = lightData->ambient;
+
+	bits = 0;
+
+	if(lightData->numAmbients)
+		bits |= VSLIGHT_AMBIENT;
+
+	n = 0;
+	for(i = 0; i < lightData->numDirectionals && i < 8; i++){
+		l = lightData->directionals[i];
+		uniformObject.lightParams[n].type = 1.0f;
+		uniformObject.lightColor[n] = l->color;
+		memcpy(&uniformObject.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
+		bits |= VSLIGHT_DIRECT;
+		n++;
+		if(n >= MAX_LIGHTS)
+			goto out;
+	}
+
+	for(i = 0; i < lightData->numLocals; i++){
+		Light *l = lightData->locals[i];
+
+		switch(l->getType()){
+		case Light::POINT:
+			uniformObject.lightParams[n].type = 2.0f;
+			uniformObject.lightParams[n].radius = l->radius;
+			uniformObject.lightColor[n] = l->color;
+			memcpy(&uniformObject.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
+			bits |= VSLIGHT_POINT;
+			n++;
+			if(n >= MAX_LIGHTS)
+				goto out;
+			break;
+		case Light::SPOT:
+		case Light::SOFTSPOT:
+			uniformObject.lightParams[n].type = 3.0f;
+			uniformObject.lightParams[n].minusCosAngle = l->minusCosAngle;
+			uniformObject.lightParams[n].radius = l->radius;
+			uniformObject.lightColor[n] = l->color;
+			memcpy(&uniformObject.lightPosition[n], &l->getFrame()->getLTM()->pos, sizeof(V3d));
+			memcpy(&uniformObject.lightDirection[n], &l->getFrame()->getLTM()->at, sizeof(V3d));
+			if(l->getType() == Light::SOFTSPOT)
+				uniformObject.lightParams[n].hardSpot = 0.0f;
+			else
+				uniformObject.lightParams[n].hardSpot = 1.0f;
+			bits |= VSLIGHT_SPOT;
+			n++;
+			if(n >= MAX_LIGHTS)
+				goto out;
+			break;
+		}
+	}
+
+	uniformObject.lightParams[n].type = 0.0f;
+out:
+	blockDirty[BLOCK_OBJECT] = true;
+	return bits;
+}
+
+void
+setProjectionMatrix(float32 *mat)
+{
+	memcpy(&uniformScene.proj, mat, 64);
+	blockDirty[BLOCK_SCENE] = true;
+}
+
+void
+setViewMatrix(float32 *mat)
+{
+	memcpy(&uniformScene.view, mat, 64);
+	blockDirty[BLOCK_SCENE] = true;
+}
+
+void
+setIm2DXform(const float32 *xform)
+{
+	if(memcmp(uniformScene.xform, xform, sizeof(uniformScene.xform)) != 0){
+		memcpy(uniformScene.xform, xform, sizeof(uniformScene.xform));
+		blockDirty[BLOCK_SCENE] = true;
+	}
+}
+
+void
+setFogPlanes(float32 fogStart, float32 fogEnd)
+{
+	if(rwStateCache.fogStart != fogStart){
+		rwStateCache.fogStart = fogStart;
+		stateDirty = 1;
+	}
+	if(rwStateCache.fogEnd != fogEnd){
+		rwStateCache.fogEnd = fogEnd;
+		stateDirty = 1;
+	}
+}
+
+void
+setMaterial(const RGBA &color, const SurfaceProperties &surfaceprops, float extraSurfProp)
+{
+	convColor(&uniformMaterial.matColor, &color);
+	uniformMaterial.surfProps[0] = surfaceprops.ambient;
+	uniformMaterial.surfProps[1] = surfaceprops.specular;
+	uniformMaterial.surfProps[2] = surfaceprops.diffuse;
+	uniformMaterial.surfProps[3] = extraSurfProp;
+	blockDirty[BLOCK_MATERIAL] = true;
+}
+
+void
+setCustomConstants(const void *data, uint32 size)
+{
+	if(size > MAXCUSTOMCONSTANTS)
+		size = MAXCUSTOMCONSTANTS;
+	memcpy(customConstants, data, size);
+	blockInfo[BLOCK_CUSTOM].size = size;
+	blockDirty[BLOCK_CUSTOM] = true;
+}
+
+static void
+updateStateBlock(void)
+{
+	float32 range[2];
+
+	if(!stateDirty)
+		return;
+	alphaTestRange(alphaFunc, alphaRef, range);
+	uniformState.alphaRefLow = range[0];
+	uniformState.alphaRefHigh = range[1];
+	uniformState.fogDisable = rwStateCache.fogEnable ? 0.0f : 1.0f;
+	uniformState.fogStart = rwStateCache.fogStart;
+	uniformState.fogEnd = rwStateCache.fogEnd;
+	uniformState.fogRange = 1.0f/(rwStateCache.fogStart - rwStateCache.fogEnd);
+	blockDirty[BLOCK_STATE] = true;
+	stateDirty = 0;
+}
+
+static void
+bindBlocks(id<MTLRenderCommandEncoder> e)
+{
+	RingSpace space;
+	id<MTLBuffer> buf;
+	uint32 off;
+	int i;
+
+	for(i = 0; i < NUMBLOCKS; i++){
+		if(blockInfo[i].size == 0)
+			continue;
+		if(blockDirty[i] || blockBuffer[i] == nil){
+			if(!ringAlloc(blockInfo[i].size, 256, &space))
+				continue;
+			memcpy(space.cpu, blockInfo[i].data, blockInfo[i].size);
+			blockBuffer[i] = (__bridge id<MTLBuffer>)space.buffer;
+			blockOffset[i] = space.offset;
+			blockDirty[i] = false;
+		}
+		buf = blockBuffer[i];
+		off = blockOffset[i];
+		if(blockInfo[i].vertex){
+			if(enc.vertexBuffers[i] == buf){
+				if(enc.vertexOffsets[i] != off)
+					[e setVertexBufferOffset:off atIndex:blockInfo[i].index];
+			}else
+				[e setVertexBuffer:buf offset:off atIndex:blockInfo[i].index];
+			enc.vertexBuffers[i] = buf;
+			enc.vertexOffsets[i] = off;
+		}
+		if(blockInfo[i].fragment){
+			if(enc.fragmentBuffers[i] == buf){
+				if(enc.fragmentOffsets[i] != off)
+					[e setFragmentBufferOffset:off atIndex:blockInfo[i].index];
+			}else
+				[e setFragmentBuffer:buf offset:off atIndex:blockInfo[i].index];
+			enc.fragmentBuffers[i] = buf;
+			enc.fragmentOffsets[i] = off;
+		}
+	}
+}
+
+static void
+bindTextures(id<MTLRenderCommandEncoder> e)
+{
+	id<MTLTexture> tex;
+	id<MTLSamplerState> smp;
+	MetalRaster *natras;
+	SamplerDesc sd;
+	Raster *raster;
+	int i;
+
+	for(i = 0; i < numStagesUsed; i++){
+		raster = rwStateCache.texstage[i].raster;
+		natras = raster ? GETMETALRASTEREXT(raster) : nil;
+		tex = (__bridge id<MTLTexture>)getRasterSampleTexture(raster);
+		if(tex){
+			sd.filter = natras->filterMode;
+			sd.addressU = natras->addressU;
+			sd.addressV = natras->addressV;
+			sd.maxAnisotropy = natras->maxAnisotropy;
+			sd.hasMips = natras->autogenMipmap || natras->numLevels > 1;
+		}else{
+			tex = (__bridge id<MTLTexture>)getWhiteTexture();
+			sd.filter = Texture::NEAREST;
+			sd.addressU = Texture::WRAP;
+			sd.addressV = Texture::WRAP;
+			sd.maxAnisotropy = 1;
+			sd.hasMips = false;
+		}
+		smp = getSampler(sd);
+		if(enc.textures[i] != tex){
+			[e setFragmentTexture:tex atIndex:i];
+			enc.textures[i] = tex;
+		}
+		if(enc.samplers[i] != smp){
+			[e setFragmentSamplerState:smp atIndex:i];
+			enc.samplers[i] = smp;
+		}
+	}
+}
+
+bool32
+flushCache(void)
+{
+	MetalContext *ctx = getContext();
+	id<MTLRenderCommandEncoder> e;
+	PipelineEntry *pipe;
+	PipelineDesc pd;
+	DepthStencilDesc dd;
+	DepthStencilResolved dr;
+	id<MTLDepthStencilState> ds;
+	int32 cull;
+
+	if(ctx == nil || ctx->encoder == nil || currentShader == nil)
+		return 0;
+	syncEncoder(ctx);
+	e = ctx->encoder;
+
+	pd.shader = currentShader->shaderId;
+	pd.variant = currentShader->variant;
+	pd.vertexLayout = currentLayout;
+	pd.blendEnable = rwStateCache.blendEnable;
+	pd.srcBlend = rwStateCache.srcblend;
+	pd.destBlend = rwStateCache.destblend;
+	pd.writeMask = MTLColorWriteMaskAll;
+	pd.colorFormat = COLORFMT_RGBA8;
+	pd.depthFormat = ctx->encoderHasDepth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	pd.sampleCount = 1;
+	pipe = getPipeline(currentShader, pd);
+	if(pipe == nil)
+		return 0;
+	if(enc.pipeline != pipe->state){
+		[e setRenderPipelineState:pipe->state];
+		enc.pipeline = pipe->state;
+	}
+	if(pipe->defaultAttribs && !enc.defaultAttribs){
+		[e setVertexBytes:&defaultAttribs length:sizeof(defaultAttribs) atIndex:BUFFER_DEFAULTATTRIBS];
+		enc.defaultAttribs = true;
+	}
+
+	dd.hasDepth = ctx->encoderHasDepth;
+	dd.ztest = rwStateCache.ztest;
+	dd.zwrite = rwStateCache.zwrite;
+	dd.stencilEnable = rwStateCache.stencilenable;
+	dd.stencilFunc = rwStateCache.stencilfunc;
+	dd.stencilFail = rwStateCache.stencilfail;
+	dd.stencilZFail = rwStateCache.stencilzfail;
+	dd.stencilPass = rwStateCache.stencilpass;
+	dd.stencilMask = rwStateCache.stencilmask;
+	dd.stencilWriteMask = rwStateCache.stencilwritemask;
+	dr = resolveDepthStencil(dd);
+	ds = getDepthStencil(dd, dr);
+	if(enc.depthStencil != ds){
+		[e setDepthStencilState:ds];
+		enc.depthStencil = ds;
+	}
+	if(dr.stencilEnable && enc.stencilRef != (int32)(rwStateCache.stencilref & 0xFF)){
+		enc.stencilRef = rwStateCache.stencilref & 0xFF;
+		[e setStencilReferenceValue:enc.stencilRef];
+	}
+
+	if(!enc.winding){
+		[e setFrontFacingWinding:MTLWindingCounterClockwise];
+		enc.winding = true;
+	}
+	cull = cullMode(rwStateCache.cullmode);
+	if(enc.cull != cull){
+		[e setCullMode:(MTLCullMode)cull];
+		enc.cull = cull;
+	}
+	applyViewport(ctx);
+
+	bindTextures(e);
+	updateStateBlock();
+	bindBlocks(e);
+	return 1;
+}
+
+static uint32
+checkBlockSizes(MetalContext *ctx, Shader *shader, const PipelineDesc &d)
+{
+	MTLRenderPipelineDescriptor *pd;
+	MTLRenderPipelineReflection *refl = nil;
+	bool usesDefaults;
+	uint32 matched = 0;
+	int i;
+
+	pd = makePipelineDescriptor(shader, d, &usesDefaults);
+	if(pd == nil)
+		return 0;
+	[ctx->device newRenderPipelineStateWithDescriptor:pd
+		options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
+		reflection:&refl error:nil];
+	if(refl == nil)
+		return 0;
+	for(NSArray<id<MTLBinding>> *bindings in @[refl.vertexBindings, refl.fragmentBindings])
+		for(id<MTLBinding> b in bindings){
+			if(b.type != MTLBindingTypeBuffer)
+				continue;
+			for(i = 0; i < NUMBLOCKS; i++){
+				if(blockInfo[i].index != b.index || i == BLOCK_CUSTOM)
+					continue;
+				if(((id<MTLBufferBinding>)b).bufferDataSize == blockInfo[i].size){
+					matched |= 1<<blockInfo[i].index;
+					continue;
+				}
+				printf("rw::metal: uniform block %d is %u bytes, shader expects %u\n", i,
+					blockInfo[i].size, (uint32)((id<MTLBufferBinding>)b).bufferDataSize);
+				stats.blockSizeMismatches++;
+			}
+		}
+	return matched;
+}
+
+uint32
+checkShaderBlockSizes(Shader *shader, uint32 variant)
+{
+	MetalContext *ctx = getContext();
+	PipelineDesc d;
+	uint32 matched;
+
+	if(ctx == nil || shader == nil)
+		return 0;
+	d.shader = shader->shaderId;
+	d.variant = variant;
+	d.vertexLayout = 0;
+	d.blendEnable = 0;
+	d.srcBlend = 0;
+	d.destBlend = 0;
+	d.writeMask = MTLColorWriteMaskAll;
+	d.colorFormat = COLORFMT_RGBA8;
+	d.depthFormat = DEPTHFMT_NONE;
+	d.sampleCount = 1;
+	@autoreleasepool {
+		matched = checkBlockSizes(ctx, shader, d);
+	}
+	return matched;
+}
+
+static void
+prewarm(MetalContext *ctx)
+{
+	static const uint32 blends[][2] = {
+		{ 0, 0 },
+		{ BLENDSRCALPHA, BLENDINVSRCALPHA },
+		{ BLENDSRCALPHA, BLENDONE },
+		{ BLENDONE, BLENDONE },
+	};
+	PipelineDesc d;
+	int i, depth;
+
+	prewarming = true;
+	for(depth = 0; depth < 2; depth++)
+		for(i = 0; i < (int)nelem(blends); i++){
+			d.shader = im2dShader->shaderId;
+			d.variant = im2dShader->variant;
+			d.vertexLayout = im2dVertexLayout;
+			d.blendEnable = blends[i][0] != 0;
+			d.srcBlend = blends[i][0];
+			d.destBlend = blends[i][1];
+			d.writeMask = MTLColorWriteMaskAll;
+			d.colorFormat = COLORFMT_RGBA8;
+			d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+			d.sampleCount = 1;
+			getPipeline(im2dShader, d);
+			if(i == 0 && depth == 1)
+				checkBlockSizes(ctx, im2dShader, d);
+		}
+	prewarming = false;
+}
+
+bool32
+initState(void)
+{
+	MetalContext *ctx = getContext();
+	const char *im2dSrc[] = { header_metal_src, im2d_metal_src, simple_metal_src, nil };
+
+	if(ctx == nil)
+		return 0;
+	memset(&stats, 0, sizeof(stats));
+	@autoreleasepool {
+		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
+		if(im2dShader == nil)
+			return 0;
+		im2dVertexLayout = registerVertexLayout(im2dAttribDesc, nelem(im2dAttribDesc));
+		resetRenderState();
+		invalidateEncoderState();
+		prewarm(ctx);
+	}
+	return 1;
+}
+
+void
+termState(void)
+{
+	int i;
+
+	if(im2dShader){
+		im2dShader->destroy();
+		im2dShader = nil;
+	}
+	currentShader = nil;
+	pipelineCache.clear();
+	depthStencilCache.clear();
+	samplerCache.clear();
+	vertexLayouts.clear();
+	currentLayout = 0;
+	im2dVertexLayout = 0;
+	for(i = 0; i < NUMBLOCKS; i++)
+		blockBuffer[i] = nil;
+	for(i = 0; i < MAXFRAMESINFLIGHT; i++){
+		ring.buffers[i] = nil;
+		ring.retired[i].clear();
+	}
+	ring.used = 0;
+	blockInfo[BLOCK_CUSTOM].size = 0;
+	haveViewport = false;
+	enc = EncoderState();
+}
+
+StateStats
+getStateStats(void)
+{
+	stats.ringSize = ring.buffers[ring.frame] ? (uint32)ring.buffers[ring.frame].length : 0;
+	return stats;
+}
+
+}
+}
+#endif

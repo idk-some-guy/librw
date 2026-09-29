@@ -72,6 +72,7 @@ struct PassManager
 	void flush(void);
 	void show(void);
 	void forget(const void *raster);
+	void resolve(const void *raster);
 
 private:
 	void reset(void);

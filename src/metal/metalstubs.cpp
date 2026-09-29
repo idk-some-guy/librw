@@ -23,24 +23,11 @@ namespace metal {
 
 // M2 rasters, textures, state, shaders, im2d
 
-bool32 imageFindRasterFormat(Image *img, int32 type,
-	int32 *width, int32 *height, int32 *depth, int32 *format) { return 0; }
-bool32 rasterFromImage(Raster *raster, Image *image) { return 0; }
-void allocateDXT(Raster *raster, int32 dxt, int32 numLevels, bool32 hasAlpha) { }
-
 Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
 
-const char *header_metal_src = "";
 Shader *im2dOverrideShader;
-
-void setTexture(int32 n, Texture *tex) { }
-void setAlphaBlend(bool32 enable) { }
-bool32 getAlphaBlend(void) { return 0; }
-bool32 getAlphaTest(void) { return 0; }
-void setCustomConstants(const void *data, uint32 size) { }
-void flushCache(void) { }
 
 void openIm2D(void) { }
 void closeIm2D(void) { }
@@ -70,12 +57,6 @@ void im3DEnd(void) { }
 
 void setupVertexInput(InstanceDataHeader *header) { }
 void teardownVertexInput(InstanceDataHeader *header) { }
-
-void setProjectionMatrix(float32*) { }
-void setViewMatrix(float32*) { }
-void setWorldMatrix(Matrix *mat, const void *object) { }
-int32 setLights(WorldLights *lightData) { return 0; }
-void setMaterial(const RGBA &color, const SurfaceProperties &surfaceprops, float extraSurfProp) { }
 
 void
 ObjPipeline::init(void)

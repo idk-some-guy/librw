@@ -61,16 +61,24 @@ PassManager::end(void)
 	this->openTarget = noTarget;
 }
 
+static bool
+pendingAppliesTo(const PassTarget &pending, const PassTarget &target)
+{
+	if(pending.color == nullptr)
+		return pending.depth == target.depth;
+	return samePassTarget(pending, target);
+}
+
 void
 PassManager::openOn(const PassTarget &target)
 {
-	if(this->hasPending && !samePassTarget(this->pendingTarget, target) &&
-	   sharesRaster(this->pendingTarget, target))
+	bool applies = this->hasPending && pendingAppliesTo(this->pendingTarget, target);
+	if(this->hasPending && !applies && sharesRaster(this->pendingTarget, target))
 		resolvePending();
-	if(this->open && samePassTarget(this->openTarget, target))
+	if(this->open && samePassTarget(this->openTarget, target) && !applies)
 		return;
 	end();
-	if(this->hasPending && samePassTarget(this->pendingTarget, target)){
+	if(applies){
 		push(PASSACTION_BEGIN, target, &this->pending);
 		this->hasPending = false;
 	}else
@@ -84,6 +92,10 @@ PassManager::resolvePending(void)
 {
 	if(!this->hasPending)
 		return;
+	if(!hasTarget(this->pendingTarget)){
+		this->hasPending = false;
+		return;
+	}
 	openOn(this->pendingTarget);
 	end();
 }
@@ -113,8 +125,12 @@ PassManager::clear(const PassTarget &target, const PassClear &clear)
 		return;
 	}
 
-	if(this->hasPending && !samePassTarget(this->pendingTarget, target))
-		resolvePending();
+	if(this->hasPending && !samePassTarget(this->pendingTarget, target)){
+		if(pendingAppliesTo(this->pendingTarget, target))
+			this->pendingTarget = target;
+		else
+			resolvePending();
+	}
 
 	if(!this->hasPending){
 		this->hasPending = true;
@@ -163,10 +179,33 @@ PassManager::forget(const void *raster)
 		return;
 	if(this->open && usesRaster(this->openTarget, raster))
 		end();
-	if(this->hasPending && usesRaster(this->pendingTarget, raster))
-		this->hasPending = false;
+	if(this->hasPending && usesRaster(this->pendingTarget, raster)){
+		if(this->pendingTarget.color == raster){
+			this->pendingTarget.color = nullptr;
+			this->pending.flags &= ~PASSCLEAR_COLOR;
+		}
+		if(this->pendingTarget.depth == raster){
+			this->pendingTarget.depth = nullptr;
+			this->pending.flags &= ~(PASSCLEAR_DEPTH|PASSCLEAR_STENCIL);
+		}
+		if(this->pending.flags == 0 ||
+		   (this->pendingTarget.color == nullptr && this->pendingTarget.depth == nullptr))
+			this->hasPending = false;
+	}
 	if(usesRaster(this->current, raster))
 		this->current = noTarget;
+}
+
+void
+PassManager::resolve(const void *raster)
+{
+	reset();
+	if(raster == nullptr)
+		return;
+	if(this->hasPending && usesRaster(this->pendingTarget, raster))
+		resolvePending();
+	if(this->open && usesRaster(this->openTarget, raster))
+		end();
 }
 
 }

@@ -190,7 +190,7 @@ bool32 getAlphaTest(void);
 
 void setCustomConstants(const void *data, uint32 size);
 
-void flushCache(void);
+bool32 flushCache(void);
 
 class ObjPipeline : public rw::ObjPipeline
 {
@@ -221,6 +221,7 @@ ObjPipeline *makeDefaultPipeline(void);
 struct MetalRaster
 {
 	void *texture;
+	void *sampleTexture;
 	int32 format;
 	int32 bpp;
 

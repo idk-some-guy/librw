@@ -1,6 +1,7 @@
 #ifdef RW_METAL
 #include "metalobjc.h"
 #include "metalpass.h"
+#include "metalstate.h"
 
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
@@ -156,6 +157,7 @@ getCommandBuffer(MetalContext *ctx)
 		if(!ctx->frameStarted){
 			dispatch_semaphore_wait(ctx->frameSemaphore, DISPATCH_TIME_FOREVER);
 			ctx->frameStarted = true;
+			beginFrameState();
 		}
 		ctx->commandBuffer = [ctx->queue commandBuffer];
 	}
@@ -209,7 +211,7 @@ setViewport(MetalContext *ctx, Raster *target)
 		vp.width = fb->width;
 		vp.height = fb->height;
 	}
-	[ctx->encoder setViewport:vp];
+	setEncoderViewport(vp.originX, vp.originY, vp.width, vp.height);
 }
 
 static void
@@ -243,6 +245,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	}
 
 	ctx->encoder = [getCommandBuffer(ctx) renderCommandEncoderWithDescriptor:desc];
+	invalidateEncoderState();
 	ctx->encoderHasDepth = depth != nil;
 	ctx->encoderWidth = (uint32)color.width;
 	ctx->encoderHeight = (uint32)color.height;
@@ -289,6 +292,7 @@ drawClearQuad(MetalContext *ctx, const PassAction *a)
 	[enc setVertexBytes:&depth length:sizeof(depth) atIndex:0];
 	[enc setFragmentBytes:c->color length:sizeof(c->color) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	invalidateEncoderState();
 	[enc setScissorRect:full];
 	setViewport(ctx, (Raster*)a->target.color);
 }
@@ -396,6 +400,65 @@ readRasterPixels(Raster *raster, uint8 *dst)
 		return copyTexturePixels(ctx, tex, raster->offsetX, raster->offsetY,
 			raster->width, raster->height, dst);
 	}
+}
+
+bool32
+writeRasterPixels(Raster *raster, const uint8 *src)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex;
+	id<MTLBuffer> buf;
+	id<MTLBlitCommandEncoder> blit;
+	uint32 stride, size;
+
+	if(ctx == nil)
+		return 0;
+	@autoreleasepool {
+		tex = getRasterTexture(raster->parent);
+		if(tex == nil || tex.pixelFormat != MTLPixelFormatRGBA8Unorm ||
+		   raster->width <= 0 || raster->height <= 0 ||
+		   raster->offsetX < 0 || raster->offsetY < 0 ||
+		   raster->offsetX + raster->width > (int32)tex.width ||
+		   raster->offsetY + raster->height > (int32)tex.height)
+			return 0;
+
+		passManager.flush();
+		runPassActions();
+		stride = raster->width*4;
+		size = stride*raster->height;
+		buf = [ctx->device newBufferWithBytes:src length:size options:MTLResourceStorageModeShared];
+		blit = [getCommandBuffer(ctx) blitCommandEncoder];
+		[blit copyFromBuffer:buf sourceOffset:0
+			sourceBytesPerRow:stride sourceBytesPerImage:size
+			sourceSize:MTLSizeMake(raster->width, raster->height, 1)
+			toTexture:tex destinationSlice:0 destinationLevel:0
+			destinationOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)];
+		[blit endEncoding];
+	}
+	return 1;
+}
+
+void
+resolveRasterTarget(Raster *raster)
+{
+	if(raster == nil)
+		return;
+	passManager.resolve(raster->parent);
+	@autoreleasepool {
+		runPassActions();
+	}
+}
+
+bool32
+rasterHasPendingWork(Raster *raster)
+{
+	const void *r;
+
+	if(raster == nil)
+		return 0;
+	r = raster->parent;
+	return (passManager.hasPending && (passManager.pendingTarget.color == r || passManager.pendingTarget.depth == r)) ||
+		(passManager.isOpen() && (passManager.openTarget.color == r || passManager.openTarget.depth == r));
 }
 
 static void
@@ -608,6 +671,8 @@ stopGLFW(void)
 static int
 initMetal(void)
 {
+	if(!initState())
+		return 0;
 	openIm2D();
 	openIm3D();
 	return 1;
@@ -618,6 +683,8 @@ termMetal(void)
 {
 	closeIm3D();
 	closeIm2D();
+	termRaster();
+	termState();
 	return 1;
 }
 
@@ -764,6 +831,7 @@ beginUpdate(Camera *cam)
 	}
 	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
 	setProjectionMatrix(proj);
+	setFogPlanes(cam->fogPlane, cam->farPlane);
 
 	currentFrameBuffer = cam->frameBuffer;
 	@autoreleasepool {
@@ -925,8 +993,8 @@ Device renderdevice = {
 	metal::clearCamera,
 	metal::showRaster,
 	null::rasterRenderFast,
-	null::setRenderState,
-	null::getRenderState,
+	metal::setRenderState,
+	metal::getRenderState,
 	metal::im2DRenderLine,
 	metal::im2DRenderTriangle,
 	metal::im2DRenderPrimitive,
