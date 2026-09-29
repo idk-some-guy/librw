@@ -721,9 +721,14 @@ Raster::convertTexToCurrentPlatform(rw::Raster *ras)
 
 	// fall back to going through Image directly
 	int32 width, height, depth, format;
+	int32 lockFlags = Raster::PRIVATELOCK_READ | Raster::PRIVATELOCK_WRITE;
+	bool32 wasLocked = ras->privateFlags & lockFlags;
 	Image *img = ras->toImage();
-	if(img == nil)
+	if(img == nil){
+		if(!wasLocked && (ras->privateFlags & lockFlags))
+			ras->unlock(0);
 		return ras;
+	}
 	// TODO: maybe don't *always* do this?
 	img->unpalettize();
 	Raster::imageFindRasterFormat(img, Raster::TEXTURE, &width, &height, &depth, &format);

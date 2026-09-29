@@ -121,8 +121,6 @@ struct RwRasterStateCache {
 	Texture::FilterMode filter;
 };
 
-#define MAXNUMSTAGES 8
-
 struct RwStateCache {
 	bool32 vertexAlpha;
 	uint32 alphaTestEnable;
@@ -208,6 +206,8 @@ struct EncoderState
 	uint32 fragmentOffsets[NUMBLOCKS];
 	id<MTLTexture> textures[MAXNUMSTAGES];
 	id<MTLSamplerState> samplers[MAXNUMSTAGES];
+	id<MTLBuffer> vertexData;
+	uint32 vertexDataOffset;
 };
 static EncoderState enc;
 static bool haveViewport;
@@ -291,6 +291,7 @@ invalidateEncoderState(void)
 		enc.textures[i] = nil;
 		enc.samplers[i] = nil;
 	}
+	enc.vertexData = nil;
 }
 
 static void
@@ -634,14 +635,31 @@ setVertexAlpha(bool32 enable)
 	}
 }
 
+static MetalRaster*
+stageExt(Raster *raster)
+{
+	if(raster == nil || raster->platform != PLATFORM_METAL)
+		return nil;
+	return GETMETALRASTEREXT(raster);
+}
+
+static void
+reportForeignRaster(Raster *raster)
+{
+	static bool reported;
+	if(reported)
+		return;
+	reported = true;
+	RWERROR((ERR_PLATFORM, raster->platform));
+}
+
 static void
 setFilterMode(uint32 stage, int32 filter, int32 maxAniso = 1)
 {
 	if(rwStateCache.texstage[stage].filter != (Texture::FilterMode)filter){
 		rwStateCache.texstage[stage].filter = (Texture::FilterMode)filter;
-		Raster *raster = rwStateCache.texstage[stage].raster;
-		if(raster){
-			MetalRaster *natras = GETMETALRASTEREXT(raster);
+		MetalRaster *natras = stageExt(rwStateCache.texstage[stage].raster);
+		if(natras){
 			if(natras->filterMode != filter)
 				natras->filterMode = filter;
 			if(natras->maxAnisotropy != maxAniso)
@@ -655,11 +673,9 @@ setAddressU(uint32 stage, int32 addressing)
 {
 	if(rwStateCache.texstage[stage].addressingU != (Texture::Addressing)addressing){
 		rwStateCache.texstage[stage].addressingU = (Texture::Addressing)addressing;
-		Raster *raster = rwStateCache.texstage[stage].raster;
-		if(raster){
-			MetalRaster *natras = GETMETALRASTEREXT(raster);
+		MetalRaster *natras = stageExt(rwStateCache.texstage[stage].raster);
+		if(natras)
 			natras->addressU = addressOnSet(natras->addressU, addressing, gl3Addressing);
-		}
 	}
 }
 
@@ -668,11 +684,9 @@ setAddressV(uint32 stage, int32 addressing)
 {
 	if(rwStateCache.texstage[stage].addressingV != (Texture::Addressing)addressing){
 		rwStateCache.texstage[stage].addressingV = (Texture::Addressing)addressing;
-		Raster *raster = rwStateCache.texstage[stage].raster;
-		if(raster){
-			MetalRaster *natras = GETMETALRASTEREXT(raster);
+		MetalRaster *natras = stageExt(rwStateCache.texstage[stage].raster);
+		if(natras)
 			natras->addressV = addressOnSet(natras->addressV, addressing, gl3Addressing);
-		}
 	}
 }
 
@@ -698,10 +712,10 @@ setRasterStageOnly(uint32 stage, Raster *raster)
 		rwStateCache.texstage[stage].raster = raster;
 		if((int32)stage >= numStagesUsed)
 			numStagesUsed = stage+1;
-		if(raster){
-			assert(raster->platform == PLATFORM_METAL);
-			MetalRaster *natras = GETMETALRASTEREXT(raster);
-
+		MetalRaster *natras = stageExt(raster);
+		if(raster && natras == nil)
+			reportForeignRaster(raster);
+		if(natras){
 			rwStateCache.texstage[stage].filter = (rw::Texture::FilterMode)natras->filterMode;
 			rwStateCache.texstage[stage].addressingU = (rw::Texture::Addressing)natras->addressU;
 			rwStateCache.texstage[stage].addressingV = (rw::Texture::Addressing)natras->addressV;
@@ -721,9 +735,10 @@ setRasterStage(uint32 stage, Raster *raster)
 		rwStateCache.texstage[stage].raster = raster;
 		if((int32)stage >= numStagesUsed)
 			numStagesUsed = stage+1;
-		if(raster){
-			assert(raster->platform == PLATFORM_METAL);
-			MetalRaster *natras = GETMETALRASTEREXT(raster);
+		MetalRaster *natras = stageExt(raster);
+		if(raster && natras == nil)
+			reportForeignRaster(raster);
+		if(natras){
 			natras->filterMode = rwStateCache.texstage[stage].filter;
 			natras->addressU = rwStateCache.texstage[stage].addressingU;
 			natras->addressV = rwStateCache.texstage[stage].addressingV;
@@ -732,6 +747,14 @@ setRasterStage(uint32 stage, Raster *raster)
 			alpha = 0;
 		setStageAlpha(stage, alpha);
 	}
+}
+
+Raster*
+getStageRaster(int32 stage)
+{
+	if(stage < 0 || stage >= numStagesUsed)
+		return nil;
+	return rwStateCache.texstage[stage].raster;
 }
 
 void
@@ -1153,6 +1176,8 @@ bindBlocks(id<MTLRenderCommandEncoder> e)
 	for(i = 0; i < NUMBLOCKS; i++){
 		if(blockInfo[i].size == 0)
 			continue;
+		if(i == BLOCK_CUSTOM)
+			stats.customBlockBinds++;
 		if(blockDirty[i] || blockBuffer[i] == nil){
 			if(!ringAlloc(blockInfo[i].size, 256, &space))
 				continue;
@@ -1196,8 +1221,8 @@ bindTextures(id<MTLRenderCommandEncoder> e)
 
 	for(i = 0; i < numStagesUsed; i++){
 		raster = rwStateCache.texstage[i].raster;
-		natras = raster ? GETMETALRASTEREXT(raster) : nil;
-		tex = (__bridge id<MTLTexture>)getRasterSampleTexture(raster);
+		natras = stageExt(raster);
+		tex = natras ? (__bridge id<MTLTexture>)getRasterSampleTexture(raster) : nil;
 		if(tex){
 			sd.filter = natras->filterMode;
 			sd.addressU = natras->addressU;
@@ -1441,6 +1466,24 @@ termState(void)
 	blockInfo[BLOCK_CUSTOM].size = 0;
 	haveViewport = false;
 	enc = EncoderState();
+}
+
+void
+bindVertexBuffer(void *buffer, uint32 offset)
+{
+	MetalContext *ctx = getContext();
+	id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffer;
+
+	if(ctx == nil || ctx->encoder == nil)
+		return;
+	syncEncoder(ctx);
+	if(enc.vertexData == buf){
+		if(enc.vertexDataOffset != offset)
+			[ctx->encoder setVertexBufferOffset:offset atIndex:BUFFER_VERTEX];
+	}else
+		[ctx->encoder setVertexBuffer:buf offset:offset atIndex:BUFFER_VERTEX];
+	enc.vertexData = buf;
+	enc.vertexDataOffset = offset;
 }
 
 StateStats

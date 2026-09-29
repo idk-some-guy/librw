@@ -65,6 +65,7 @@ bool32 readRasterPixels(Raster *raster, uint8 *dst);
 bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 bool32 writeRasterPixels(Raster *raster, const uint8 *src);
 void resolveRasterTarget(Raster *raster);
+bool32 beginDraw(void);
 bool32 rasterHasPendingWork(Raster *raster);
 void *getRasterSampleTexture(Raster *raster);
 void *getWhiteTexture(void);

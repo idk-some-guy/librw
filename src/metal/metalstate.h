@@ -5,6 +5,8 @@ namespace metal {
 
 struct Shader;
 
+#define MAXNUMSTAGES 8
+
 bool32 initState(void);
 void termState(void);
 void beginFrameState(void);
@@ -15,6 +17,7 @@ void setEncoderViewport(double x, double y, double w, double h);
 void setFogPlanes(float32 fogStart, float32 fogEnd);
 void setIm2DXform(const float32 *xform);
 void evictRaster(Raster *raster);
+Raster *getStageRaster(int32 stage);
 void forgetShaderPipelines(uint32 shaderId);
 
 uint32 registerVertexLayout(const AttribDesc *attribs, int32 numAttribs);
@@ -27,6 +30,7 @@ struct RingSpace
 	uint32 offset;
 };
 bool32 ringAlloc(uint32 size, uint32 align, RingSpace *space);
+void bindVertexBuffer(void *buffer, uint32 offset);
 
 extern Shader *im2dShader;
 extern uint32 im2dVertexLayout;
@@ -37,6 +41,7 @@ struct StateStats
 	uint32 pipelinesLate;
 	uint32 pipelineFailures;
 	uint32 blockSizeMismatches;
+	uint32 customBlockBinds;
 	uint32 ringSize;
 };
 StateStats getStateStats(void);

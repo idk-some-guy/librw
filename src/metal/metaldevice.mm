@@ -461,6 +461,44 @@ rasterHasPendingWork(Raster *raster)
 		(passManager.isOpen() && (passManager.openTarget.color == r || passManager.openTarget.depth == r));
 }
 
+static bool
+usesTarget(const PassTarget &t, Raster *raster)
+{
+	return raster && (t.color == raster->parent || t.depth == raster->parent);
+}
+
+bool32
+beginDraw(void)
+{
+	static bool feedbackReported;
+	MetalContext *ctx = getContext();
+	Raster *raster;
+	int32 i;
+
+	if(ctx == nil)
+		return 0;
+	for(i = 0; i < MAXNUMSTAGES; i++){
+		raster = getStageRaster(i);
+		if(raster == nil || raster->platform != PLATFORM_METAL)
+			continue;
+		if(usesTarget(passManager.current, raster)){
+			if(!feedbackReported){
+				feedbackReported = true;
+				RWERROR((ERR_GENERAL, "draw samples the raster it renders into"));
+			}
+			return 0;
+		}
+		if(rasterHasPendingWork(raster))
+			resolveRasterTarget(raster);
+	}
+	@autoreleasepool {
+		if(!passManager.draw())
+			return 0;
+		runPassActions();
+	}
+	return ctx->encoder != nil;
+}
+
 static void
 addVideoMode(const GLFWvidmode *mode)
 {

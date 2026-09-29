@@ -23,19 +23,6 @@ Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
 
-Shader *im2dOverrideShader;
-
-void openIm2D(void) { }
-void closeIm2D(void) { }
-void im2DRenderLine(void *vertices, int32 numVertices,
-  int32 vert1, int32 vert2) { }
-void im2DRenderTriangle(void *vertices, int32 numVertices,
-  int32 vert1, int32 vert2, int32 vert3) { }
-void im2DRenderPrimitive(PrimitiveType primType,
-   void *vertices, int32 numVertices) { }
-void im2DRenderIndexedPrimitive(PrimitiveType primType,
-   void *vertices, int32 numVertices, void *indices, int32 numIndices) { }
-
 Shader *defaultShader, *defaultShader_noAT;
 Shader *defaultShader_fullLight, *defaultShader_fullLight_noAT;
 
