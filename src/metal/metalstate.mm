@@ -1656,6 +1656,7 @@ enum
 	BLEND_REPLACE,
 	BLEND_INVERT,
 	BLEND_PREMUL,
+	BLEND_MODULATE,
 	NUMPREWARMBLENDS
 };
 
@@ -1669,6 +1670,7 @@ static const uint32 prewarmBlends[NUMPREWARMBLENDS][2] = {
 	{ BLENDONE, BLENDZERO },
 	{ BLENDINVDESTCOLOR, BLENDZERO },
 	{ BLENDONE, BLENDINVSRCALPHA },
+	{ BLENDZERO, BLENDSRCCOLOR },
 };
 
 struct PrewarmState
@@ -1694,7 +1696,7 @@ struct EnvLayout
 };
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
-static const int32 shadowIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE };
+static const int32 shadowIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
 static const PrewarmState buildingStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
