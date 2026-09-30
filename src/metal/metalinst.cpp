@@ -45,6 +45,22 @@ defaultVertexLayout(bool normals, bool prelit, int32_t numTexCoordSets, InstAttr
 	return n;
 }
 
+int32_t
+skinVertexLayout(bool normals, bool prelit, int32_t numTexCoordSets, InstAttrib *out)
+{
+	int32_t i, n = defaultVertexLayout(normals, prelit, numTexCoordSets, out);
+	uint32_t stride = out[0].stride;
+
+	setAttrib(&out[n++], INSTATTRIB_WEIGHTS, INSTFMT_FLOAT4, stride);
+	stride += 16;
+	setAttrib(&out[n++], INSTATTRIB_INDICES, INSTFMT_UCHAR4, stride);
+	stride += 4;
+
+	for(i = 0; i < n; i++)
+		out[i].stride = stride;
+	return n;
+}
+
 uint32_t
 meshIndexOffsets(const uint32_t *numIndices, int32_t numMeshes, uint32_t *offsets)
 {

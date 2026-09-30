@@ -23,7 +23,6 @@ Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
 
-void skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance) { }
 void skinRenderCB(Atomic *atomic, InstanceDataHeader *header) { }
 void uploadSkinMatrices(Atomic *atomic) { }
 

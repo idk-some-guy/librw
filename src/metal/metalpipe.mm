@@ -18,9 +18,11 @@ static_assert(sizeof(InstAttrib) == sizeof(AttribDesc) &&
 	offsetof(InstAttrib, stride) == offsetof(AttribDesc, stride) &&
 	offsetof(InstAttrib, offset) == offsetof(AttribDesc, offset), "InstAttrib layout in metalinst.h");
 static_assert((int)INSTATTRIB_POS == ATTRIB_POS && (int)INSTATTRIB_NORMAL == ATTRIB_NORMAL &&
-	(int)INSTATTRIB_COLOR == ATTRIB_COLOR && (int)INSTATTRIB_TEXCOORDS0 == ATTRIB_TEXCOORDS0,
+	(int)INSTATTRIB_COLOR == ATTRIB_COLOR && (int)INSTATTRIB_WEIGHTS == ATTRIB_WEIGHTS &&
+	(int)INSTATTRIB_INDICES == ATTRIB_INDICES && (int)INSTATTRIB_TEXCOORDS0 == ATTRIB_TEXCOORDS0,
 	"attribute indices in metalinst.h");
 static_assert((int)INSTFMT_FLOAT2 == ATTRIBFMT_FLOAT2 && (int)INSTFMT_FLOAT3 == ATTRIBFMT_FLOAT3 &&
+	(int)INSTFMT_FLOAT4 == ATTRIBFMT_FLOAT4 && (int)INSTFMT_UCHAR4 == ATTRIBFMT_UCHAR4 &&
 	(int)INSTFMT_UCHAR4_NORM == ATTRIBFMT_UCHAR4_NORM, "attribute formats in metalinst.h");
 
 static InstanceStats instanceStats;
@@ -210,23 +212,24 @@ ObjPipeline::create(void)
 }
 
 void
-defaultInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
+allocInstanceVertices(InstanceDataHeader *header, const AttribDesc *attribs, int32 numAttribs)
+{
+	header->numAttribs = numAttribs;
+	header->attribDesc = rwNewT(AttribDesc, header->numAttribs, MEMDUR_EVENT | ID_GEOMETRY);
+	memcpy(header->attribDesc, attribs,
+	       header->numAttribs*sizeof(AttribDesc));
+	header->vertexLayout = registerVertexLayout(header->attribDesc, header->numAttribs);
+	header->vertexBuffer = rwNewT(uint8, header->totalNumVertex*header->attribDesc[0].stride,
+	                              MEMDUR_EVENT | ID_GEOMETRY);
+}
+
+void
+instanceDefaultAttribs(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 {
 	AttribDesc *attribs, *a;
 
 	bool isPrelit = !!(geo->flags & Geometry::PRELIT);
 	bool hasNormals = !!(geo->flags & Geometry::NORMALS);
-
-	if(!reinstance){
-		InstAttrib tmpAttribs[MAXINSTATTRIBS];
-		header->numAttribs = defaultVertexLayout(hasNormals, isPrelit, geo->numTexCoordSets, tmpAttribs);
-		header->attribDesc = rwNewT(AttribDesc, header->numAttribs, MEMDUR_EVENT | ID_GEOMETRY);
-		memcpy(header->attribDesc, tmpAttribs,
-		       header->numAttribs*sizeof(AttribDesc));
-		header->vertexLayout = registerVertexLayout(header->attribDesc, header->numAttribs);
-		header->vertexBuffer = rwNewT(uint8, header->totalNumVertex*header->attribDesc[0].stride,
-		                              MEMDUR_EVENT | ID_GEOMETRY);
-	}
 
 	attribs = header->attribDesc;
 	AttribDesc *end = attribs + header->numAttribs;
@@ -272,10 +275,29 @@ defaultInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 				geo->texCoords[n],
 				header->totalNumVertex, a->stride);
 	}
+}
 
+void
+uploadInstanceVertices(InstanceDataHeader *header)
+{
 	void *old = header->mtlVertexBuffer;
-	header->mtlVertexBuffer = newBuffer(header->vertexBuffer, header->totalNumVertex*attribs[0].stride);
+	header->mtlVertexBuffer = newBuffer(header->vertexBuffer, header->totalNumVertex*header->attribDesc[0].stride);
 	releaseBuffer(&old);
+}
+
+void
+defaultInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
+{
+	if(!reinstance){
+		InstAttrib tmp[MAXINSTATTRIBS];
+		AttribDesc descs[MAXINSTATTRIBS];
+		int32 n = defaultVertexLayout(!!(geo->flags & Geometry::NORMALS), !!(geo->flags & Geometry::PRELIT),
+		                              geo->numTexCoordSets, tmp);
+		memcpy(descs, tmp, n*sizeof(AttribDesc));
+		allocInstanceVertices(header, descs, n);
+	}
+	instanceDefaultAttribs(geo, header, reinstance);
+	uploadInstanceVertices(header);
 }
 
 void

@@ -16,17 +16,52 @@
 
 #include "rwmetal.h"
 #include "rwmetalplg.h"
+#include "rwmetalimpl.h"
+#include "metalinst.h"
 
 namespace rw {
 namespace metal {
 
 static ObjPipeline *skinPipe;
 
+void
+skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
+{
+	AttribDesc *a;
+	Skin *skin = Skin::get(geo);
+	if(skin == nil){
+		defaultInstanceCB(geo, header, reinstance);
+		return;
+	}
+	if(!reinstance){
+		InstAttrib tmp[MAXINSTATTRIBS];
+		AttribDesc descs[MAXINSTATTRIBS];
+		int32 n = skinVertexLayout(!!(geo->flags & Geometry::NORMALS), !!(geo->flags & Geometry::PRELIT),
+		                           geo->numTexCoordSets, tmp);
+		memcpy(descs, tmp, n*sizeof(AttribDesc));
+		allocInstanceVertices(header, descs, n);
+	}
+	instanceDefaultAttribs(geo, header, reinstance);
+	for(uint32 i = 0; i < header->numMeshes; i++)
+		header->inst[i].vertexAlpha = 0;
+	if(!reinstance){
+		for(a = header->attribDesc; a->index != ATTRIB_WEIGHTS; a++)
+			;
+		instV4d(VERT_FLOAT4, header->vertexBuffer + a->offset, (V4d*)skin->weights,
+			header->totalNumVertex, a->stride);
+		for(a = header->attribDesc; a->index != ATTRIB_INDICES; a++)
+			;
+		instColor(VERT_RGBA, header->vertexBuffer + a->offset, (RGBA*)skin->indices,
+			header->totalNumVertex, a->stride);
+	}
+	uploadInstanceVertices(header);
+}
+
 ObjPipeline*
 makeSkinPipeline(void)
 {
 	ObjPipeline *pipe = ObjPipeline::create();
-	pipe->instanceCB = defaultInstanceCB;
+	pipe->instanceCB = skinInstanceCB;
 	pipe->uninstanceCB = defaultUninstanceCB;
 	pipe->renderCB = skinRenderCB;
 	pipe->pluginID = ID_SKIN;

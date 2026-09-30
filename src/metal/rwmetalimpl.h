@@ -81,6 +81,9 @@ bool32 writeRasterPixels(Raster *raster, const uint8 *src);
 void resolveRasterTarget(Raster *raster);
 bool32 beginDraw(void);
 bool32 drawIndexed(InstanceDataHeader *header, InstanceData *inst);
+void allocInstanceVertices(InstanceDataHeader *header, const AttribDesc *attribs, int32 numAttribs);
+void instanceDefaultAttribs(Geometry *geo, InstanceDataHeader *header, bool32 reinstance);
+void uploadInstanceVertices(InstanceDataHeader *header);
 
 struct InstanceStats
 {
