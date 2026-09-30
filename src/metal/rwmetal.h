@@ -15,6 +15,7 @@ struct EngineOpenParams
 namespace metal {
 
 void registerPlatformPlugins(void);
+void setStatsInterval(uint32 seconds);
 
 extern Device renderdevice;
 

@@ -298,6 +298,7 @@ struct StatsLog
 	InstanceStats instance;
 };
 static StatsLog statsLog;
+static uint32 statsInterval;
 static void resetStatsLog(void);
 static char prewarmLine[128];
 static char statsLine[768];
@@ -2111,9 +2112,15 @@ logStats(void)
 }
 
 void
+setStatsInterval(uint32 seconds)
+{
+	statsInterval = seconds;
+}
+
+void
 logStatsIfDue(void)
 {
-	if(std::chrono::steady_clock::now() - statsLog.time >= std::chrono::seconds(10))
+	if(statsInterval && std::chrono::steady_clock::now() - statsLog.time >= std::chrono::seconds(statsInterval))
 		logStats();
 }
 
