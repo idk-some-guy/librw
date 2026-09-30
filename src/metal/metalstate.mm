@@ -1639,6 +1639,7 @@ enum
 	BLEND_DARKEN,
 	BLEND_REPLACE,
 	BLEND_INVERT,
+	BLEND_PREMUL,
 	NUMPREWARMBLENDS
 };
 
@@ -1651,6 +1652,7 @@ static const uint32 prewarmBlends[NUMPREWARMBLENDS][2] = {
 	{ BLENDZERO, BLENDINVSRCCOLOR },
 	{ BLENDONE, BLENDZERO },
 	{ BLENDINVDESTCOLOR, BLENDZERO },
+	{ BLENDONE, BLENDINVSRCALPHA },
 };
 
 struct PrewarmState
@@ -1665,6 +1667,13 @@ struct WorldLayout
 	bool prelit;
 	int32 numTexCoords;
 	const PrewarmState *states;
+	int32 numStates;
+};
+
+struct EnvLayout
+{
+	bool normals;
+	bool prelit;
 	int32 numStates;
 };
 
@@ -1696,6 +1705,15 @@ static const WorldLayout worldLayouts[] = {
 	{ true, true, 1, waterStates, nelem(waterStates) },
 	{ false, true, 0, unlitStates, nelem(unlitStates) },
 	{ true, false, 0, litStates, nelem(litStates) },
+};
+static const PrewarmState envStates[] = {
+	{ VARIANT_ALPHATEST, BLEND_PREMUL },
+	{ VARIANT_DIRECTIONALS | VARIANT_ALPHATEST, BLEND_PREMUL },
+};
+static const EnvLayout envLayouts[] = {
+	{ true, false, 2 },
+	{ false, true, 2 },
+	{ true, true, 1 },
 };
 static const PrewarmState im3dStates[] = {
 	{ 0, BLEND_OFF },
@@ -1759,6 +1777,14 @@ prewarmPipelines(void)
 				layout = registerVertexLayout(descs, n);
 				for(j = 0; j < (int32)nelem(litStates); j++)
 					prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
+			}
+		if(matfxEnvShader)
+			for(i = 0; i < (int32)nelem(envLayouts); i++){
+				n = defaultVertexLayout(envLayouts[i].normals, envLayouts[i].prelit, 1, attribs);
+				memcpy(descs, attribs, n*sizeof(AttribDesc));
+				layout = registerVertexLayout(descs, n);
+				for(j = 0; j < envLayouts[i].numStates; j++)
+					prewarm(matfxEnvShader, layout, envStates[j].variant, envStates[j].blend, DEPTHFMT_D32S8);
 			}
 		if(im3dShader)
 			for(i = 0; i < (int32)nelem(im3dStates); i++)
