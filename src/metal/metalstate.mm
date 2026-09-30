@@ -291,6 +291,7 @@ struct StatsLog
 	uint32 draws;
 	uint32 frameBytes;
 	uint32 ringPeak;
+	uint32 renderPasses, copies;
 	RasterStats raster;
 	InstanceStats instance;
 };
@@ -1916,9 +1917,12 @@ countDroppedDraw(void)
 static void
 resetStatsLog(void)
 {
+	FrameStats f = getFrameStats();
 	statsLog.time = std::chrono::steady_clock::now();
-	statsLog.framesAtStart = getFrameStats().framesShown;
+	statsLog.framesAtStart = f.framesShown;
 	statsLog.frames = statsLog.framesAtStart;
+	statsLog.renderPasses = f.renderPasses;
+	statsLog.copies = f.copies;
 	statsLog.draws = 0;
 	statsLog.frameBytes = 0;
 	statsLog.ringPeak = 0;
@@ -1929,7 +1933,8 @@ resetStatsLog(void)
 void
 logStats(void)
 {
-	uint32 frames = getFrameStats().framesShown;
+	FrameStats f = getFrameStats();
+	uint32 frames = f.framesShown;
 	uint32 interval = frames - statsLog.frames;
 	uint32 peak = statsLog.frameBytes > statsLog.ringPeak ? statsLog.frameBytes : statsLog.ringPeak;
 	RasterStats r = getRasterStats();
@@ -1937,19 +1942,23 @@ logStats(void)
 
 	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
 		"late pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
-		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u\n",
+		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.skinnedUnrouted,
 		in.stripRestartMeshes - statsLog.instance.stripRestartMeshes,
 		r.stagedUploads - statsLog.raster.stagedUploads, r.directUploads - statsLog.raster.directUploads,
 		r.mipmapBlits - statsLog.raster.mipmapBlits, r.gpuWaits - statsLog.raster.gpuWaits,
-		stats.blockSizeMismatches, stats.droppedDraws);
+		stats.blockSizeMismatches, stats.droppedDraws,
+		interval ? (double)(f.renderPasses - statsLog.renderPasses)/interval : 0.0,
+		interval ? (double)(f.copies - statsLog.copies)/interval : 0.0);
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();
 	statsLog.frames = frames;
 	statsLog.draws = stats.draws;
 	statsLog.ringPeak = 0;
+	statsLog.renderPasses = f.renderPasses;
+	statsLog.copies = f.copies;
 }
 
 void

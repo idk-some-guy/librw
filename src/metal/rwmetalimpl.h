@@ -58,6 +58,8 @@ struct FrameStats
 	uint32 framesShown;
 	uint32 drawablesAcquired;
 	uint32 framesPresented;
+	uint32 renderPasses;
+	uint32 copies;
 };
 FrameStats getFrameStats(void);
 

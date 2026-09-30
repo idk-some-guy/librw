@@ -260,6 +260,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	}
 
 	ctx->encoder = [getCommandBuffer(ctx) renderCommandEncoderWithDescriptor:desc];
+	frameStats.renderPasses++;
 	invalidateEncoderState();
 	ctx->encoderHasDepth = depth != nil;
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
@@ -641,6 +642,7 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 			toTexture:dtex destinationSlice:0 destinationLevel:0
 			destinationOrigin:MTLOriginMake(dx, dy, 0)];
 		[blit endEncoding];
+		frameStats.copies++;
 	}
 	natras = GETMETALRASTEREXT(dst->parent);
 	if(natras->autogenMipmap && dtex.mipmapLevelCount > 1){
