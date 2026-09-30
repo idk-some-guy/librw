@@ -1699,7 +1699,7 @@ struct EnvLayout
 };
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
-static const int32 targetIm2dBlends[] ={ BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
+static const int32 targetIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
 static const PrewarmState buildingStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
