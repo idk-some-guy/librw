@@ -584,6 +584,31 @@ create_metal_texture(int32 width, int32 height, int32 depth, int32 format, int32
 	return newras;
 }
 
+static bool32
+plain_has_alpha(uint8 *px, int32 n, int32 color)
+{
+	using namespace rw;
+
+	switch(color){
+	case Raster::C8888:
+		for(int32 i = 0; i < n; i++)
+			if(px[i*4+3] != 0xFF)
+				return 1;
+		break;
+	case Raster::C1555:
+		for(int32 i = 0; i < n; i++)
+			if((px[i*2+1] & 0x80) == 0)
+				return 1;
+		break;
+	case Raster::C4444:
+		for(int32 i = 0; i < n; i++)
+			if((px[i*2+1] & 0xF0) != 0xF0)
+				return 1;
+		break;
+	}
+	return 0;
+}
+
 static rw::Raster*
 plain_to_metal(rw::Raster *ras, bool32 swizzled)
 {
@@ -627,6 +652,8 @@ plain_to_metal(rw::Raster *ras, bool32 swizzled)
 			uint8 *in = tmp ? tmp : srcpx;
 			uint8 *out = dstpx;
 			int32 n = w*h;
+			if(i == 0)
+				PLUGINOFFSET(metal::MetalRaster, newras, metal::nativeRasterOffset)->hasAlpha = plain_has_alpha(srcpx, n, color);
 			switch(color){
 			case Raster::C8888:
 				for(int32 j = 0; j < n; j++, in += 4, out += 4)
