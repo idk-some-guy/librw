@@ -171,6 +171,25 @@ pipelineKey(const PipelineDesc &d)
 }
 
 uint32_t
+supportedSampleCount(uint32_t requested, uint32_t maxSamples)
+{
+	uint32_t n = 1;
+	while(n < 8 && n*2 <= requested && n*2 <= maxSamples)
+		n *= 2;
+	return n;
+}
+
+int32_t
+prewarmSampleCounts(uint32_t numSamples, uint32_t out[2])
+{
+	out[0] = 1;
+	if(numSamples <= 1)
+		return 1;
+	out[1] = numSamples;
+	return 2;
+}
+
+uint32_t
 shaderVariant(uint32_t lightBits, bool alphaTest)
 {
 	return (alphaTest ? 1u : 0u) | (lightBits & 7u) << 1;

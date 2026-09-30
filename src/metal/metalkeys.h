@@ -121,6 +121,9 @@ enum
 
 uint64_t pipelineKey(const PipelineDesc &d);
 
+uint32_t supportedSampleCount(uint32_t requested, uint32_t maxSamples);
+int32_t prewarmSampleCounts(uint32_t numSamples, uint32_t out[2]);
+
 enum { LIGHTBIT_DIRECT = 1, LIGHTBIT_POINT = 2, LIGHTBIT_SPOT = 4 };
 
 uint32_t shaderVariant(uint32_t lightBits, bool alphaTest);

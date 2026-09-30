@@ -2,6 +2,7 @@
 #include "metalobjc.h"
 #include "metalpass.h"
 #include "metalstate.h"
+#include "metalkeys.h"
 #include "rwmetalshader.h"
 
 #define GLFW_EXPOSE_NATIVE_COCOA
@@ -1070,7 +1071,7 @@ deviceSystemGLFW(DeviceReq req, void *arg, int32 n)
 			return 1;
 		return metalGlobals.numSamples;
 	case DEVICESETMULTISAMPLINGLEVELS:
-		metalGlobals.numSamples = MIN((uint32)n, metalCaps.maxSamples);
+		metalGlobals.numSamples = supportedSampleCount((uint32)n, metalCaps.maxSamples);
 		return 1;
 	default:
 		assert(0 && "not implemented");
