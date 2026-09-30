@@ -18,7 +18,6 @@
 #include "rwmetalshader.h"
 #include "rwmetalplg.h"
 #include "rwmetalimpl.h"
-#include "metalinst.h"
 #include "metalstate.h"
 #include "metalkeys.h"
 
@@ -31,10 +30,11 @@ static ObjPipeline *skinPipe;
 Shader *skinShader;
 static RawMatrix skinMatrices[MAXSKINBONES];
 
+#include "shaders/skin_metal.inc"
+
 bool32
 openSkin(void)
 {
-#include "shaders/skin_metal.inc"
 #include "shaders/simple_metal.inc"
 	const char *src[] = { header_metal_src, skin_metal_src, simple_metal_src, nil };
 	skinShader = Shader::create(src, "skinVS", "simpleFS", VARIANT_ALL);
@@ -59,11 +59,9 @@ skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 		return;
 	}
 	if(!reinstance){
-		InstAttrib tmp[MAXINSTATTRIBS];
-		AttribDesc descs[MAXINSTATTRIBS];
-		int32 n = skinVertexLayout(!!(geo->flags & Geometry::NORMALS), !!(geo->flags & Geometry::PRELIT),
-		                           geo->numTexCoordSets, tmp);
-		memcpy(descs, tmp, n*sizeof(AttribDesc));
+		AttribDesc descs[MAXVERTEXATTRIBS];
+		int32 n = skinVertexAttribs(geo->flags & Geometry::NORMALS, geo->flags & Geometry::PRELIT,
+		                            geo->numTexCoordSets, descs);
 		allocInstanceVertices(header, descs, n);
 	}
 	instanceDefaultAttribs(geo, header, reinstance);
@@ -152,7 +150,7 @@ skinRenderCB(Atomic *atomic, InstanceDataHeader *header)
 		setMaterial(flags, m->color, m->surfaceProps);
 		setTexture(0, m->texture);
 		rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
-		skinShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+		skinShader->use(drawVariant(vsBits));
 		drawInst(header, inst);
 		inst++;
 	}

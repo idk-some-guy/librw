@@ -7,7 +7,6 @@
 #include "rwmetalshader.h"
 #include "metalstate.h"
 #include "metalkeys.h"
-#include "metalinst.h"
 
 #define PLUGIN_ID 0
 
@@ -1767,8 +1766,7 @@ prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthF
 void
 prewarmPipelines(void)
 {
-	InstAttrib attribs[MAXINSTATTRIBS];
-	AttribDesc descs[MAXINSTATTRIBS];
+	AttribDesc descs[MAXVERTEXATTRIBS];
 	uint32 layout;
 	int32 i, j, n, depth;
 
@@ -1786,24 +1784,21 @@ prewarmPipelines(void)
 			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, targetIm2dBlends[i], DEPTHFMT_D32S8);
 		for(i = 0; i < (int32)nelem(worldLayouts); i++){
 			const WorldLayout &w = worldLayouts[i];
-			n = defaultVertexLayout(w.normals, w.prelit, w.numTexCoords, attribs);
-			memcpy(descs, attribs, n*sizeof(AttribDesc));
+			n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
 			layout = registerVertexLayout(descs, n);
 			for(j = 0; j < w.numStates; j++)
 				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
 		}
 		if(skinShader)
 			for(i = 0; i < 2; i++){
-				n = skinVertexLayout(true, i == 0, 1, attribs);
-				memcpy(descs, attribs, n*sizeof(AttribDesc));
+				n = skinVertexAttribs(true, i == 0, 1, descs);
 				layout = registerVertexLayout(descs, n);
 				for(j = 0; j < (int32)nelem(litStates); j++)
 					prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
 			}
 		if(matfxEnvShader)
 			for(i = 0; i < (int32)nelem(envLayouts); i++){
-				n = defaultVertexLayout(envLayouts[i].normals, envLayouts[i].prelit, 1, attribs);
-				memcpy(descs, attribs, n*sizeof(AttribDesc));
+				n = defaultVertexAttribs(envLayouts[i].normals, envLayouts[i].prelit, 1, descs);
 				layout = registerVertexLayout(descs, n);
 				for(j = 0; j < envLayouts[i].numStates; j++)
 					prewarm(matfxEnvShader, layout, envStates[j].variant, envStates[j].blend, DEPTHFMT_D32S8);
@@ -1818,17 +1813,15 @@ prewarmPipelines(void)
 	fprintf(stderr, "%s", prewarmLine);
 }
 
-bool32
-prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
+static bool32
+hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
 {
 	PipelineEntry *e;
 	PipelineDesc d;
 
-	if(getContext() == nil || shader == nil || (uv2 ? im2dUV2VertexLayout : im2dVertexLayout) == 0)
-		return 0;
 	d.shader = shader->shaderId;
-	d.variant = VARIANT_ALPHATEST & shader->variantMask;
-	d.vertexLayout = uv2 ? im2dUV2VertexLayout : im2dVertexLayout;
+	d.variant = variant & shader->variantMask;
+	d.vertexLayout = layout;
 	d.blendEnable = blend != 0;
 	d.srcBlend = srcBlend;
 	d.destBlend = destBlend;
@@ -1842,6 +1835,33 @@ prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int3
 	}
 	hostPrewarming = false;
 	return e != nil;
+}
+
+bool32
+prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
+{
+	uint32 layout = uv2 ? im2dUV2VertexLayout : im2dVertexLayout;
+	if(getContext() == nil || shader == nil || layout == 0)
+		return 0;
+	return hostPrewarm(shader, layout, VARIANT_ALPHATEST, blend, srcBlend, destBlend, depth);
+}
+
+bool32
+prewarmShader(Shader *shader, const AttribDesc *attribs, int32 numAttribs, uint32 variant,
+              bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
+{
+	uint32 layout;
+	if(getContext() == nil || shader == nil || attribs == nil || numAttribs <= 0)
+		return 0;
+	for(int32 i = 0; i < numAttribs; i++)
+		if(attribs[i].format < ATTRIBFMT_FLOAT2 || attribs[i].format > ATTRIBFMT_UCHAR4_NORM || attribs[i].index >= 31){
+			RWERROR((ERR_GENERAL, "vertex attribute format or index out of range"));
+			return 0;
+		}
+	layout = registerVertexLayout(attribs, numAttribs);
+	if(layout == 0)
+		return 0;
+	return hostPrewarm(shader, layout, variant, blend, srcBlend, destBlend, depth);
 }
 
 bool32

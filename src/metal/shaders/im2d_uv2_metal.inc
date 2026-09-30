@@ -9,7 +9,7 @@ const char *im2d_uv2_metal_src =
 
 "struct VertexOutUV2\n"
 "{\n"
-"	float4 position [[position]];\n"
+"	float4 position [[position, invariant]];\n"
 "	float4 color;\n"
 "	float2 tex0;\n"
 "	float2 tex1;\n"

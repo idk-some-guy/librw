@@ -71,7 +71,7 @@ struct Material
 
 struct VertexOut
 {
-	float4 position [[position]];
+	float4 position [[position, invariant]];
 	float4 color;
 	float2 tex0;
 	float fog;

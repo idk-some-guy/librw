@@ -17,7 +17,7 @@ const char *matfx_env_metal_src =
 
 "struct EnvVertexOut\n"
 "{\n"
-"	float4 position [[position]];\n"
+"	float4 position [[position, invariant]];\n"
 "	float4 color;\n"
 "	float4 envColor;\n"
 "	float2 tex0;\n"

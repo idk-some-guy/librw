@@ -16,7 +16,7 @@ struct EnvIn
 
 struct EnvVertexOut
 {
-	float4 position [[position]];
+	float4 position [[position, invariant]];
 	float4 color;
 	float4 envColor;
 	float2 tex0;

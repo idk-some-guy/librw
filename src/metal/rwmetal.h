@@ -164,15 +164,21 @@ enum
 extern const char *header_metal_src;
 extern const char *im2d_metal_src;
 extern const char *im2d_uv2_metal_src;
+extern const char *default_metal_src;
+extern const char *skin_metal_src;
+extern const char *simple_metal_src;
 
 extern Shader *im2dOverrideShader;
 
 void im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices);
-bool32 prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth);
 
-void beginScene(void);
-void endScene(void);
+uint32 drawVariant(int32 vsBits);
+int32 defaultVertexAttribs(bool32 normals, bool32 prelit, int32 numTexCoordSets, AttribDesc *out);
+int32 skinVertexAttribs(bool32 normals, bool32 prelit, int32 numTexCoordSets, AttribDesc *out);
+bool32 prewarmShader(Shader *shader, const AttribDesc *attribs, int32 numAttribs, uint32 variant,
+                     bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth);
+bool32 prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth);
 
 void setProjectionMatrix(float32*);
 void setViewMatrix(float32*);

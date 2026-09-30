@@ -72,7 +72,7 @@ const char *header_metal_src =
 
 "struct VertexOut\n"
 "{\n"
-"	float4 position [[position]];\n"
+"	float4 position [[position, invariant]];\n"
 "	float4 color;\n"
 "	float2 tex0;\n"
 "	float fog;\n"

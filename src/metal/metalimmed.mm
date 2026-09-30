@@ -279,7 +279,7 @@ im3DBegin(void)
 	if(im3dShader == nil || im3dNumVertices == 0)
 		return 0;
 	if(im3dLit)
-		defaultShader->use(shaderVariant(im3dBits & VSLIGHT_MASK, getAlphaTest()));
+		defaultShader->use(drawVariant(im3dBits));
 	else
 		im3dShader->use(getAlphaTest() ? VARIANT_ALPHATEST : 0);
 	if(!beginDraw())

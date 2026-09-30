@@ -8,7 +8,7 @@ struct Im2DUV2In
 
 struct VertexOutUV2
 {
-	float4 position [[position]];
+	float4 position [[position, invariant]];
 	float4 color;
 	float2 tex0;
 	float2 tex1;

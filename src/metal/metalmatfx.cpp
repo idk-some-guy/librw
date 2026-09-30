@@ -76,7 +76,7 @@ matfxDefaultRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits,
 	setMaterial(flags, m->color, m->surfaceProps);
 	setTexture(0, m->texture);
 	rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
-	defaultShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+	defaultShader->use(drawVariant(vsBits));
 	drawInst(header, inst);
 }
 
@@ -102,7 +102,7 @@ matfxEnvRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits, uin
 	setMatFXConstants(&envMtx, fxparams, MatFX::envMapApplyLight ? &zero : &one, &envcol);
 	rw::SetRenderState(VERTEXALPHA, 1);
 	rw::SetRenderState(SRCBLEND, BLENDONE);
-	matfxEnvShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+	matfxEnvShader->use(drawVariant(vsBits));
 	drawInst(header, inst);
 	rw::SetRenderState(SRCBLEND, BLENDSRCALPHA);
 }

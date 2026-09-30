@@ -72,7 +72,9 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variantM
 		all = [NSMutableString string];
 		for(i = 0; src[i]; i++)
 			[all appendString:[NSString stringWithUTF8String:src[i]]];
-		lib = [ctx->device newLibraryWithSource:all options:nil error:&err];
+		MTLCompileOptions *opts = [MTLCompileOptions new];
+		opts.preserveInvariance = YES;
+		lib = [ctx->device newLibraryWithSource:all options:opts error:&err];
 		if(lib == nil){
 			RWERROR((ERR_GENERAL, err.localizedDescription.UTF8String));
 			return nil;

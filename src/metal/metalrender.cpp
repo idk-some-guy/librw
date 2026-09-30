@@ -117,6 +117,12 @@ lightingCB(void)
 	return setLights(&lightData);
 }
 
+uint32
+drawVariant(int32 vsBits)
+{
+	return shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest());
+}
+
 void
 defaultRenderCB(Atomic *atomic, InstanceDataHeader *header)
 {
@@ -140,7 +146,7 @@ defaultRenderCB(Atomic *atomic, InstanceDataHeader *header)
 
 		rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
 
-		defaultShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+		defaultShader->use(drawVariant(vsBits));
 
 		drawInst(header, inst);
 		inst++;

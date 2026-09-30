@@ -25,6 +25,25 @@ static_assert((int)INSTATTRIB_POS == ATTRIB_POS && (int)INSTATTRIB_NORMAL == ATT
 static_assert((int)INSTFMT_FLOAT2 == ATTRIBFMT_FLOAT2 && (int)INSTFMT_FLOAT3 == ATTRIBFMT_FLOAT3 &&
 	(int)INSTFMT_FLOAT4 == ATTRIBFMT_FLOAT4 && (int)INSTFMT_UCHAR4 == ATTRIBFMT_UCHAR4 &&
 	(int)INSTFMT_UCHAR4_NORM == ATTRIBFMT_UCHAR4_NORM, "attribute formats in metalinst.h");
+static_assert(MAXVERTEXATTRIBS == MAXINSTATTRIBS, "MAXVERTEXATTRIBS");
+
+int32
+defaultVertexAttribs(bool32 normals, bool32 prelit, int32 numTexCoordSets, AttribDesc *out)
+{
+	InstAttrib tmp[MAXINSTATTRIBS];
+	int32 n = defaultVertexLayout(!!normals, !!prelit, numTexCoordSets, tmp);
+	memcpy(out, tmp, n*sizeof(AttribDesc));
+	return n;
+}
+
+int32
+skinVertexAttribs(bool32 normals, bool32 prelit, int32 numTexCoordSets, AttribDesc *out)
+{
+	InstAttrib tmp[MAXINSTATTRIBS];
+	int32 n = skinVertexLayout(!!normals, !!prelit, numTexCoordSets, tmp);
+	memcpy(out, tmp, n*sizeof(AttribDesc));
+	return n;
+}
 
 static InstanceStats instanceStats;
 
@@ -288,11 +307,9 @@ void
 defaultInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 {
 	if(!reinstance){
-		InstAttrib tmp[MAXINSTATTRIBS];
-		AttribDesc descs[MAXINSTATTRIBS];
-		int32 n = defaultVertexLayout(!!(geo->flags & Geometry::NORMALS), !!(geo->flags & Geometry::PRELIT),
-		                              geo->numTexCoordSets, tmp);
-		memcpy(descs, tmp, n*sizeof(AttribDesc));
+		AttribDesc descs[MAXVERTEXATTRIBS];
+		int32 n = defaultVertexAttribs(geo->flags & Geometry::NORMALS, geo->flags & Geometry::PRELIT,
+		                               geo->numTexCoordSets, descs);
 		allocInstanceVertices(header, descs, n);
 	}
 	instanceDefaultAttribs(geo, header, reinstance);
