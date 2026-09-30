@@ -1,4 +1,5 @@
 #ifdef RW_METAL
+#include <chrono>
 #include "metalobjc.h"
 #include "metalpass.h"
 #include "metalstate.h"
@@ -422,6 +423,12 @@ FrameStats
 getFrameStats(void)
 {
 	return frameStats;
+}
+
+void
+resetDrawableWaitMax(void)
+{
+	frameStats.drawableWaitMaxUs = 0;
 }
 
 RasterStats
@@ -1332,8 +1339,13 @@ showRaster(Raster *raster, uint32 flags)
 		if(ctx->layer && ctx->window){
 			syncLayer(ctx);
 			ctx->layer.displaySyncEnabled = (flags & Raster::FLIPWAITVSYNCH) != 0;
-			if(ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0)
+			if(ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0){
+				auto start = std::chrono::steady_clock::now();
 				drawable = [ctx->layer nextDrawable];
+				uint32 us = (uint32)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+				if(us > frameStats.drawableWaitMaxUs)
+					frameStats.drawableWaitMaxUs = us;
+			}
 			if(drawable){
 				frameStats.drawablesAcquired++;
 				composite(ctx, raster, drawable.texture);

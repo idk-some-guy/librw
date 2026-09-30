@@ -87,6 +87,7 @@ struct StateStats
 	uint32 blockUploads[9];
 	uint32 vertexBlockBinds[9];
 	uint32 fragmentBlockBinds[9];
+	uint64 hostPrewarmUs;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);

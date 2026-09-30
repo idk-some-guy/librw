@@ -63,8 +63,10 @@ struct FrameStats
 	uint32 renderPasses;
 	uint32 copies;
 	uint32 depthDetached;
+	uint32 drawableWaitMaxUs;
 };
 FrameStats getFrameStats(void);
+void resetDrawableWaitMax(void);
 
 struct RasterStats
 {

@@ -293,13 +293,14 @@ struct StatsLog
 	uint32 frameBytes;
 	uint32 ringPeak;
 	uint32 renderPasses, copies;
+	uint32 customUploads, materialUploads, drawablesAcquired;
 	RasterStats raster;
 	InstanceStats instance;
 };
 static StatsLog statsLog;
 static void resetStatsLog(void);
 static char prewarmLine[128];
-static char statsLine[512];
+static char statsLine[768];
 static char dropLine[256];
 static std::unordered_set<uint32> dropsReported;
 
@@ -1865,6 +1866,7 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 	d.writeMask = MTLColorWriteMaskAll;
 	d.colorFormat = COLORFMT_RGBA8;
 	d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	auto start = std::chrono::steady_clock::now();
 	hostPrewarming = true;
 	@autoreleasepool {
 		for(i = 0; i < n; i++){
@@ -1874,6 +1876,7 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 		}
 	}
 	hostPrewarming = false;
+	stats.hostPrewarmUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
 	return ok;
 }
 
@@ -2055,6 +2058,9 @@ resetStatsLog(void)
 	statsLog.frames = statsLog.framesAtStart;
 	statsLog.renderPasses = f.renderPasses;
 	statsLog.copies = f.copies;
+	statsLog.customUploads = stats.blockUploads[BUFFER_CUSTOM];
+	statsLog.materialUploads = stats.blockUploads[BUFFER_MATERIAL];
+	statsLog.drawablesAcquired = f.drawablesAcquired;
 	statsLog.draws = 0;
 	statsLog.frameBytes = 0;
 	statsLog.ringPeak = 0;
@@ -2074,7 +2080,9 @@ logStats(void)
 
 	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
 		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
-		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f\n",
+		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f "
+		"custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms "
+		"host prewarm %.1f ms samples %u\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
@@ -2083,7 +2091,13 @@ logStats(void)
 		r.mipmapBlits - statsLog.raster.mipmapBlits, r.gpuWaits - statsLog.raster.gpuWaits,
 		stats.blockSizeMismatches, stats.droppedDraws,
 		interval ? (double)(f.renderPasses - statsLog.renderPasses)/interval : 0.0,
-		interval ? (double)(f.copies - statsLog.copies)/interval : 0.0);
+		interval ? (double)(f.copies - statsLog.copies)/interval : 0.0,
+		interval ? (double)(stats.blockUploads[BUFFER_CUSTOM] - statsLog.customUploads)/interval : 0.0,
+		interval ? (double)(stats.blockUploads[BUFFER_MATERIAL] - statsLog.materialUploads)/interval : 0.0,
+		interval - (f.drawablesAcquired - statsLog.drawablesAcquired),
+		f.drawableWaitMaxUs/1000.0, stats.hostPrewarmUs/1000.0,
+		metalGlobals.numSamples ? metalGlobals.numSamples : 1);
+	resetDrawableWaitMax();
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();
 	statsLog.frames = frames;
@@ -2091,6 +2105,9 @@ logStats(void)
 	statsLog.ringPeak = 0;
 	statsLog.renderPasses = f.renderPasses;
 	statsLog.copies = f.copies;
+	statsLog.customUploads = stats.blockUploads[BUFFER_CUSTOM];
+	statsLog.materialUploads = stats.blockUploads[BUFFER_MATERIAL];
+	statsLog.drawablesAcquired = f.drawablesAcquired;
 }
 
 void
