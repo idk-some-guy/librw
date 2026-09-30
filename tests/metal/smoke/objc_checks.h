@@ -1,0 +1,11 @@
+bool TextureTexel(void *texture, int *width, int *height, unsigned char rgba[4]);
+bool TextureTexelAt(void *texture, int level, int x, int y, unsigned char rgba[4]);
+int TextureLevels(void *texture);
+bool BufferBytes(void *buffer, unsigned offset, void *dst, unsigned size);
+bool BufferOnCurrentDevice(void *buffer);
+void WatchObject(void *object);
+bool WatchedObjectAlive(void);
+bool BeginTestEncoder(void);
+void EndTestEncoder(void);
+void RunInPool(void (*fn)(void *arg), void *arg);
+bool DefaultSamplePositions(int count, float *xy);

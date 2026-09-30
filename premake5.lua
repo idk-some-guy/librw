@@ -399,3 +399,42 @@ project "hopalong"
 	removeplatforms { "ps2" }
 	removeplatforms { "macosx*" }
 
+if os.istarget("macosx") then
+	function metalpuretest(name, source)
+		project(name)
+			kind "ConsoleApp"
+			targetdir (Bindir)
+			optimize "Off"
+			undefines { "NDEBUG" }
+			buildoptions { "-Wall", "-Wextra" }
+			includedirs { "src/metal" }
+			files { path.join("tests/metal/pure", name .. ".cpp"), path.join("src/metal", source) }
+	end
+
+	metalpuretest("metal_fan_test", "metalfan.cpp")
+	metalpuretest("metal_format_test", "metalformat.cpp")
+	metalpuretest("metal_inst_test", "metalinst.cpp")
+	metalpuretest("metal_keys_test", "metalkeys.cpp")
+	metalpuretest("metal_pass_test", "metalpass.cpp")
+
+	project "metal_smoke"
+		kind "ConsoleApp"
+		targetdir (Bindir)
+		optimize "Off"
+		symbols "On"
+		buildoptions { "-O1", "-Wall" }
+		includedirs { "." }
+		files { "tests/metal/smoke/*.cpp", "tests/metal/smoke/*.h", "tests/metal/smoke/*.mm" }
+		libdirs { Libdir }
+		links { "librw", "glfw", "Metal.framework", "QuartzCore.framework", "Cocoa.framework" }
+		if _OPTIONS["metal-asan"] then
+			targetsuffix "_asan"
+			objdir "build/obj-asan"
+			buildoptions { "-fsanitize=address", "-fno-omit-frame-pointer" }
+			linkoptions { "-fsanitize=address" }
+		end
+		filter { "files:**.mm" }
+			compileas "Objective-C++"
+			buildoptions { "-fobjc-arc" }
+		filter {}
+end
