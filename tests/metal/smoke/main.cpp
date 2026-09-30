@@ -2974,13 +2974,13 @@ struct NativePalCase
 };
 
 static const NativePalCase palCases[] = {
-	{ "D3D8 native PAL8 8x4 with an 8888 palette and 4 levels reads as the game reads it, every level exact",
+	{ "D3D8 native PAL8 8x4 with an 8888 palette and 4 levels reads as the file stores it, every level exact",
 	  Raster::PAL8 | Raster::C8888, 8, 4, 4, true },
-	{ "D3D8 native PAL8 8x4 with an 888 palette and 4 levels reads as the game reads it, every level exact",
+	{ "D3D8 native PAL8 8x4 with an 888 palette and 4 levels reads as the file stores it, every level exact",
 	  Raster::PAL8 | Raster::C888, 8, 4, 4, false },
-	{ "D3D8 native PAL4 8x4 with an 8888 palette and 4 levels reads as the game reads it, every level exact",
+	{ "D3D8 native PAL4 8x4 with an 8888 palette and 4 levels reads as the file stores it, every level exact",
 	  Raster::PAL4 | Raster::C8888, 8, 4, 4, true },
-	{ "D3D8 native PAL4 8x4 with an 888 palette and 4 levels reads as the game reads it, every level exact",
+	{ "D3D8 native PAL4 8x4 with an 888 palette and 4 levels reads as the file stores it, every level exact",
 	  Raster::PAL4 | Raster::C888, 8, 4, 4, false },
 };
 
@@ -3774,7 +3774,7 @@ CheckRenderFastOffset(void)
 static bool
 CheckRenderFastAsFullScreenFilter(void)
 {
-	const char *name = "a renderFast copy drawn back over the frame keeps the frame, as the colour filter does";
+	const char *name = "a renderFast copy drawn back over the frame keeps the frame, as a full-screen filter does";
 	Raster *t = Raster::create(1024, 512, 0, Raster::CAMERATEXTURE);
 	if(t == nil)
 		return Report(false, name);

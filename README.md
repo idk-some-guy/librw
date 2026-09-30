@@ -16,6 +16,10 @@ BSP is not supported at all.
 For rendering we have D3D9 and OpenGL (>=2.1, ES >= 2.0) backends.
 Rendering some things on the PS2 is working as a test only.
 
+This fork adds a Metal backend for Apple silicon Macs running macOS 14 or later.
+See [src/metal/README.md](src/metal/README.md) for its design, the contract for
+host pipelines, and how to build and test it.
+
 # Uses
 
 librw can be used for rendering [GTA](https://github.com/gtamodding/re3).

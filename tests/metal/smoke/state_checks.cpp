@@ -102,14 +102,14 @@ bool
 CheckPrewarmedPipelines(void)
 {
 	metal::StateStats s = metal::getStateStats();
-	bool radar = metal::pipelineCached(0x000023e210010401ull);
-	if(!radar)
-		Detail("  radar mask pipeline 000023e210010401 is not cached\n");
-	bool ok = s.pipelinesAtInit == 51 && s.pipelineFailures == 0 && s.blockSizeMismatches == 0 && radar;
+	bool depthOnlyIm2d = metal::pipelineCached(0x000023e210010401ull);
+	if(!depthOnlyIm2d)
+		Detail("  depth-only im2d pipeline 000023e210010401 is not cached\n");
+	bool ok = s.pipelinesAtInit == 51 && s.pipelineFailures == 0 && s.blockSizeMismatches == 0 && depthOnlyIm2d;
 	if(!ok)
 		Detail("  pipelines at init %u, after init %u, failures %u, uniform block size mismatches %u\n",
 		       s.pipelinesAtInit, s.pipelinesLate, s.pipelineFailures, s.blockSizeMismatches);
-	return Report(ok, "51 im2d, world, skin, env and im3d pipeline states prewarmed at init, radar mask included");
+	return Report(ok, "51 im2d, world, skin, env and im3d pipeline states prewarmed at init, depth-only im2d included");
 }
 
 struct StateValue

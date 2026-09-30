@@ -1705,7 +1705,7 @@ struct EnvLayout
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
 static const int32 im2dTargetBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
-static const PrewarmState buildingStates[] = {
+static const PrewarmState prelitStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
 	{ VARIANT_ALPHATEST, BLEND_ALPHAADD },
@@ -1716,19 +1716,19 @@ static const PrewarmState litStates[] = {
 	{ VARIANT_DIRECTIONALS, BLEND_OFF },
 	{ VARIANT_DIRECTIONALS | VARIANT_ALPHATEST, BLEND_ALPHA },
 };
-static const PrewarmState unlitStates[] = {
-	{ 0, BLEND_OFF },
-	{ VARIANT_ALPHATEST, BLEND_ALPHA },
-};
-static const PrewarmState waterStates[] = {
+static const PrewarmState litPrelitStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
 	{ VARIANT_ALPHATEST, BLEND_REPLACE },
 };
+static const PrewarmState unlitStates[] = {
+	{ 0, BLEND_OFF },
+	{ VARIANT_ALPHATEST, BLEND_ALPHA },
+};
 static const WorldLayout worldLayouts[] = {
-	{ false, true, 1, buildingStates, nelem(buildingStates) },
+	{ false, true, 1, prelitStates, nelem(prelitStates) },
 	{ true, false, 1, litStates, nelem(litStates) },
-	{ true, true, 1, waterStates, nelem(waterStates) },
+	{ true, true, 1, litPrelitStates, nelem(litPrelitStates) },
 	{ false, true, 0, unlitStates, nelem(unlitStates) },
 	{ true, false, 0, litStates, nelem(litStates) },
 };
@@ -1750,7 +1750,7 @@ static const PrewarmState im3dStates[] = {
 	{ VARIANT_ALPHATEST, BLEND_REPLACE },
 };
 static const WorldLayout uv2WorldLayouts[] = {
-	{ false, true, 2, buildingStates, nelem(buildingStates) },
+	{ false, true, 2, prelitStates, nelem(prelitStates) },
 };
 
 static void

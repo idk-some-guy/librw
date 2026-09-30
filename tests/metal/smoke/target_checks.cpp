@@ -450,7 +450,6 @@ CheckCopyThenSampleSameFrame(void)
 
 struct ShadowRig { Target main; Target resample; };
 
-// ShadowCamera.cpp:71-116 and :118-133
 static bool
 MakeShadowRig(ShadowRig *rig)
 {
@@ -505,7 +504,6 @@ Im2DVertexAt(metal::Im2DVertex *v, float x, float y, float recipZ)
 	v->setColor(255, 255, 255, 255);
 }
 
-// RwHelper.cpp:352-392
 static void
 Im2DRenderQuad(float x1, float y1, float x2, float y2, float recipCamZ, float uvOffset)
 {
@@ -521,7 +519,6 @@ Im2DRenderQuad(float x1, float y1, float x2, float y2, float recipCamZ, float uv
 	im2d::RenderPrimitive(PRIMTYPETRISTRIP, v, 4);
 }
 
-// ShadowCamera.cpp:243-297
 static void
 InvertRaster(Target *t)
 {
@@ -543,7 +540,6 @@ InvertRaster(Target *t)
 	SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
 }
 
-// ShadowCamera.cpp:176-208, one atomic standing for the clump
 static void
 ShadowUpdate(ShadowRig *rig, Atomic *atomic)
 {
@@ -560,7 +556,6 @@ ShadowUpdate(ShadowRig *rig, Atomic *atomic)
 	rig->main.cam->endUpdate();
 }
 
-// ShadowCamera.cpp:362-396
 static void
 ShadowResample(ShadowRig *rig)
 {
@@ -580,7 +575,6 @@ ShadowResample(ShadowRig *rig)
 	rig->resample.cam->endUpdate();
 }
 
-// ShadowCamera.cpp:491-549 with the colour Shadows.cpp:969 passes
 static void
 ShadowBorder(Target *t)
 {
@@ -604,7 +598,6 @@ ShadowBorder(Target *t)
 	t->cam->endUpdate();
 }
 
-// ShadowCamera.cpp:398-453
 static void
 ShadowBlur(Target *blur, Raster *dst, int32 passes)
 {
@@ -708,7 +701,7 @@ DetailBorderRing(Raster *ras)
 static bool
 CheckShadowCameraChain(void)
 {
-	const char *name = "a skinned actor's shadow is rendered, inverted, resampled, bordered and darkens the scene";
+	const char *name = "a skinned caster's shadow is rendered, inverted, resampled, bordered and darkens the scene";
 	ShadowRig rig;
 	if(!MakeShadowRig(&rig))
 		return Report(false, name);
@@ -982,7 +975,6 @@ RemoveLight(Light *l)
 	f->destroy();
 }
 
-// custompipes.cpp:57-92 and :122-164
 static bool
 CheckEnvMapRenderStatesPrewarmed(void)
 {
@@ -1055,7 +1047,7 @@ CheckEnvMapRenderStatesPrewarmed(void)
 static bool
 CheckShadowFrameBudget(void)
 {
-	const char *name = "eight actor shadows and the scene take 17 passes, no copy and at most 12 KB of ring per actor, with no pipeline built late";
+	const char *name = "eight skinned caster shadows and the scene take 17 passes, no copy and at most 12 KB of ring per skinned caster, with no pipeline built late";
 	const int N = 8;
 	ShadowRig rigs[N];
 	Geometry *geos[N];
@@ -1109,7 +1101,6 @@ CheckShadowFrameBudget(void)
 	RestoreSampling(sampling);
 	late = metal::getStateStats().pipelinesLate - late;
 
-	Detail("  %u shadow ring bytes for %d actors, %u per actor\n", bytes, N, bytes/N);
 	if(passCount != 2*N + 1 || copyCount != 0){
 		Detail("  %u render passes and %u copies, expected %d and 0\n", passCount, copyCount, 2*N + 1);
 		ok = false;

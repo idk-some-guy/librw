@@ -2763,19 +2763,19 @@ PrewarmKey(metal::Shader *sh,uint32 layout, uint32 variant, bool blend, uint32 s
 }
 
 static bool
-CheckGameKeysCached(void)
+CheckInitKeysCached(void)
 {
-	uint32 ped = FindSkinLayout(true);
-	uint32 actor = FindSkinLayout(false);
-	bool ok = Expect(ped == 7 && actor == 8, "skin layouts %u and %u, expected 7 and 8", ped, actor);
-	uint32 vehicle = FindWorldLayout(true, false);
-	uint32 building = FindWorldLayout(false, true);
-	uint32 water = FindWorldLayout(true, true);
-	ok &= Expect(vehicle == 4 && building == 3 && water == 2, "world layouts %u, %u and %u, expected 4, 3 and 2",
-	             vehicle, building, water);
+	uint32 skinPrelit = FindSkinLayout(true);
+	uint32 skinLit = FindSkinLayout(false);
+	bool ok = Expect(skinPrelit == 7 && skinLit == 8, "skin layouts %u and %u, expected 7 and 8", skinPrelit, skinLit);
+	uint32 litLayout = FindWorldLayout(true, false);
+	uint32 prelitLayout = FindWorldLayout(false, true);
+	uint32 litPrelitLayout = FindWorldLayout(true, true);
+	ok &= Expect(litLayout == 4 && prelitLayout == 3 && litPrelitLayout == 2, "world layouts %u, %u and %u, expected 4, 3 and 2",
+	             litLayout, prelitLayout, litPrelitLayout);
 	uint64 keys[16];
 	int n = 0;
-	const uint32 layouts[2] = { ped, actor };
+	const uint32 layouts[2] = { skinPrelit, skinLit };
 	for(uint32 layout : layouts){
 		keys[n++] = PrewarmKey(metal::skinShader, layout, 0, false, 0, 0);
 		keys[n++] = PrewarmKey(metal::skinShader, layout, metal::VARIANT_ALPHATEST, true, BLENDSRCALPHA, BLENDINVSRCALPHA);
@@ -2786,10 +2786,10 @@ CheckGameKeysCached(void)
 	keys[n++] = PrewarmKey(metal::im2dShader, metal::im2dVertexLayout, metal::VARIANT_ALPHATEST, true, BLENDINVDESTCOLOR, BLENDZERO);
 	keys[n++] = PrewarmKey(metal::im2dShader, metal::im2dVertexLayout, metal::VARIANT_ALPHATEST, true, BLENDONE, BLENDZERO);
 	keys[n++] = PrewarmKey(metal::im2dShader, metal::im2dVertexLayout, metal::VARIANT_ALPHATEST, true, BLENDZERO, BLENDSRCCOLOR);
-	const uint32 envLayouts[3] = { vehicle, building, water };
+	const uint32 envLayouts[3] = { litLayout, prelitLayout, litPrelitLayout };
 	for(uint32 layout : envLayouts){
 		keys[n++] = PrewarmKey(metal::matfxEnvShader, layout, metal::VARIANT_ALPHATEST, true, BLENDONE, BLENDINVSRCALPHA);
-		if(layout != water)
+		if(layout != litPrelitLayout)
 			keys[n++] = PrewarmKey(metal::matfxEnvShader, layout, metal::VARIANT_DIRECTIONALS | metal::VARIANT_ALPHATEST, true,
 			                       BLENDONE, BLENDINVSRCALPHA);
 	}
@@ -2799,16 +2799,16 @@ CheckGameKeysCached(void)
 }
 
 static bool
-CheckGamePipelinesPrewarmed(void)
+CheckInitPipelinesPrewarmed(void)
 {
-	const char *name = "the game's world, vehicle, ped, water, matfx, im3d, radar and shadow camera states draw without a pipeline built after init";
+	const char *name = "prewarmed world, skin, env, im3d, depth-only im2d and target states draw without a pipeline built after init";
 	static const RGBA cut[1] = { { 255, 0, 0, 128 } };
 	Texture *alphaTex = MakeTexture(1, 1, cut, Texture::NEAREST, Texture::WRAP, Texture::WRAP);
 	if(alphaTex == nil)
 		return Report(false, name);
-	const uint32 building = Geometry::PRELIT | Geometry::TEXTURED | Geometry::LIGHT;
-	const uint32 vehicle = Geometry::NORMALS | Geometry::TEXTURED | Geometry::LIGHT;
-	const uint32 water = Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED;
+	const uint32 prelitFlags = Geometry::PRELIT | Geometry::TEXTURED | Geometry::LIGHT;
+	const uint32 litFlags = Geometry::NORMALS | Geometry::TEXTURED | Geometry::LIGHT;
+	const uint32 litPrelitFlags = Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED;
 	const uint32 untexturedPrelit = Geometry::PRELIT | Geometry::LIGHT;
 	const uint32 untexturedLit = Geometry::NORMALS | Geometry::LIGHT;
 	const RGBA halfWhite = { 255, 255, 255, 128 };
@@ -2816,7 +2816,7 @@ CheckGamePipelinesPrewarmed(void)
 	Light *dir = MakeLight(Light::DIRECTIONAL, 0.5f, 0.5f, 0.5f);
 	saved.world->addLight(amb);
 	saved.world->addLight(dir);
-	bool cached = CheckGameKeysCached();
+	bool cached = CheckInitKeysCached();
 	metal::StateStats before = metal::getStateStats();
 
 	WorldBegin(GREY);
@@ -2824,32 +2824,32 @@ CheckGamePipelinesPrewarmed(void)
 		if(!lit)
 			saved.world->removeLight(dir);
 		SetRenderState(GSALPHATEST, 1);
-		DrawPatternQuad(building, WHITE, nil, 255);
-		DrawPatternQuad(building, WHITE, alphaTex, 255);
+		DrawPatternQuad(prelitFlags, WHITE, nil, 255);
+		DrawPatternQuad(prelitFlags, WHITE, alphaTex, 255);
 		SetRenderState(DESTBLEND, BLENDONE);
-		DrawPatternQuad(building, WHITE, alphaTex, 255);
+		DrawPatternQuad(prelitFlags, WHITE, alphaTex, 255);
 		SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
-		DrawPatternQuad(vehicle, WHITE, nil, 255);
-		DrawPatternQuad(vehicle, WHITE, nil, 128);
+		DrawPatternQuad(litFlags, WHITE, nil, 255);
+		DrawPatternQuad(litFlags, WHITE, nil, 128);
 		DrawSkinnedPatternMarkers(Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED | Geometry::LIGHT);
 		DrawSkinnedPatternMarkers(Geometry::NORMALS | Geometry::TEXTURED | Geometry::LIGHT);
 		DrawPatternQuad(untexturedLit, WHITE, nil, 255);
 		DrawPatternQuad(untexturedLit, WHITE, nil, 128);
 		DrawPatternQuad(untexturedPrelit, WHITE, nil, 255);
 		DrawPatternQuad(untexturedPrelit, halfWhite, nil, 255);
-		DrawEnvPatternQuad(vehicle | Geometry::MODULATE, alphaTex, 255);
-		DrawEnvPatternQuad(vehicle | Geometry::MODULATE, alphaTex, 128);
-		DrawEnvPatternQuad(building, alphaTex, 255);
-		DrawEnvPatternQuad(vehicle, nil, 255);
+		DrawEnvPatternQuad(litFlags | Geometry::MODULATE, alphaTex, 255);
+		DrawEnvPatternQuad(litFlags | Geometry::MODULATE, alphaTex, 128);
+		DrawEnvPatternQuad(prelitFlags, alphaTex, 255);
+		DrawEnvPatternQuad(litFlags, nil, 255);
 		SetRenderState(VERTEXALPHA, 0);
 		SetRenderState(GSALPHATEST, 0);
 	}
 	DrawShadowCameraQuads(alphaTex);
-	DrawPatternQuad(water, WHITE, nil, 255);
-	DrawPatternQuad(water, WHITE, alphaTex, 255);
+	DrawPatternQuad(litPrelitFlags, WHITE, nil, 255);
+	DrawPatternQuad(litPrelitFlags, WHITE, alphaTex, 255);
 	SetRenderState(SRCBLEND, BLENDONE);
 	SetRenderState(DESTBLEND, BLENDZERO);
-	DrawPatternQuad(water, WHITE, alphaTex, 255);
+	DrawPatternQuad(litPrelitFlags, WHITE, alphaTex, 255);
 	SetRenderState(SRCBLEND, BLENDSRCALPHA);
 	SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
 
@@ -2864,7 +2864,7 @@ CheckGamePipelinesPrewarmed(void)
 	SetRenderState(SRCBLEND, BLENDSRCALPHA);
 	SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
 	SetRenderState(FOGENABLE, 1);
-	DrawEnvPatternQuad(water | Geometry::MODULATE, alphaTex, 255);
+	DrawEnvPatternQuad(litPrelitFlags | Geometry::MODULATE, alphaTex, 255);
 	SetRenderState(FOGENABLE, fog);
 	SetRenderState(SRCBLEND, BLENDSRCALPHA);
 	SetRenderState(VERTEXALPHA, 0);
@@ -3292,7 +3292,7 @@ RunWorldChecks(Camera *camera)
 {
 	failures = 0;
 	WorldOpen(camera);
-	CheckGamePipelinesPrewarmed();
+	CheckInitPipelinesPrewarmed();
 	CheckInstanceTwoMaterials();
 	CheckInstanceStrip();
 	CheckReinstance();
@@ -4147,9 +4147,9 @@ ReadLTMs(Frame **f, Matrix *out, int n, const Matrix *invRoot)
 }
 
 static bool
-CheckPedLikeHierarchy(void)
+CheckCharacterHierarchy(void)
 {
-	const char *name = "a ped-like hierarchy below the atomic frame skins in bind pose and posed, in world and local space";
+	const char *name = "a character-style hierarchy below the atomic frame skins in bind pose and posed, in world and local space";
 	const V3d zAxis = { 0.0f, 0.0f, 1.0f };
 	const Marker m[2] = {
 		{ 1.0f, 1.0f, 0.25f, 10.0f, RED, { 2, 0, 0, 0 }, { 1.0f, 0.0f, 0.0f, 0.0f } },
@@ -4301,23 +4301,23 @@ CheckBoneBlockOncePerAtomic(void)
 static bool
 CheckSkinnedWithAttachment(void)
 {
-	const char *name = "a skinned atomic, an unskinned one and a weapon on a bone's matrix draw together in one frame";
+	const char *name = "a skinned atomic, an unskinned one and an atomic attached to a bone's matrix draw together in one frame";
 	const Marker marker = { 0.0f, 0.0f, 0.5f, 10.0f, RED, { 1, 0, 0, 0 }, { 1.0f, 0.0f, 0.0f, 0.0f } };
 	Geometry *plain = SolidQuad(2.5f, -0.5f, 1.5f, 0.5f, 10.0f, GREEN);
-	Geometry *weapon = SolidQuad(0.25f, 0.75f, -0.25f, 1.25f, 10.0f, BLUE);
+	Geometry *attached = SolidQuad(0.25f, 0.75f, -0.25f, 1.25f, 10.0f, BLUE);
 	Geometry *geo = Markers(Geometry::PRELIT, &marker, 1);
 	Matrix bones[2] = { Identity(), Translation(-2.0f, 0.0f, 0.0f) };
-	Atomic *ped = SkinAtomic(geo);
+	Atomic *body = SkinAtomic(geo);
 	HAnimHierarchy *hier = MakeHierarchy(2, bones, 0);
-	Skin::setHierarchy(ped, hier);
+	Skin::setHierarchy(body, hier);
 	Atomic *plainAtomic = MakeAtomic(plain);
-	Atomic *weaponAtomic = MakeAtomic(weapon);
-	weaponAtomic->getFrame()->transform(&hier->matrices[1], COMBINEREPLACE);
+	Atomic *attachedAtomic = MakeAtomic(attached);
+	attachedAtomic->getFrame()->transform(&hier->matrices[1], COMBINEREPLACE);
 	uint32 binds = metal::getStateStats().vertexBlockBinds[metal::BUFFER_SKIN];
 	WorldBegin(GREY);
 	plainAtomic->render();
-	ped->render();
-	weaponAtomic->render();
+	body->render();
+	attachedAtomic->render();
 	metal::Shader *last = metal::currentShader;
 	WorldEnd();
 	binds = metal::getStateStats().vertexBlockBinds[metal::BUFFER_SKIN] - binds;
@@ -4326,11 +4326,11 @@ CheckSkinnedWithAttachment(void)
 	ok &= Expect(binds == 1, "%u skin block binds, expected 1", binds);
 	ok &= Expect(last == metal::defaultShader, "the last draw used shader %p, expected the default shader %p",
 	             (void*)last, (void*)metal::defaultShader);
-	DestroyAtomic(weaponAtomic);
+	DestroyAtomic(attachedAtomic);
 	DestroyAtomic(plainAtomic);
-	DestroySkinAtomic(ped);
+	DestroySkinAtomic(body);
 	geo->destroy();
-	weapon->destroy();
+	attached->destroy();
 	plain->destroy();
 	return Report(ok, name);
 }
@@ -4412,7 +4412,7 @@ RunSkinChecks(Camera *camera)
 	CheckSkinPipelineWithoutSkinDraws();
 	CheckSkinnedOnDefaultPipelineUnrouted();
 	CheckBoneCountMismatch();
-	CheckPedLikeHierarchy();
+	CheckCharacterHierarchy();
 	CheckSkinVariantPerDraw();
 	CheckBoneBlockOncePerAtomic();
 	CheckSkinnedWithAttachment();
@@ -4664,7 +4664,7 @@ CheckEnvColour(void)
 	static const RGBA orange = { 255, 128, 0, 255 };
 	struct Case { bool32 applyLight, useMatColor; RGBA envColour, material; float coef; bool envTex, base; RGBA want; const char *what; };
 	const Case cases[] = {
-		{ 1, 1, WHITE, WHITE, 0.5f, true, false, Rgb(77, 153, 230), "applyLight, useMatColor (the game's settings)" },
+		{ 1, 1, WHITE, WHITE, 0.5f, true, false, Rgb(77, 153, 230), "applyLight, useMatColor (typical host settings)" },
 		{ 0, 1, WHITE, WHITE, 0.5f, true, false, Rgb(179, 230, 255), "useMatColor" },
 		{ 0, 0, grey64, WHITE, 0.5f, true, false, Rgb(83, 134, 185), "envMapColor (64, 64, 64)" },
 		{ 1, 1, WHITE, orange, 1.0f, true, false, Rgb(102, 102, 0), "applyLight, useMatColor, orange material" },
@@ -5077,7 +5077,6 @@ CheckMatfxRingCost(void)
 	WorldEnd();
 	uint32 uploads = MatFXStat(e.blockUploads, s.blockUploads);
 	uint32 bytes = e.frameRingBytes - s.frameRingBytes;
-	Detail("  %u ring bytes for 12 atomics, %u per vehicle atomic; %u matfx uploads\n", bytes, bytes/12, uploads);
 	ok &= Expect(uploads == 24, "%u matfx uploads, expected 24", uploads);
 	ok &= Expect(bytes <= 24576, "%u ring bytes, expected at most 24576", bytes);
 	for(int i = 0; i < 12; i++)
@@ -5121,7 +5120,6 @@ CheckMatfxRingCostPS2AlphaTest(void)
 	WorldEnd();
 	uint32 uploads = MatFXStat(e.blockUploads, s.blockUploads);
 	uint32 bytes = e.frameRingBytes - s.frameRingBytes;
-	Detail("  %u ring bytes for 12 atomics, %u per vehicle atomic; %u matfx uploads\n", bytes, bytes/12, uploads);
 	ok &= Expect(uploads == 24, "%u matfx uploads, expected 24", uploads);
 	ok &= Expect(bytes <= 49152, "%u ring bytes, expected at most 49152", bytes);
 	for(int i = 0; i < 12; i++)

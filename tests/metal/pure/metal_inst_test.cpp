@@ -123,13 +123,13 @@ TestSkinLayout(const SkinCase &c)
 static void
 TestSkinLayouts(void)
 {
-	SkinCase ped = { true, true, 1, 6, { 0, 1, 2, 5, 3, 4 }, { 0, 12, 24, 28, 36, 52 }, 56 };
+	SkinCase litPrelit = { true, true, 1, 6, { 0, 1, 2, 5, 3, 4 }, { 0, 12, 24, 28, 36, 52 }, 56 };
 	SkinCase bare = { false, false, 0, 3, { 0, 3, 4 }, { 0, 12, 28 }, 32 };
 	SkinCase eight = { true, true, 8, 13,
 		{ 0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 3, 4 },
 		{ 0, 12, 24, 28, 36, 44, 52, 60, 68, 76, 84, 92, 108 }, 112 };
 	SkinCase noNormals = { false, true, 1, 5, { 0, 2, 5, 3, 4 }, { 0, 12, 16, 24, 40 }, 44 };
-	TestSkinLayout(ped);
+	TestSkinLayout(litPrelit);
 	TestSkinLayout(bare);
 	TestSkinLayout(eight);
 	TestSkinLayout(noNormals);
