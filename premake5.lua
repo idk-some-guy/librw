@@ -43,6 +43,16 @@ newoption {
 	description = "ps2: build against freesce with its own ee-gcc 2.9, instead of the SCE SDK"
 }
 
+newoption {
+	trigger     = "metal-asan",
+	description = "Build the Metal smoke test with AddressSanitizer",
+}
+
+local HomebrewPrefix = os.getenv("HOMEBREW_PREFIX")
+if HomebrewPrefix == nil or HomebrewPrefix == "" then
+	HomebrewPrefix = "/opt/homebrew"
+end
+
 workspace "librw"
 	location "build"
 	language "C++"
@@ -60,6 +70,8 @@ workspace "librw"
 		if _OPTIONS["gfxlib"] == "sdl2" then
 			includedirs { "/usr/include/SDL2" }
 		end
+	filter { "system:macosx" }
+		platforms { "macosx-arm64-metal" }
 	filter {}
 
 	filter "configurations:Debug"
@@ -114,18 +126,32 @@ export FREESCE_GCC
 			buildoptions { "-nostdlib", "-fno-common" }
 			includedirs { "$(PS2SDK)/ee/include", "$(PS2SDK)/common/include" }
 		end
+	filter { "platforms:*metal" }
+		if os.istarget("macosx") and _OPTIONS["gfxlib"] ~= "glfw" then
+			premake.warn("--gfxlib=%s is ignored: the Metal platform always uses GLFW", _OPTIONS["gfxlib"])
+		end
+		defines { "RW_METAL", "LIBRW_GLFW" }
+		cppdialect "gnu++14"
+		includedirs { path.join(HomebrewPrefix, "include") }
+		libdirs { path.join(HomebrewPrefix, "lib") }
+		buildoptions { "-target", "arm64-apple-macos14" }
+		linkoptions { "-target", "arm64-apple-macos14" }
 
 	filter { "platforms:*amd64*" }
 		architecture "x86_64"
 	filter { "platforms:*x86*" }
 		architecture "x86"
-	filter { "platforms:*arm*" }
+	filter { "platforms:*arm-*" }
 		architecture "ARM"
+	filter { "platforms:*arm64*" }
+		architecture "ARM64"
 
 	filter { "platforms:win*" }
 		system "windows"
 	filter { "platforms:linux*" }
 		system "linux"
+	filter { "platforms:macosx*" }
+		system "macosx"
 
 	filter { "platforms:win*gl3" }
 		includedirs { path.join(_OPTIONS["sdl2dir"], "include") }
@@ -173,6 +199,12 @@ project "librw"
         vucode()
         filter { "platforms:ps2" }
                 files { "src/ps2/vu1/*.dsm" }
+	filter { "platforms:not *metal" }
+		removefiles { "src/metal/**" }
+	filter { "files:**.mm" }
+		compileas "Objective-C++"
+		buildoptions { "-fobjc-arc" }
+	filter {}
 
 
 project "dumprwtree"
@@ -183,6 +215,7 @@ project "dumprwtree"
 	includedirs { "." }
 	libdirs { Libdir }
 	links { "librw" }
+	removeplatforms { "macosx*" }
 
 function findlibs()
 	filter { "platforms:linux*gl3" }
@@ -247,6 +280,7 @@ project "playground"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" } -- for now
+	removeplatforms { "macosx*" }
 
 project "imguitest"
 	kind "WindowedApp"
@@ -255,6 +289,7 @@ project "imguitest"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "lights"
 	kind "WindowedApp"
@@ -263,6 +298,7 @@ project "lights"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "subrast"
 	kind "WindowedApp"
@@ -271,6 +307,7 @@ project "subrast"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "camera"
 	kind "WindowedApp"
@@ -279,6 +316,7 @@ project "camera"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "im2d"
 	kind "WindowedApp"
@@ -287,6 +325,7 @@ project "im2d"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "im3d"
 	kind "WindowedApp"
@@ -295,6 +334,7 @@ project "im3d"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
 project "demoreel"
 	kind "WindowedApp"
@@ -303,6 +343,7 @@ project "demoreel"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" } -- for now
+	removeplatforms { "macosx*" }
 
 project "clumpview"
 	kind "WindowedApp"
@@ -311,6 +352,7 @@ project "clumpview"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" } -- has its own Makefile
+	removeplatforms { "macosx*" }
 
 project "ska2anm"
 	kind "ConsoleApp"
@@ -324,6 +366,7 @@ project "ska2anm"
 	links { "librw" }
 	findlibs()
 	removeplatforms { "*gl3", "*d3d9", "*ps2" }
+	removeplatforms { "macosx*" }
 
 --project "ps2test"
 --	kind "ConsoleApp"
@@ -354,4 +397,5 @@ project "hopalong"
 	entrypoint("WinMainCRTStartup")
 	removeplatforms { "*null" }
 	removeplatforms { "ps2" }
+	removeplatforms { "macosx*" }
 
