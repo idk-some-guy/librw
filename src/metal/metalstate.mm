@@ -1720,13 +1720,14 @@ prewarmPipelines(void)
 			for(j = 0; j < w.numStates; j++)
 				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
 		}
-		if(skinShader){
-			n = skinVertexLayout(true, true, 1, attribs);
-			memcpy(descs, attribs, n*sizeof(AttribDesc));
-			layout = registerVertexLayout(descs, n);
-			for(j = 0; j < (int32)nelem(litStates); j++)
-				prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
-		}
+		if(skinShader)
+			for(i = 0; i < 2; i++){
+				n = skinVertexLayout(true, i == 0, 1, attribs);
+				memcpy(descs, attribs, n*sizeof(AttribDesc));
+				layout = registerVertexLayout(descs, n);
+				for(j = 0; j < (int32)nelem(litStates); j++)
+					prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
+			}
 		if(im3dShader)
 			for(i = 0; i < (int32)nelem(im3dStates); i++)
 				prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8);
