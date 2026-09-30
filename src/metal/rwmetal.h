@@ -144,6 +144,11 @@ struct Im2DVertex
 	float getV(void) { return this->v; }
 };
 
+struct Im2DVertexUV2 : Im2DVertex
+{
+	float32 u2, v2;
+};
+
 void setupVertexInput(InstanceDataHeader *header);
 void teardownVertexInput(InstanceDataHeader *header);
 
@@ -157,11 +162,14 @@ enum
 };
 
 extern const char *header_metal_src;
+extern const char *im2d_metal_src;
+extern const char *im2d_uv2_metal_src;
 
 extern Shader *im2dOverrideShader;
 
 void im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices);
+bool32 prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth);
 
 void beginScene(void);
 void endScene(void);

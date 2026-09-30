@@ -12,6 +12,8 @@ void im2DRenderPrimitive(PrimitiveType primType,
 void im2DRenderIndexedPrimitive(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices);
 
+void openIm2DUV2(void);
+void closeIm2DUV2(void);
 void openIm3D(void);
 void closeIm3D(void);
 bool32 openSkin(void);
@@ -80,6 +82,7 @@ void encodeMipmapGeneration(void *texture);
 void waitForGPUWrites(uint64 frameId);
 
 void forgetRasterTarget(Raster *raster);
+bool32 passIsOpen(void);
 void clearNewRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);
 bool32 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth);

@@ -365,6 +365,12 @@ forgetRasterTarget(Raster *raster)
 	runPassActions();
 }
 
+bool32
+passIsOpen(void)
+{
+	return passManager.isOpen();
+}
+
 void
 clearNewRasterTarget(Raster *raster)
 {
@@ -972,6 +978,7 @@ initMetal(void)
 	if(!openMatFX())
 		return 0;
 	prewarmPipelines();
+	openIm2DUV2();
 	return 1;
 }
 
@@ -981,6 +988,7 @@ termMetal(void)
 	finishGPUWork();
 	logStats();
 	closeIm3D();
+	closeIm2DUV2();
 	closeSkin();
 	closeMatFX();
 	termRaster();

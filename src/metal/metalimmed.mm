@@ -17,6 +17,29 @@ static_assert((int)IMPRIM_NONE == PRIMTYPENONE && (int)IMPRIM_LINELIST == PRIMTY
 
 Shader *im2dOverrideShader;
 
+#include "shaders/im2d_uv2_metal.inc"
+
+uint32 im2dUV2VertexLayout;
+static_assert(sizeof(Im2DVertexUV2) == sizeof(Im2DVertex) + 2*sizeof(float32), "two-uv im2d vertex");
+static AttribDesc im2dUV2AttribDesc[4] = {
+	{ ATTRIB_POS,        ATTRIBFMT_FLOAT4,      sizeof(Im2DVertexUV2), 0 },
+	{ ATTRIB_COLOR,      ATTRIBFMT_UCHAR4_NORM, sizeof(Im2DVertexUV2), offsetof(Im2DVertex, r) },
+	{ ATTRIB_TEXCOORDS0, ATTRIBFMT_FLOAT2,      sizeof(Im2DVertexUV2), offsetof(Im2DVertex, u) },
+	{ ATTRIB_TEXCOORDS1, ATTRIBFMT_FLOAT2,      sizeof(Im2DVertexUV2), sizeof(Im2DVertex) },
+};
+
+void
+openIm2DUV2(void)
+{
+	im2dUV2VertexLayout = registerVertexLayout(im2dUV2AttribDesc, nelem(im2dUV2AttribDesc));
+}
+
+void
+closeIm2DUV2(void)
+{
+	im2dUV2VertexLayout = 0;
+}
+
 static MTLPrimitiveType primTypeMap[] = {
 	MTLPrimitiveTypePoint,
 	MTLPrimitiveTypeLine,
@@ -87,7 +110,7 @@ drawRingIndexedPrimitive(MetalContext *ctx, PrimitiveType primType, int32 count,
 }
 
 static bool32
-im2DBegin(void *vertices, int32 numVertices)
+im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint32 stride)
 {
 	Camera *cam = (Camera*)engine->currentCamera;
 	RingSpace space;
@@ -96,13 +119,10 @@ im2DBegin(void *vertices, int32 numVertices)
 
 	if(cam == nil || cam->frameBuffer == nil)
 		return 0;
-	if(im2dOverrideShader)
-		im2dOverrideShader->use();
-	else
-		im2dShader->use();
+	shader->use();
 	if(!beginDraw())
 		return 0;
-	setVertexLayout(im2dVertexLayout);
+	setVertexLayout(layout);
 	xform[0] = 2.0f/cam->frameBuffer->width;
 	xform[1] = -2.0f/cam->frameBuffer->height;
 	xform[2] = -1.0f;
@@ -111,7 +131,7 @@ im2DBegin(void *vertices, int32 numVertices)
 	if(!flushCache())
 		return 0;
 
-	size = numVertices*sizeof(Im2DVertex);
+	size = numVertices*stride;
 	if(!ringAlloc(size, 16, &space))
 		return 0;
 	memcpy(space.cpu, vertices, size);
@@ -123,30 +143,16 @@ void
 im2DRenderPrimitive(PrimitiveType primType, void *vertices, int32 numVertices)
 {
 	MetalContext *ctx = getContext();
-	RingSpace space;
 	int32 count;
-	bool wide;
 
 	count = drawElementCount(primType, numVertices);
 	if(ctx == nil || count == 0)
 		return;
 	@autoreleasepool {
-		if(!im2DBegin(vertices, numVertices))
+		if(!im2DBegin(im2dOverrideShader ? im2dOverrideShader : im2dShader, im2dVertexLayout,
+		              vertices, numVertices, sizeof(Im2DVertex)))
 			return;
-		if(primType != PRIMTYPETRIFAN){
-			[ctx->encoder drawPrimitives:primTypeMap[primType] vertexStart:0 vertexCount:count];
-			return;
-		}
-		wide = numVertices > 0x10000;
-		if(!ringAlloc(count*(wide ? 4 : 2), 16, &space))
-			return;
-		if(wide)
-			fanToList((uint32_t*)space.cpu, numVertices);
-		else
-			fanToList((uint16_t*)space.cpu, numVertices);
-		[ctx->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:count
-			indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
-			indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
+		drawRingPrimitive(ctx, primType, count, numVertices);
 	}
 }
 
@@ -156,24 +162,37 @@ im2DRenderIndexedPrimitive(PrimitiveType primType,
 	void *indices, int32 numIndices)
 {
 	MetalContext *ctx = getContext();
-	RingSpace space;
 	int32 count;
 
 	count = drawElementCount(primType, numIndices);
 	if(ctx == nil || count == 0 || numVertices <= 0)
 		return;
 	@autoreleasepool {
-		if(!im2DBegin(vertices, numVertices))
+		if(!im2DBegin(im2dOverrideShader ? im2dOverrideShader : im2dShader, im2dVertexLayout,
+		              vertices, numVertices, sizeof(Im2DVertex)))
 			return;
-		if(!ringAlloc(count*2, 16, &space))
+		drawRingIndexedPrimitive(ctx, primType, count, indices, numIndices);
+	}
+}
+
+void
+im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
+	void *vertices, int32 numVertices, void *indices, int32 numIndices)
+{
+	MetalContext *ctx = getContext();
+	int32 count;
+
+	count = drawElementCount(primType, numIndices);
+	if(ctx == nil || count == 0 || numVertices <= 0)
+		return;
+	if(im2dOverrideShader == nil || im2dUV2VertexLayout == 0){
+		countDroppedDraw();
+		return;
+	}
+	@autoreleasepool {
+		if(!im2DBegin(im2dOverrideShader, im2dUV2VertexLayout, vertices, numVertices, sizeof(Im2DVertexUV2)))
 			return;
-		if(primType == PRIMTYPETRIFAN)
-			indexedFanToList((uint16_t*)space.cpu, (uint16_t*)indices, numIndices);
-		else
-			memcpy(space.cpu, indices, count*2);
-		[ctx->encoder drawIndexedPrimitives:primTypeMap[primType] indexCount:count
-			indexType:MTLIndexTypeUInt16
-			indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
+		drawRingIndexedPrimitive(ctx, primType, count, indices, numIndices);
 	}
 }
 

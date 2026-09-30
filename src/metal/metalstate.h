@@ -42,12 +42,14 @@ extern Shader *skinShader;
 extern Shader *matfxEnvShader;
 extern Shader *im3dShader;
 extern uint32 im2dVertexLayout;
+extern uint32 im2dUV2VertexLayout;
 extern uint32 im3dVertexLayout;
 
 struct StateStats
 {
 	uint32 pipelinesAtInit;
 	uint32 pipelinesLate;
+	uint32 pipelinesHost;
 	uint32 pipelineFailures;
 	uint32 blockSizeMismatches;
 	uint32 customBlockBinds;

@@ -1,4 +1,4 @@
-all: header_metal.inc im2d_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc
+all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc
 
 header_metal.inc: header.metal
 	(echo 'const char *header_metal_src =';\
@@ -9,6 +9,11 @@ im2d_metal.inc: im2d.metal
 	(echo 'const char *im2d_metal_src =';\
 	 sed 's/..*/"&\\n"/' im2d.metal;\
 	 echo ';') >im2d_metal.inc
+
+im2d_uv2_metal.inc: im2d_uv2.metal
+	(echo 'const char *im2d_uv2_metal_src =';\
+	 sed 's/..*/"&\\n"/' im2d_uv2.metal;\
+	 echo ';') >im2d_uv2_metal.inc
 
 simple_metal.inc: simple.metal
 	(echo 'const char *simple_metal_src =';\

@@ -234,6 +234,7 @@ static uint64 lastDepthKey;
 static id<MTLDepthStencilState> lastDepth;
 static std::unordered_map<uint32_t, id<MTLSamplerState>> samplerCache;
 static bool prewarming;
+static bool hostPrewarming;
 static StateStats stats;
 
 struct DefaultAttribs
@@ -670,6 +671,8 @@ getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 	}
 	if(prewarming)
 		stats.pipelinesAtInit++;
+	else if(hostPrewarming)
+		stats.pipelinesHost++;
 	else{
 		stats.pipelinesLate++;
 		fprintf(stderr, "rw::metal: pipeline %016llx created after init\n", (unsigned long long)key);
@@ -1696,7 +1699,7 @@ struct EnvLayout
 };
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
-static const int32 shadowIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
+static const int32 targetIm2dBlends[] ={ BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
 static const PrewarmState buildingStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
@@ -1778,8 +1781,8 @@ prewarmPipelines(void)
 			for(i = 0; i < (int32)nelem(im2dBlends); i++)
 				prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
 					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE);
-		for(i = 0; i < (int32)nelem(shadowIm2dBlends); i++)
-			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, shadowIm2dBlends[i], DEPTHFMT_D32S8);
+		for(i = 0; i < (int32)nelem(targetIm2dBlends); i++)
+			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, targetIm2dBlends[i], DEPTHFMT_D32S8);
 		for(i = 0; i < (int32)nelem(worldLayouts); i++){
 			const WorldLayout &w = worldLayouts[i];
 			n = defaultVertexLayout(w.normals, w.prelit, w.numTexCoords, attribs);
@@ -1812,6 +1815,32 @@ prewarmPipelines(void)
 	snprintf(prewarmLine, sizeof(prewarmLine), "rw::metal: prewarm %u pipelines in %.1f ms\n", stats.pipelinesAtInit - before,
 		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 	fprintf(stderr, "%s", prewarmLine);
+}
+
+bool32
+prewarmIm2DShader(Shader *shader, bool32 uv2, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
+{
+	PipelineEntry *e;
+	PipelineDesc d;
+
+	if(getContext() == nil || shader == nil || (uv2 ? im2dUV2VertexLayout : im2dVertexLayout) == 0)
+		return 0;
+	d.shader = shader->shaderId;
+	d.variant = VARIANT_ALPHATEST & shader->variantMask;
+	d.vertexLayout = uv2 ? im2dUV2VertexLayout : im2dVertexLayout;
+	d.blendEnable = blend != 0;
+	d.srcBlend = srcBlend;
+	d.destBlend = destBlend;
+	d.writeMask = MTLColorWriteMaskAll;
+	d.colorFormat = COLORFMT_RGBA8;
+	d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	d.sampleCount = 1;
+	hostPrewarming = true;
+	@autoreleasepool {
+		e = getPipeline(shader, d, pipelineKey(d));
+	}
+	hostPrewarming = false;
+	return e != nil;
 }
 
 bool32
