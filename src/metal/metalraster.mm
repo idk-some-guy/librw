@@ -78,6 +78,8 @@ getRasterTargetTexture(Raster *raster, uint32 samples)
 	natras = GETMETALRASTEREXT(raster);
 	if(samples <= 1)
 		return natras->texture;
+	if(natras->texture == nil)
+		return nil;
 	if(natras->msaaTexture == nil && raster->type == Raster::ZBUFFER)
 		createMsaaTexture(raster, MTLPixelFormatDepth32Float_Stencil8, samples);
 	return natras->numSamples == samples ? natras->msaaTexture : nil;
@@ -412,6 +414,11 @@ rasterCreateCamera(Raster *raster)
 	}
 	if(metalGlobals.numSamples > 1 && !createMsaaTexture(raster, MTLPixelFormatRGBA8Unorm, metalGlobals.numSamples)){
 		RWERROR((ERR_GENERAL, "can't create multisampled camera texture"));
+		@autoreleasepool {
+			id<MTLTexture> tex = (__bridge_transfer id<MTLTexture>)natras->texture;
+			tex = nil;
+			natras->texture = nil;
+		}
 		return nil;
 	}
 	return raster;
@@ -819,6 +826,7 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->gpuWriteFrame = 0;
 	ras->msaaTexture = nil;
 	ras->numSamples = 1;
+	ras->msaaCurrent = 0;
 	initSampler(ras);
 	return object;
 }
@@ -859,6 +867,7 @@ copyNativeRaster(void *dst, void *, int32 offset, int32)
 	d->sampleTexture = nil;
 	d->msaaTexture = nil;
 	d->numSamples = 1;
+	d->msaaCurrent = 0;
 	return dst;
 }
 

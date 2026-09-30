@@ -107,7 +107,7 @@ static int
 createFramePipelines(MetalContext *ctx)
 {
 	id<MTLLibrary> lib;
-	int s, c, d;
+	int s, c, d, built;
 
 	lib = compileLibrary(ctx->device, frameShaderSrc);
 	if(lib == nil)
@@ -117,15 +117,24 @@ createFramePipelines(MetalContext *ctx)
 	for(c = 0; c < 2; c++)
 		for(d = 0; d < 2; d++)
 			ctx->clearDepthStates[c][d] = makeClearDepthState(ctx->device, c, d);
-	for(s = 0; s < 4 && (1u << s) <= metalCaps.maxSamples; s++)
+	for(s = 0; s < 4 && (1u << s) <= metalCaps.maxSamples; s++){
+		built = 1;
 		for(c = 0; c < 2; c++)
 			for(d = 0; d < 2; d++){
 				ctx->clearPipelines[s][c][d] = makePipeline(ctx->device, lib, @"clearVS", @"clearFS",
 					MTLPixelFormatRGBA8Unorm,
 					d ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid, c, 1u << s);
 				if(ctx->clearPipelines[s][c][d] == nil)
-					return 0;
+					built = 0;
 			}
+		if(built)
+			continue;
+		if(s == 0)
+			return 0;
+		metalCaps.maxSamples = 1u << (s-1);
+		fprintf(stderr, "rw::metal: clear pipelines at %u samples failed; using at most %u samples\n",
+			1u << s, metalCaps.maxSamples);
+	}
 	return ctx->compositePipeline != nil;
 }
 
@@ -243,6 +252,7 @@ static void
 beginPass(MetalContext *ctx, const PassAction *a)
 {
 	static bool depthDetachReported;
+	static bool depthTwinReported;
 	Raster *fb = (Raster*)a->target.color;
 	Raster *zb = (Raster*)a->target.depth;
 	uint32 samples = fb ? GETMETALRASTEREXT(fb)->numSamples : zb ? GETMETALRASTEREXT(zb)->numSamples : 1;
@@ -254,7 +264,13 @@ beginPass(MetalContext *ctx, const PassAction *a)
 
 	if(color == nil && depth == nil)
 		return;
-	if((zb && samples > 1 && depth == nil) || (color && depth && (depth.width != color.width || depth.height != color.height))){
+	if(zb && samples > 1 && depth == nil && GETMETALRASTEREXT(zb)->texture){
+		frameStats.depthDetached++;
+		if(!depthTwinReported){
+			depthTwinReported = true;
+			RWERROR((ERR_GENERAL, "can't create multisampled depth raster; drawing without depth"));
+		}
+	}else if(color && depth && (depth.width != color.width || depth.height != color.height)){
 		depth = nil;
 		frameStats.depthDetached++;
 		if(!depthDetachReported){
@@ -286,6 +302,8 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	frameStats.renderPasses++;
 	invalidateEncoderState();
 	ctx->encoderHasDepth = depth != nil;
+	if(depth)
+		GETMETALRASTEREXT(zb)->msaaCurrent = samples > 1;
 	ctx->encoderSamples = samples;
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
 	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
@@ -512,7 +530,7 @@ readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth)
 		buf = [ctx->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
 		cb = getCommandBuffer(ctx);
 		ms = (__bridge id<MTLTexture>)GETMETALRASTEREXT(zbuffer->parent)->msaaTexture;
-		if(ms){
+		if(ms && GETMETALRASTEREXT(zbuffer->parent)->msaaCurrent){
 			MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
 			rp.depthAttachment.texture = ms;
 			rp.depthAttachment.loadAction = MTLLoadActionLoad;

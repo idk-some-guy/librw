@@ -253,6 +253,7 @@ struct MetalRaster
 	uint64 gpuWriteFrame;
 	void *msaaTexture;
 	uint32 numSamples;
+	bool32 msaaCurrent;
 };
 
 struct MetalCaps

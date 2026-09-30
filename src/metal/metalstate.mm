@@ -1702,7 +1702,7 @@ struct EnvLayout
 };
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
-static const int32 targetIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
+static const int32 im2dTargetBlends[] = { BLEND_INVERT, BLEND_REPLACE, BLEND_MODULATE };
 static const PrewarmState buildingStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
@@ -1752,7 +1752,7 @@ static const WorldLayout uv2WorldLayouts[] = {
 };
 
 static void
-prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthFormat)
+prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthFormat, uint32 samples)
 {
 	PipelineDesc d;
 
@@ -1765,16 +1765,70 @@ prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthF
 	d.writeMask = MTLColorWriteMaskAll;
 	d.colorFormat = COLORFMT_RGBA8;
 	d.depthFormat = depthFormat;
-	d.sampleCount = 1;
+	d.sampleCount = samples;
 	getPipeline(shader, d, pipelineKey(d));
+}
+
+static void
+prewarmEngineLayouts(uint32 samples)
+{
+	AttribDesc descs[MAXVERTEXATTRIBS];
+	uint32 layout;
+	int32 i, j, n, depth;
+
+	for(depth = 0; depth < 2; depth++)
+		for(i = 0; i < (int32)nelem(im2dBlends); i++)
+			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
+				depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE, samples);
+	for(i = 0; i < (int32)nelem(im2dTargetBlends); i++)
+		prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dTargetBlends[i], DEPTHFMT_D32S8, samples);
+	for(i = 0; i < (int32)nelem(worldLayouts); i++){
+		const WorldLayout &w = worldLayouts[i];
+		n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
+		layout = registerVertexLayout(descs, n);
+		for(j = 0; j < w.numStates; j++)
+			prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8, samples);
+	}
+	if(skinShader)
+		for(i = 0; i < 2; i++){
+			n = skinVertexAttribs(true, i == 0, 1, descs);
+			layout = registerVertexLayout(descs, n);
+			for(j = 0; j < (int32)nelem(litStates); j++)
+				prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8, samples);
+		}
+	if(matfxEnvShader)
+		for(i = 0; i < (int32)nelem(envLayouts); i++){
+			n = defaultVertexAttribs(envLayouts[i].normals, envLayouts[i].prelit, 1, descs);
+			layout = registerVertexLayout(descs, n);
+			for(j = 0; j < envLayouts[i].numStates; j++)
+				prewarm(matfxEnvShader, layout, envStates[j].variant, envStates[j].blend, DEPTHFMT_D32S8, samples);
+		}
+	if(im3dShader)
+		for(i = 0; i < (int32)nelem(im3dStates); i++)
+			prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8, samples);
+}
+
+static void
+prewarmUV2Layouts(uint32 samples)
+{
+	AttribDesc descs[MAXVERTEXATTRIBS];
+	uint32 layout;
+	int32 i, j, n;
+
+	for(i = 0; i < (int32)nelem(uv2WorldLayouts); i++){
+		const WorldLayout &w = uv2WorldLayouts[i];
+		n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
+		layout = registerVertexLayout(descs, n);
+		for(j = 0; j < w.numStates; j++)
+			prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8, samples);
+	}
 }
 
 void
 prewarmPipelines(void)
 {
-	AttribDesc descs[MAXVERTEXATTRIBS];
-	uint32 layout;
-	int32 i, j, n, depth;
+	uint32 counts[2];
+	int32 i, numCounts = prewarmSampleCounts(metalGlobals.numSamples, counts);
 
 	if(getContext() == nil || im2dShader == nil || defaultShader == nil)
 		return;
@@ -1782,45 +1836,11 @@ prewarmPipelines(void)
 	uint32 before = stats.pipelinesAtInit;
 	prewarming = true;
 	@autoreleasepool {
-		for(depth = 0; depth < 2; depth++)
-			for(i = 0; i < (int32)nelem(im2dBlends); i++)
-				prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
-					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE);
-		for(i = 0; i < (int32)nelem(targetIm2dBlends); i++)
-			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, targetIm2dBlends[i], DEPTHFMT_D32S8);
-		for(i = 0; i < (int32)nelem(worldLayouts); i++){
-			const WorldLayout &w = worldLayouts[i];
-			n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
-			layout = registerVertexLayout(descs, n);
-			for(j = 0; j < w.numStates; j++)
-				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
-		}
-		if(skinShader)
-			for(i = 0; i < 2; i++){
-				n = skinVertexAttribs(true, i == 0, 1, descs);
-				layout = registerVertexLayout(descs, n);
-				for(j = 0; j < (int32)nelem(litStates); j++)
-					prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
-			}
-		if(matfxEnvShader)
-			for(i = 0; i < (int32)nelem(envLayouts); i++){
-				n = defaultVertexAttribs(envLayouts[i].normals, envLayouts[i].prelit, 1, descs);
-				layout = registerVertexLayout(descs, n);
-				for(j = 0; j < envLayouts[i].numStates; j++)
-					prewarm(matfxEnvShader, layout, envStates[j].variant, envStates[j].blend, DEPTHFMT_D32S8);
-			}
-		if(im3dShader)
-			for(i = 0; i < (int32)nelem(im3dStates); i++)
-				prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8);
-		// layouts registered from here on take ids after the two-uv im2d layout
+		for(i = 0; i < numCounts; i++)
+			prewarmEngineLayouts(counts[i]);
 		openIm2DUV2();
-		for(i = 0; i < (int32)nelem(uv2WorldLayouts); i++){
-			const WorldLayout &w = uv2WorldLayouts[i];
-			n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
-			layout = registerVertexLayout(descs, n);
-			for(j = 0; j < w.numStates; j++)
-				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
-		}
+		for(i = 0; i < numCounts; i++)
+			prewarmUV2Layouts(counts[i]);
 	}
 	prewarming = false;
 	snprintf(prewarmLine, sizeof(prewarmLine), "rw::metal: prewarm %u pipelines in %.1f ms\n", stats.pipelinesAtInit - before,
@@ -1831,8 +1851,10 @@ prewarmPipelines(void)
 static bool32
 hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 srcBlend, int32 destBlend, bool32 depth)
 {
-	PipelineEntry *e;
 	PipelineDesc d;
+	uint32 counts[2];
+	int32 i, n = prewarmSampleCounts(metalGlobals.numSamples, counts);
+	bool32 ok = 1;
 
 	d.shader = shader->shaderId;
 	d.variant = variant & shader->variantMask;
@@ -1843,13 +1865,16 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 	d.writeMask = MTLColorWriteMaskAll;
 	d.colorFormat = COLORFMT_RGBA8;
 	d.depthFormat = depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
-	d.sampleCount = 1;
 	hostPrewarming = true;
 	@autoreleasepool {
-		e = getPipeline(shader, d, pipelineKey(d));
+		for(i = 0; i < n; i++){
+			d.sampleCount = counts[i];
+			if(getPipeline(shader, d, pipelineKey(d)) == nil)
+				ok = 0;
+		}
 	}
 	hostPrewarming = false;
-	return e != nil;
+	return ok;
 }
 
 bool32
