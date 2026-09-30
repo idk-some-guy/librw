@@ -36,6 +36,7 @@ struct Shader
 	char *fragmentName;
 	uint32 shaderId;
 	uint32 variantMask;
+	int32 textureStages;
 	void *vertexFns[NUMVARIANTS];
 	void *fragmentFns[NUMVARIANTS];
 

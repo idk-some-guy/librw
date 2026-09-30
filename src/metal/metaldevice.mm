@@ -2,6 +2,7 @@
 #include "metalobjc.h"
 #include "metalpass.h"
 #include "metalstate.h"
+#include "rwmetalshader.h"
 
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
@@ -693,13 +694,17 @@ beginDraw(void)
 	static bool feedbackReported;
 	MetalContext *ctx = getContext();
 	Raster *raster;
+	uint32 stages;
 	int32 i;
 
 	if(ctx == nil){
 		countDroppedDraw();
 		return 0;
 	}
+	stages = currentShader == nil || currentShader->textureStages < 0 ? ~0u : (uint32)currentShader->textureStages;
 	for(i = 0; i < MAXNUMSTAGES; i++){
+		if((stages & 1u<<i) == 0)
+			continue;
 		raster = getStageRaster(i);
 		if(raster == nil || raster->platform != PLATFORM_METAL)
 			continue;
@@ -708,6 +713,7 @@ beginDraw(void)
 				feedbackReported = true;
 				RWERROR((ERR_GENERAL, "draw samples the raster it renders into"));
 			}
+			countFeedbackDraw();
 			countDroppedDraw();
 			return 0;
 		}

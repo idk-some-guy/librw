@@ -625,6 +625,14 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 		}
 }
 
+static void
+noteTextureStages(Shader *shader, uint8 stages)
+{
+	if(shader->textureStages < 0)
+		shader->textureStages = 0;
+	shader->textureStages |= stages;
+}
+
 static PipelineEntry*
 getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 {
@@ -635,8 +643,12 @@ getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 	NSError *err = nil;
 
 	auto it = pipelineCache.find(key);
-	if(it != pipelineCache.end())
-		return it->second.state ? &it->second : nil;
+	if(it != pipelineCache.end()){
+		if(it->second.state == nil)
+			return nil;
+		noteTextureStages(shader, it->second.textureStages);
+		return &it->second;
+	}
 
 	@autoreleasepool {
 		pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
@@ -663,7 +675,10 @@ getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 		fprintf(stderr, "rw::metal: pipeline %016llx created after init\n", (unsigned long long)key);
 	}
 	pipelineCache[key] = e;
-	return e.state ? &pipelineCache[key] : nil;
+	if(e.state == nil)
+		return nil;
+	noteTextureStages(shader, e.textureStages);
+	return &pipelineCache[key];
 }
 
 bool32
@@ -1912,6 +1927,12 @@ void
 countDroppedDraw(void)
 {
 	stats.droppedDraws++;
+}
+
+void
+countFeedbackDraw(void)
+{
+	stats.feedbackDraws++;
 }
 
 static void

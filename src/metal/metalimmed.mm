@@ -94,12 +94,14 @@ im2DBegin(void *vertices, int32 numVertices)
 	float32 xform[4];
 	uint32 size;
 
-	if(cam == nil || cam->frameBuffer == nil || !beginDraw())
+	if(cam == nil || cam->frameBuffer == nil)
 		return 0;
 	if(im2dOverrideShader)
 		im2dOverrideShader->use();
 	else
 		im2dShader->use();
+	if(!beginDraw())
+		return 0;
 	setVertexLayout(im2dVertexLayout);
 	xform[0] = 2.0f/cam->frameBuffer->width;
 	xform[1] = -2.0f/cam->frameBuffer->height;
@@ -255,12 +257,14 @@ im3DBegin(void)
 {
 	uint32 size;
 
-	if(im3dShader == nil || im3dNumVertices == 0 || !beginDraw())
+	if(im3dShader == nil || im3dNumVertices == 0)
 		return 0;
 	if(im3dLit)
 		defaultShader->use(shaderVariant(im3dBits & VSLIGHT_MASK, getAlphaTest()));
 	else
 		im3dShader->use(getAlphaTest() ? VARIANT_ALPHATEST : 0);
+	if(!beginDraw())
+		return 0;
 	setVertexLayout(im3dVertexLayout);
 	if(!flushCache())
 		return 0;

@@ -92,6 +92,7 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variantM
 		sh->fragmentName = copyString(fs);
 		sh->shaderId = sid;
 		sh->variantMask = variantMask & (NUMVARIANTS-1);
+		sh->textureStages = -1;
 		if(!sh->getFunctions(0, &vfn, &ffn) || !sh->getFunctions(sh->variantMask, &vfn, &ffn)){
 			sh->destroy();
 			return nil;

@@ -58,6 +58,7 @@ struct StateStats
 	uint32 textureStageBinds;
 	uint32 draws;
 	uint32 droppedDraws;
+	uint32 feedbackDraws;
 	uint32 ringGrows;
 	uint32 ringPeakBytes;
 	uint32 frameRingBytes;
@@ -71,6 +72,7 @@ void setSkinMatrices(const RawMatrix *bones, int32 numBones);
 void setMatFXConstants(const RawMatrix *texMatrix, const float32 *fxParams, const RGBAf *colorClamp, const RGBAf *envColor);
 void countSkinnedUnrouted(void);
 void countDroppedDraw(void);
+void countFeedbackDraw(void);
 void logStats(void);
 void logStatsIfDue(void);
 const char *getPrewarmLine(void);
