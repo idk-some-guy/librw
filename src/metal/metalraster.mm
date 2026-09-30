@@ -42,6 +42,47 @@ createTexture(Raster *raster, MTLPixelFormat format)
 	return 1;
 }
 
+static bool32
+createMsaaTexture(Raster *raster, MTLPixelFormat format, uint32 samples)
+{
+	MetalContext *ctx = getContext();
+	MetalRaster *natras = GETMETALRASTEREXT(raster);
+	MTLTextureDescriptor *desc;
+	id<MTLTexture> tex;
+
+	if(ctx == nil)
+		return 0;
+	@autoreleasepool {
+		desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+			width:raster->width height:raster->height mipmapped:NO];
+		desc.textureType = MTLTextureType2DMultisample;
+		desc.sampleCount = samples;
+		desc.usage = MTLTextureUsageRenderTarget;
+		desc.storageMode = MTLStorageModePrivate;
+		tex = [ctx->device newTextureWithDescriptor:desc];
+		if(tex == nil)
+			return 0;
+		natras->msaaTexture = (__bridge_retained void*)tex;
+		natras->numSamples = samples;
+	}
+	return 1;
+}
+
+void*
+getRasterTargetTexture(Raster *raster, uint32 samples)
+{
+	MetalRaster *natras;
+
+	if(raster == nil)
+		return nil;
+	natras = GETMETALRASTEREXT(raster);
+	if(samples <= 1)
+		return natras->texture;
+	if(natras->msaaTexture == nil && raster->type == Raster::ZBUFFER)
+		createMsaaTexture(raster, MTLPixelFormatDepth32Float_Stencil8, samples);
+	return natras->numSamples == samples ? natras->msaaTexture : nil;
+}
+
 static MTLPixelFormat
 getPixelFormat(int32 format)
 {
@@ -367,6 +408,10 @@ rasterCreateCamera(Raster *raster)
 
 	if(!createTexture(raster, MTLPixelFormatRGBA8Unorm)){
 		RWERROR((ERR_GENERAL, "can't create camera texture"));
+		return nil;
+	}
+	if(metalGlobals.numSamples > 1 && !createMsaaTexture(raster, MTLPixelFormatRGBA8Unorm, metalGlobals.numSamples)){
+		RWERROR((ERR_GENERAL, "can't create multisampled camera texture"));
 		return nil;
 	}
 	return raster;
@@ -772,6 +817,8 @@ createNativeRaster(void *object, int32 offset, int32)
 	ras->filledMask = 0;
 	ras->lastUseFrame = 0;
 	ras->gpuWriteFrame = 0;
+	ras->msaaTexture = nil;
+	ras->numSamples = 1;
 	initSampler(ras);
 	return object;
 }
@@ -795,6 +842,11 @@ destroyNativeRaster(void *object, int32 offset, int32)
 			view = nil;
 			natras->sampleTexture = nil;
 		}
+		if(natras->msaaTexture){
+			id<MTLTexture> ms = (__bridge_transfer id<MTLTexture>)natras->msaaTexture;
+			ms = nil;
+			natras->msaaTexture = nil;
+		}
 	}
 	return object;
 }
@@ -805,6 +857,8 @@ copyNativeRaster(void *dst, void *, int32 offset, int32)
 	MetalRaster *d = PLUGINOFFSET(MetalRaster, dst, offset);
 	d->texture = nil;
 	d->sampleTexture = nil;
+	d->msaaTexture = nil;
+	d->numSamples = 1;
 	return dst;
 }
 

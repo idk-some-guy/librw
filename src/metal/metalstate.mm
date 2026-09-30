@@ -1526,7 +1526,7 @@ flushCache(void)
 	pd.writeMask = MTLColorWriteMaskAll;
 	pd.colorFormat = COLORFMT_RGBA8;
 	pd.depthFormat = ctx->encoderHasDepth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
-	pd.sampleCount = 1;
+	pd.sampleCount = ctx->encoderSamples;
 	key = pipelineKey(pd);
 	if(key == lastPipeKey && lastPipe)
 		pipe = lastPipe;

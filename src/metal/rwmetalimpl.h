@@ -76,34 +76,39 @@ struct RasterStats
 extern RasterStats rasterStats;
 RasterStats getRasterStats(void);
 
+struct InstanceStats
+{
+	uint32 stripRestartMeshes;
+};
+InstanceStats getInstanceStats(void);
+
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);
 void encodeMipmapGeneration(void *texture);
 void waitForGPUWrites(uint64 frameId);
 
 void forgetRasterTarget(Raster *raster);
-bool32 passIsOpen(void);
 void clearNewRasterTarget(Raster *raster);
 bool32 readRasterPixels(Raster *raster, uint8 *dst);
-bool32 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth);
-bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 bool32 writeRasterPixels(Raster *raster, const uint8 *src);
 void resolveRasterTarget(Raster *raster);
+bool32 rasterHasPendingWork(Raster *raster);
+void *getRasterSampleTexture(Raster *raster);
+void *getRasterTargetTexture(Raster *raster, uint32 samples);
+void *getWhiteTexture(void);
+void termRaster(void);
+
 bool32 beginDraw(void);
 bool32 drawIndexed(InstanceDataHeader *header, InstanceData *inst);
 void allocInstanceVertices(InstanceDataHeader *header, const AttribDesc *attribs, int32 numAttribs);
 void instanceDefaultAttribs(Geometry *geo, InstanceDataHeader *header, bool32 reinstance);
 void uploadInstanceVertices(InstanceDataHeader *header);
 
-struct InstanceStats
-{
-	uint32 stripRestartMeshes;
-};
-InstanceStats getInstanceStats(void);
-bool32 rasterHasPendingWork(Raster *raster);
-void *getRasterSampleTexture(Raster *raster);
-void *getWhiteTexture(void);
-void termRaster(void);
+int32 getMaxFramesInFlight(void);
+void holdFrameForTest(double seconds);
+bool32 passIsOpen(void);
+bool32 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth);
+bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 #endif
 
 Raster *rasterCreate(Raster *raster);

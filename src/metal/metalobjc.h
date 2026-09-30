@@ -41,9 +41,10 @@ struct MetalContext
 	id<MTLRenderCommandEncoder> encoder;
 	bool encoderHasDepth;
 	uint32 encoderWidth, encoderHeight;
+	uint32 encoderSamples;
 
 	id<MTLRenderPipelineState> compositePipeline;
-	id<MTLRenderPipelineState> clearPipelines[2][2];
+	id<MTLRenderPipelineState> clearPipelines[4][2][2];
 	id<MTLDepthStencilState> clearDepthStates[2][2];
 };
 

@@ -251,6 +251,8 @@ struct MetalRaster
 	int32 maxAnisotropy;
 	uint64 lastUseFrame;
 	uint64 gpuWriteFrame;
+	void *msaaTexture;
+	uint32 numSamples;
 };
 
 struct MetalCaps

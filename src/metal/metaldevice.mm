@@ -54,7 +54,7 @@ compileLibrary(id<MTLDevice> device, const char *src)
 
 static id<MTLRenderPipelineState>
 makePipeline(id<MTLDevice> device, id<MTLLibrary> lib, NSString *vs, NSString *fs,
-	MTLPixelFormat colorFormat, MTLPixelFormat depthFormat, bool writeColor)
+	MTLPixelFormat colorFormat, MTLPixelFormat depthFormat, bool writeColor, uint32 samples)
 {
 	MTLRenderPipelineDescriptor *desc;
 	NSError *err = nil;
@@ -67,6 +67,7 @@ makePipeline(id<MTLDevice> device, id<MTLLibrary> lib, NSString *vs, NSString *f
 	desc.colorAttachments[0].writeMask = writeColor ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
 	desc.depthAttachmentPixelFormat = depthFormat;
 	desc.stencilAttachmentPixelFormat = depthFormat;
+	desc.rasterSampleCount = samples;
 	pipe = [device newRenderPipelineStateWithDescriptor:desc error:&err];
 	if(pipe == nil)
 		RWERROR((ERR_GENERAL, err.localizedDescription.UTF8String));
@@ -96,26 +97,35 @@ makeClearDepthState(id<MTLDevice> device, bool writeDepth, bool writeStencil)
 	return [device newDepthStencilStateWithDescriptor:desc];
 }
 
+static int32
+sampleSlot(uint32 s)
+{
+	return s >= 8 ? 3 : s >= 4 ? 2 : s >= 2 ? 1 : 0;
+}
+
 static int
 createFramePipelines(MetalContext *ctx)
 {
 	id<MTLLibrary> lib;
-	int c, d;
+	int s, c, d;
 
 	lib = compileLibrary(ctx->device, frameShaderSrc);
 	if(lib == nil)
 		return 0;
 	ctx->compositePipeline = makePipeline(ctx->device, lib, @"compositeVS", @"compositeFS",
-		MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid, true);
+		MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid, true, 1);
 	for(c = 0; c < 2; c++)
-		for(d = 0; d < 2; d++){
-			ctx->clearPipelines[c][d] = makePipeline(ctx->device, lib, @"clearVS", @"clearFS",
-				MTLPixelFormatRGBA8Unorm,
-				d ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid, c);
+		for(d = 0; d < 2; d++)
 			ctx->clearDepthStates[c][d] = makeClearDepthState(ctx->device, c, d);
-			if(ctx->clearPipelines[c][d] == nil)
-				return 0;
-		}
+	for(s = 0; s < 4 && (1u << s) <= metalCaps.maxSamples; s++)
+		for(c = 0; c < 2; c++)
+			for(d = 0; d < 2; d++){
+				ctx->clearPipelines[s][c][d] = makePipeline(ctx->device, lib, @"clearVS", @"clearFS",
+					MTLPixelFormatRGBA8Unorm,
+					d ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid, c, 1u << s);
+				if(ctx->clearPipelines[s][c][d] == nil)
+					return 0;
+			}
 	return ctx->compositePipeline != nil;
 }
 
@@ -135,10 +145,6 @@ createContext(void)
 	ctx->device = device;
 	ctx->queue = [device newCommandQueue];
 	ctx->frameSemaphore = dispatch_semaphore_create(MAXFRAMESINFLIGHT);
-	if(!createFramePipelines(ctx)){
-		delete ctx;
-		return 0;
-	}
 
 	metalCaps.bcSupported = device.supportsBCTextureCompression;
 	metalCaps.maxAnisotropy = 16.0f;
@@ -148,6 +154,10 @@ createContext(void)
 			metalCaps.maxSamples = n;
 			break;
 		}
+	if(!createFramePipelines(ctx)){
+		delete ctx;
+		return 0;
+	}
 
 	metalGlobals.context = ctx;
 	return 1;
@@ -234,14 +244,17 @@ beginPass(MetalContext *ctx, const PassAction *a)
 {
 	static bool depthDetachReported;
 	Raster *fb = (Raster*)a->target.color;
+	Raster *zb = (Raster*)a->target.depth;
+	uint32 samples = fb ? GETMETALRASTEREXT(fb)->numSamples : zb ? GETMETALRASTEREXT(zb)->numSamples : 1;
 	id<MTLTexture> color = getRasterTexture(fb);
-	id<MTLTexture> depth = getRasterTexture((Raster*)a->target.depth);
+	id<MTLTexture> colorMS = fb && samples > 1 ? (__bridge id<MTLTexture>)GETMETALRASTEREXT(fb)->msaaTexture : nil;
+	id<MTLTexture> depth = (__bridge id<MTLTexture>)getRasterTargetTexture(zb, samples);
 	MTLRenderPassDescriptor *desc;
 	const PassClear *c = &a->clear;
 
 	if(color == nil && depth == nil)
 		return;
-	if(color && depth && (depth.width != color.width || depth.height != color.height)){
+	if((zb && samples > 1 && depth == nil) || (color && depth && (depth.width != color.width || depth.height != color.height))){
 		depth = nil;
 		frameStats.depthDetached++;
 		if(!depthDetachReported){
@@ -252,9 +265,10 @@ beginPass(MetalContext *ctx, const PassAction *a)
 
 	desc = [MTLRenderPassDescriptor renderPassDescriptor];
 	if(color){
-		desc.colorAttachments[0].texture = color;
+		desc.colorAttachments[0].texture = colorMS ? colorMS : color;
+		desc.colorAttachments[0].resolveTexture = colorMS ? color : nil;
 		desc.colorAttachments[0].loadAction = c->flags & PASSCLEAR_COLOR ? MTLLoadActionClear : MTLLoadActionLoad;
-		desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+		desc.colorAttachments[0].storeAction = colorMS ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
 		desc.colorAttachments[0].clearColor = MTLClearColorMake(c->color[0], c->color[1], c->color[2], c->color[3]);
 	}
 	if(depth){
@@ -272,6 +286,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	frameStats.renderPasses++;
 	invalidateEncoderState();
 	ctx->encoderHasDepth = depth != nil;
+	ctx->encoderSamples = samples;
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
 	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
 	if(fb)
@@ -309,7 +324,7 @@ drawClearQuad(MetalContext *ctx, const PassAction *a)
 	[enc setViewport:vp];
 	[enc setScissorRect:r];
 	[enc setCullMode:MTLCullModeNone];
-	[enc setRenderPipelineState:ctx->clearPipelines[writeColor][ctx->encoderHasDepth]];
+	[enc setRenderPipelineState:ctx->clearPipelines[sampleSlot(ctx->encoderSamples)][writeColor][ctx->encoderHasDepth]];
 	if(ctx->encoderHasDepth){
 		[enc setDepthStencilState:ctx->clearDepthStates[writeDepth][writeStencil]];
 		[enc setStencilReferenceValue:c->stencil];
@@ -478,7 +493,7 @@ bool32
 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth)
 {
 	MetalContext *ctx = getContext();
-	id<MTLTexture> tex;
+	id<MTLTexture> tex, ms;
 	id<MTLBuffer> buf;
 	id<MTLCommandBuffer> cb;
 	id<MTLBlitCommandEncoder> blit;
@@ -496,6 +511,21 @@ readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth)
 		runPassActions();
 		buf = [ctx->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
 		cb = getCommandBuffer(ctx);
+		ms = (__bridge id<MTLTexture>)GETMETALRASTEREXT(zbuffer->parent)->msaaTexture;
+		if(ms){
+			MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+			rp.depthAttachment.texture = ms;
+			rp.depthAttachment.loadAction = MTLLoadActionLoad;
+			rp.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+			rp.depthAttachment.resolveTexture = tex;
+			rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+			rp.stencilAttachment.texture = ms;
+			rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+			rp.stencilAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+			rp.stencilAttachment.resolveTexture = tex;
+			rp.stencilAttachment.stencilResolveFilter = MTLMultisampleStencilResolveFilterSample0;
+			[[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+		}
 		blit = [cb blitCommandEncoder];
 		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0
 			sourceOrigin:MTLOriginMake(zbuffer->offsetX + x, zbuffer->offsetY + y, 0)
