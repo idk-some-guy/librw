@@ -1372,7 +1372,8 @@ setCustomConstants(const void *data, uint32 size)
 {
 	if(size > MAXCUSTOMCONSTANTS)
 		size = MAXCUSTOMCONSTANTS;
-	memcpy(customConstants, data, size);
+	if(size)
+		memcpy(customConstants, data, size);
 	blockInfo[BLOCK_CUSTOM].size = size;
 	blockDirty[BLOCK_CUSTOM] = true;
 }
@@ -1993,11 +1994,11 @@ logStats(void)
 	InstanceStats in = getInstanceStats();
 
 	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
-		"late pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
+		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
-		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.skinnedUnrouted,
+		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
 		in.stripRestartMeshes - statsLog.instance.stripRestartMeshes,
 		r.stagedUploads - statsLog.raster.stagedUploads, r.directUploads - statsLog.raster.directUploads,
 		r.mipmapBlits - statsLog.raster.mipmapBlits, r.gpuWaits - statsLog.raster.gpuWaits,
