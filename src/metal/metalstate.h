@@ -58,6 +58,7 @@ struct StateStats
 	uint32 droppedDraws;
 	uint32 ringGrows;
 	uint32 ringPeakBytes;
+	uint32 frameRingBytes;
 	uint32 blockUploads[8];
 	uint32 vertexBlockBinds[8];
 	uint32 fragmentBlockBinds[8];

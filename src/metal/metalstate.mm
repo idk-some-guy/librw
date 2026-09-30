@@ -324,7 +324,7 @@ ringAlloc(uint32 size, uint32 align, RingSpace *space)
 	MetalContext *ctx = getContext();
 	id<MTLBuffer> buf;
 	NSUInteger len;
-	uint32 off;
+	uint32 off, usedBefore;
 
 	if(ctx == nil)
 		return 0;
@@ -333,6 +333,7 @@ ringAlloc(uint32 size, uint32 align, RingSpace *space)
 	if(align == 0)
 		align = 4;
 	assert((align & (align-1)) == 0);
+	usedBefore = ring.used;
 	off = (ring.used + align-1) & ~(align-1);
 	if(buf == nil || off + size > buf.length){
 		len = buf ? buf.length*2 : RINGSTARTSIZE;
@@ -348,9 +349,10 @@ ringAlloc(uint32 size, uint32 align, RingSpace *space)
 		}
 		ring.buffers[ring.frame] = buf;
 		off = 0;
+		usedBefore = 0;
 	}
 	ring.used = off + size;
-	statsLog.frameBytes += size;
+	statsLog.frameBytes += ring.used - usedBefore;
 	space->cpu = (uint8*)buf.contents + off;
 	space->buffer = (__bridge void*)buf;
 	space->offset = off;
@@ -1804,6 +1806,7 @@ StateStats
 getStateStats(void)
 {
 	stats.ringSize = ring.buffers[ring.frame] ? (uint32)ring.buffers[ring.frame].length : 0;
+	stats.frameRingBytes = statsLog.frameBytes;
 	return stats;
 }
 
