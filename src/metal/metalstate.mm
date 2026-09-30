@@ -1744,6 +1744,9 @@ static const PrewarmState im3dStates[] = {
 	{ VARIANT_ALPHATEST, BLEND_DARKEN },
 	{ VARIANT_ALPHATEST, BLEND_REPLACE },
 };
+static const WorldLayout uv2WorldLayouts[] = {
+	{ false, true, 2, buildingStates, nelem(buildingStates) },
+};
 
 static void
 prewarm(Shader *shader, uint32 layout, uint32 variant, int32 blend, int32 depthFormat)
@@ -1806,6 +1809,15 @@ prewarmPipelines(void)
 		if(im3dShader)
 			for(i = 0; i < (int32)nelem(im3dStates); i++)
 				prewarm(im3dShader, im3dVertexLayout, im3dStates[i].variant, im3dStates[i].blend, DEPTHFMT_D32S8);
+		// layouts registered from here on take ids after the two-uv im2d layout
+		openIm2DUV2();
+		for(i = 0; i < (int32)nelem(uv2WorldLayouts); i++){
+			const WorldLayout &w = uv2WorldLayouts[i];
+			n = defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs);
+			layout = registerVertexLayout(descs, n);
+			for(j = 0; j < w.numStates; j++)
+				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
+		}
 	}
 	prewarming = false;
 	snprintf(prewarmLine, sizeof(prewarmLine), "rw::metal: prewarm %u pipelines in %.1f ms\n", stats.pipelinesAtInit - before,
