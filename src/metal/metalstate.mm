@@ -87,6 +87,12 @@ struct UniformMaterial
 	float32 surfProps[4];
 };
 
+struct UniformSkin
+{
+	RawMatrix bones[MAXSKINBONES];
+};
+
+static_assert(sizeof(UniformSkin) == 4096, "skin block size");
 static_assert(sizeof(UniformObject) == 64 && sizeof(UniformLights) == 528 && sizeof(UniformMaterial) == 32, "block sizes");
 static_assert(offsetof(UniformLights, lightParams) == 16 && offsetof(UniformLights, lightPosition) == 144 &&
 	offsetof(UniformLights, lightDirection) == 272 && offsetof(UniformLights, lightColor) == 400, "UniformLights layout");
@@ -97,6 +103,7 @@ static UniformScene uniformScene;
 static UniformObject uniformObject;
 static UniformLights uniformLights;
 static UniformMaterial uniformMaterial;
+static UniformSkin uniformSkin;
 static uint8 customConstants[MAXCUSTOMCONSTANTS];
 
 enum
@@ -107,6 +114,7 @@ enum
 	BLOCK_MATERIAL,
 	BLOCK_STATE,
 	BLOCK_CUSTOM,
+	BLOCK_SKIN,
 	NUMBLOCKS
 };
 
@@ -124,6 +132,7 @@ static BlockInfo blockInfo[NUMBLOCKS] = {
 	{ BUFFER_MATERIAL, &uniformMaterial, sizeof(UniformMaterial) },
 	{ BUFFER_STATE, &uniformState, sizeof(UniformState) },
 	{ BUFFER_CUSTOM, customConstants, 0 },
+	{ BUFFER_SKIN, &uniformSkin, sizeof(UniformSkin) },
 };
 
 static bool32 stateDirty = 1;
@@ -1811,9 +1820,20 @@ getStateStats(void)
 }
 
 void
-countSkinnedSkipped(void)
+setSkinMatrices(const RawMatrix *bones, int32 numBones)
 {
-	stats.skinnedSkipped++;
+	if(numBones > MAXSKINBONES)
+		numBones = MAXSKINBONES;
+	if(numBones <= 0 || memcmp(uniformSkin.bones, bones, numBones*sizeof(RawMatrix)) == 0)
+		return;
+	memcpy(uniformSkin.bones, bones, numBones*sizeof(RawMatrix));
+	blockDirty[BLOCK_SKIN] = true;
+}
+
+void
+countSkinnedUnrouted(void)
+{
+	stats.skinnedUnrouted++;
 }
 
 void
@@ -1845,11 +1865,11 @@ logStats(void)
 	InstanceStats in = getInstanceStats();
 
 	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
-		"late pipelines %u skinned skipped %u strip restarts %u staged uploads %u direct uploads %u "
+		"late pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
-		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.skinnedSkipped,
+		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.skinnedUnrouted,
 		in.stripRestartMeshes - statsLog.instance.stripRestartMeshes,
 		r.stagedUploads - statsLog.raster.stagedUploads, r.directUploads - statsLog.raster.directUploads,
 		r.mipmapBlits - statsLog.raster.mipmapBlits, r.gpuWaits - statsLog.raster.gpuWaits,

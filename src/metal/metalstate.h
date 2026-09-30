@@ -38,6 +38,7 @@ bool32 ringAlloc(uint32 size, uint32 align, RingSpace *space);
 void bindVertexBuffer(void *buffer, uint32 offset);
 
 extern Shader *im2dShader;
+extern Shader *skinShader;
 extern Shader *im3dShader;
 extern uint32 im2dVertexLayout;
 extern uint32 im3dVertexLayout;
@@ -52,7 +53,7 @@ struct StateStats
 	uint32 ringSize;
 	uint32 ringEarlyReuses;
 	uint32 framesInFlightAtTerm;
-	uint32 skinnedSkipped;
+	uint32 skinnedUnrouted;
 	uint32 textureStageBinds;
 	uint32 draws;
 	uint32 droppedDraws;
@@ -64,7 +65,9 @@ struct StateStats
 	uint32 fragmentBlockBinds[8];
 };
 StateStats getStateStats(void);
-void countSkinnedSkipped(void);
+enum { MAXSKINBONES = 64 };
+void setSkinMatrices(const RawMatrix *bones, int32 numBones);
+void countSkinnedUnrouted(void);
 void countDroppedDraw(void);
 void logStats(void);
 void logStatsIfDue(void);

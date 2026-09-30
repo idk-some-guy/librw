@@ -15,14 +15,39 @@
 #include "../rwplugins.h"
 
 #include "rwmetal.h"
+#include "rwmetalshader.h"
 #include "rwmetalplg.h"
 #include "rwmetalimpl.h"
 #include "metalinst.h"
+#include "metalstate.h"
+#include "metalkeys.h"
+
+#define PLUGIN_ID ID_SKIN
 
 namespace rw {
 namespace metal {
 
 static ObjPipeline *skinPipe;
+Shader *skinShader;
+static RawMatrix skinMatrices[MAXSKINBONES];
+
+bool32
+openSkin(void)
+{
+#include "shaders/skin_metal.inc"
+#include "shaders/simple_metal.inc"
+	const char *src[] = { header_metal_src, skin_metal_src, simple_metal_src, nil };
+	skinShader = Shader::create(src, "skinVS", "simpleFS", VARIANT_ALL);
+	return skinShader != nil;
+}
+
+void
+closeSkin(void)
+{
+	if(skinShader)
+		skinShader->destroy();
+	skinShader = nil;
+}
 
 void
 skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
@@ -55,6 +80,83 @@ skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 			header->totalNumVertex, a->stride);
 	}
 	uploadInstanceVertices(header);
+}
+
+void
+uploadSkinMatrices(Atomic *a)
+{
+	static bool reported;
+	int32 i, n;
+	Skin *skin = Skin::get(a->geometry);
+	HAnimHierarchy *hier = Skin::getHierarchy(a);
+	Matrix m, tmp;
+
+	if(hier){
+		Matrix *invMats = (Matrix*)skin->inverseMatrices;
+		n = hier->numNodes;
+		if((n != skin->numBones || n > MAXSKINBONES) && !reported){
+			reported = true;
+			RWERROR((ERR_GENERAL, "skin bone count differs from its hierarchy or exceeds 64"));
+		}
+		if(n > skin->numBones)
+			n = skin->numBones;
+		if(n > MAXSKINBONES)
+			n = MAXSKINBONES;
+		if(hier->flags & HAnimHierarchy::LOCALSPACEMATRICES){
+			for(i = 0; i < n; i++){
+				invMats[i].flags = 0;
+				Matrix::mult(&m, &invMats[i], &hier->matrices[i]);
+				convMatrix(&skinMatrices[i], &m);
+			}
+		}else{
+			Matrix invAtmMat;
+			Matrix::invert(&invAtmMat, a->getFrame()->getLTM());
+			for(i = 0; i < n; i++){
+				invMats[i].flags = 0;
+				Matrix::mult(&tmp, &hier->matrices[i], &invAtmMat);
+				Matrix::mult(&m, &invMats[i], &tmp);
+				convMatrix(&skinMatrices[i], &m);
+			}
+		}
+	}else{
+		n = skin->numBones < MAXSKINBONES ? skin->numBones : MAXSKINBONES;
+		m.setIdentity();
+		for(i = 0; i < n; i++)
+			convMatrix(&skinMatrices[i], &m);
+	}
+	setSkinMatrices(skinMatrices, n);
+}
+
+void
+skinRenderCB(Atomic *atomic, InstanceDataHeader *header)
+{
+	Material *m;
+
+	if(Skin::get(atomic->geometry) == nil){
+		defaultRenderCB(atomic, header);
+		return;
+	}
+	uint32 flags = atomic->geometry->flags;
+	setWorldMatrix(atomic->getFrame()->getLTM(), atomic);
+	int32 vsBits = lightingCB(atomic);
+
+	setupVertexInput(header);
+
+	InstanceData *inst = header->inst;
+	int32 n = header->numMeshes;
+
+	uploadSkinMatrices(atomic);
+
+	while(n--){
+		m = inst->material;
+		setMaterial(flags, m->color, m->surfaceProps);
+		setTexture(0, m->texture);
+		rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
+		skinShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+		drawInst(header, inst);
+		inst++;
+	}
+	teardownVertexInput(header);
 }
 
 ObjPipeline*

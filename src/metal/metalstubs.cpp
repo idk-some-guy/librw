@@ -23,9 +23,6 @@ Texture *readNativeTexture(Stream *stream) { return nil; }
 void writeNativeTexture(Texture *tex, Stream *stream) { }
 uint32 getSizeNativeTexture(Texture *tex) { return 0; }
 
-void skinRenderCB(Atomic *atomic, InstanceDataHeader *header) { }
-void uploadSkinMatrices(Atomic *atomic) { }
-
 void im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
    void *vertices, int32 numVertices, void *indices, int32 numIndices) { }
 
