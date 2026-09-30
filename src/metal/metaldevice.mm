@@ -231,6 +231,7 @@ setViewport(MetalContext *ctx, Raster *target)
 static void
 beginPass(MetalContext *ctx, const PassAction *a)
 {
+	static bool depthDetachReported;
 	Raster *fb = (Raster*)a->target.color;
 	id<MTLTexture> color = getRasterTexture(fb);
 	id<MTLTexture> depth = getRasterTexture((Raster*)a->target.depth);
@@ -239,8 +240,14 @@ beginPass(MetalContext *ctx, const PassAction *a)
 
 	if(color == nil && depth == nil)
 		return;
-	if(color && depth && (depth.width != color.width || depth.height != color.height))
+	if(color && depth && (depth.width != color.width || depth.height != color.height)){
 		depth = nil;
+		frameStats.depthDetached++;
+		if(!depthDetachReported){
+			depthDetachReported = true;
+			RWERROR((ERR_GENERAL, "depth raster size differs from its camera raster; drawing without depth"));
+		}
+	}
 
 	desc = [MTLRenderPassDescriptor renderPassDescriptor];
 	if(color){
