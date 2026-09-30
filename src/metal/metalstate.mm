@@ -1,5 +1,6 @@
 #ifdef RW_METAL
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <atomic>
 #include <chrono>
@@ -299,6 +300,8 @@ static StatsLog statsLog;
 static void resetStatsLog(void);
 static char prewarmLine[128];
 static char statsLine[512];
+static char dropLine[256];
+static std::unordered_set<uint32> dropsReported;
 
 void
 beginFrameState(void)
@@ -1508,7 +1511,7 @@ flushCache(void)
 	int32 cull;
 
 	if(ctx == nil || ctx->encoder == nil || currentShader == nil){
-		stats.droppedDraws++;
+		countDroppedDraw(currentShader ? DROP_NOENCODER : DROP_NOSHADER, currentShader);
 		return 0;
 	}
 	syncEncoder(ctx);
@@ -1533,7 +1536,7 @@ flushCache(void)
 		lastPipe = pipe;
 	}
 	if(pipe == nil){
-		stats.droppedDraws++;
+		countDroppedDraw(DROP_NOPIPELINE, currentShader);
 		return 0;
 	}
 	if(enc.pipeline != pipe->state){
@@ -1592,7 +1595,7 @@ flushCache(void)
 	bindTextures(e, pipe);
 	updateStateBlock();
 	if(!bindBlocks(e, pipe)){
-		stats.droppedDraws++;
+		countDroppedDraw(DROP_NORINGSPACE, currentShader);
 		return 0;
 	}
 	stats.draws++;
@@ -1886,6 +1889,7 @@ initState(void)
 	if(ctx == nil)
 		return 0;
 	memset(&stats, 0, sizeof(stats));
+	dropsReported.clear();
 	resetStatsLog();
 	@autoreleasepool {
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
@@ -1987,10 +1991,28 @@ countSkinnedUnrouted(void)
 	stats.skinnedUnrouted++;
 }
 
-void
-countDroppedDraw(void)
+bool32
+countDroppedDraw(int32 cause, Shader *shader)
 {
+	static const char *causes[NUMDROPCAUSES] = {
+		"no render encoder is open",
+		"no shader is set",
+		"its pipeline failed to build",
+		"no ring space for its uniform blocks",
+		"no render target is set",
+		"it samples the raster it renders into",
+		"a two-uv im2d draw has no override shader or layout",
+	};
 	stats.droppedDraws++;
+	if(!dropsReported.insert((uint32)cause<<16 | (shader ? shader->shaderId : 0)).second)
+		return 0;
+	if(shader)
+		snprintf(dropLine, sizeof(dropLine), "rw::metal: draw dropped, %s (shader %s/%s)\n", causes[cause],
+			shader->vertexName, shader->fragmentName);
+	else
+		snprintf(dropLine, sizeof(dropLine), "rw::metal: draw dropped, %s (shader none)\n", causes[cause]);
+	fprintf(stderr, "%s", dropLine);
+	return 1;
 }
 
 void
@@ -2063,6 +2085,12 @@ const char*
 getStatsLine(void)
 {
 	return statsLine;
+}
+
+const char*
+getDropLine(void)
+{
+	return dropLine;
 }
 
 }

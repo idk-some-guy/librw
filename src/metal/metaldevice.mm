@@ -704,14 +704,13 @@ usesTarget(const PassTarget &t, Raster *raster)
 bool32
 beginDraw(void)
 {
-	static bool feedbackReported;
 	MetalContext *ctx = getContext();
 	Raster *raster;
 	uint32 stages;
 	int32 i;
 
 	if(ctx == nil){
-		countDroppedDraw();
+		countDroppedDraw(DROP_NOENCODER, currentShader);
 		return 0;
 	}
 	stages = currentShader == nil || currentShader->textureStages < 0 ? ~0u : (uint32)currentShader->textureStages;
@@ -722,12 +721,11 @@ beginDraw(void)
 		if(raster == nil || raster->platform != PLATFORM_METAL)
 			continue;
 		if(usesTarget(passManager.current, raster)){
-			if(!feedbackReported){
-				feedbackReported = true;
-				RWERROR((ERR_GENERAL, "draw samples the raster it renders into"));
-			}
 			countFeedbackDraw();
-			countDroppedDraw();
+			if(countDroppedDraw(DROP_FEEDBACK, currentShader)){
+				Error e = { PLUGIN_ID, ERR_GENERAL };
+				setError(&e);
+			}
 			return 0;
 		}
 		if(rasterHasPendingWork(raster))
@@ -735,13 +733,13 @@ beginDraw(void)
 	}
 	@autoreleasepool {
 		if(!passManager.draw()){
-			countDroppedDraw();
+			countDroppedDraw(DROP_NOTARGET, currentShader);
 			return 0;
 		}
 		runPassActions();
 	}
 	if(ctx->encoder == nil){
-		countDroppedDraw();
+		countDroppedDraw(DROP_NOENCODER, currentShader);
 		return 0;
 	}
 	return 1;

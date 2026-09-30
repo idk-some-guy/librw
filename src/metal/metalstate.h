@@ -6,6 +6,7 @@ namespace metal {
 struct Shader;
 
 #define MAXNUMSTAGES 8
+enum { MAXSKINBONES = 64 };
 
 bool32 initState(void);
 void prewarmPipelines(void);
@@ -21,6 +22,8 @@ void *getRenderState(int32 state);
 void setEncoderViewport(double x, double y, double w, double h);
 void setFogPlanes(float32 fogStart, float32 fogEnd);
 void setIm2DXform(const float32 *xform);
+void setSkinMatrices(const RawMatrix *bones, int32 numBones);
+void setMatFXConstants(const RawMatrix *texMatrix, const float32 *fxParams, const RGBAf *colorClamp, const RGBAf *envColor);
 void evictRaster(Raster *raster);
 Raster *getStageRaster(int32 stage);
 void forgetShaderPipelines(uint32 shaderId);
@@ -36,6 +39,23 @@ struct RingSpace
 };
 bool32 ringAlloc(uint32 size, uint32 align, RingSpace *space);
 void bindVertexBuffer(void *buffer, uint32 offset);
+
+enum DropCause
+{
+	DROP_NOENCODER,
+	DROP_NOSHADER,
+	DROP_NOPIPELINE,
+	DROP_NORINGSPACE,
+	DROP_NOTARGET,
+	DROP_FEEDBACK,
+	DROP_NOOVERRIDESHADER,
+	NUMDROPCAUSES
+};
+bool32 countDroppedDraw(int32 cause, Shader *shader);
+void countFeedbackDraw(void);
+void countSkinnedUnrouted(void);
+void logStats(void);
+void logStatsIfDue(void);
 
 extern Shader *im2dShader;
 extern Shader *skinShader;
@@ -69,18 +89,12 @@ struct StateStats
 	uint32 fragmentBlockBinds[9];
 };
 StateStats getStateStats(void);
-enum { MAXSKINBONES = 64 };
-void setSkinMatrices(const RawMatrix *bones, int32 numBones);
-void setMatFXConstants(const RawMatrix *texMatrix, const float32 *fxParams, const RGBAf *colorClamp, const RGBAf *envColor);
-void countSkinnedUnrouted(void);
-void countDroppedDraw(void);
-void countFeedbackDraw(void);
-void logStats(void);
-void logStatsIfDue(void);
 const char *getPrewarmLine(void);
 const char *getStatsLine(void);
+const char *getDropLine(void);
 uint32 checkShaderBlockSizes(Shader *shader, uint32 variant);
 bool32 pipelineCached(uint64 key);
+int32 getVertexLayout(uint32 layout, AttribDesc *attribs, int32 maxAttribs);
 
 }
 }

@@ -186,7 +186,7 @@ im2DRenderIndexedPrimitiveUV2(PrimitiveType primType,
 	if(ctx == nil || count == 0 || numVertices <= 0)
 		return;
 	if(im2dOverrideShader == nil || im2dUV2VertexLayout == 0){
-		countDroppedDraw();
+		countDroppedDraw(DROP_NOOVERRIDESHADER, im2dOverrideShader);
 		return;
 	}
 	@autoreleasepool {
