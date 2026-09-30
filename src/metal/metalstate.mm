@@ -1606,6 +1606,7 @@ enum
 	BLEND_DEPTHONLY,
 	BLEND_DARKEN,
 	BLEND_REPLACE,
+	BLEND_INVERT,
 	NUMPREWARMBLENDS
 };
 
@@ -1617,6 +1618,7 @@ static const uint32 prewarmBlends[NUMPREWARMBLENDS][2] = {
 	{ BLENDZERO, BLENDONE },
 	{ BLENDZERO, BLENDINVSRCCOLOR },
 	{ BLENDONE, BLENDZERO },
+	{ BLENDINVDESTCOLOR, BLENDZERO },
 };
 
 struct PrewarmState
@@ -1635,6 +1637,7 @@ struct WorldLayout
 };
 
 static const int32 im2dBlends[] = { BLEND_OFF, BLEND_ALPHA, BLEND_ALPHAADD, BLEND_ADD, BLEND_DEPTHONLY };
+static const int32 shadowIm2dBlends[] = { BLEND_INVERT, BLEND_REPLACE };
 static const PrewarmState buildingStates[] = {
 	{ 0, BLEND_OFF },
 	{ VARIANT_ALPHATEST, BLEND_ALPHA },
@@ -1707,6 +1710,8 @@ prewarmPipelines(void)
 			for(i = 0; i < (int32)nelem(im2dBlends); i++)
 				prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
 					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE);
+		for(i = 0; i < (int32)nelem(shadowIm2dBlends); i++)
+			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, shadowIm2dBlends[i], DEPTHFMT_D32S8);
 		for(i = 0; i < (int32)nelem(worldLayouts); i++){
 			const WorldLayout &w = worldLayouts[i];
 			n = defaultVertexLayout(w.normals, w.prelit, w.numTexCoords, attribs);
@@ -1714,6 +1719,13 @@ prewarmPipelines(void)
 			layout = registerVertexLayout(descs, n);
 			for(j = 0; j < w.numStates; j++)
 				prewarm(defaultShader, layout, w.states[j].variant, w.states[j].blend, DEPTHFMT_D32S8);
+		}
+		if(skinShader){
+			n = skinVertexLayout(true, true, 1, attribs);
+			memcpy(descs, attribs, n*sizeof(AttribDesc));
+			layout = registerVertexLayout(descs, n);
+			for(j = 0; j < (int32)nelem(litStates); j++)
+				prewarm(skinShader, layout, litStates[j].variant, litStates[j].blend, DEPTHFMT_D32S8);
 		}
 		if(im3dShader)
 			for(i = 0; i < (int32)nelem(im3dStates); i++)
