@@ -15,12 +15,59 @@
 #include "../rwplugins.h"
 
 #include "rwmetal.h"
+#include "rwmetalshader.h"
 #include "rwmetalplg.h"
+#include "rwmetalimpl.h"
+#include "metalstate.h"
+#include "metalkeys.h"
 
 namespace rw {
 namespace metal {
 
 static ObjPipeline *matfxPipe;
+Shader *matfxEnvShader;
+
+bool32
+openMatFX(void)
+{
+#include "shaders/matfx_env_metal.inc"
+	const char *src[] = { header_metal_src, matfx_env_metal_src, nil };
+	matfxEnvShader = Shader::create(src, "matfxEnvVS", "matfxEnvFS", VARIANT_ALL);
+	return matfxEnvShader != nil;
+}
+
+void
+closeMatFX(void)
+{
+	if(matfxEnvShader)
+		matfxEnvShader->destroy();
+	matfxEnvShader = nil;
+}
+
+void
+matfxEnvMatrix(Frame *frame, RawMatrix *out)
+{
+	RawMatrix normal2texcoord = {
+		{ 0.5f,  0.0f, 0.0f }, 0.0f,
+		{ 0.0f, -0.5f, 0.0f }, 0.0f,
+		{ 0.0f,  0.0f, 1.0f }, 0.0f,
+		{ 0.5f,  0.5f, 0.0f }, 1.0f
+	};
+	RawMatrix invMtx;
+	Matrix invMat;
+
+	if(frame == nil && engine->currentCamera)
+		frame = ((Camera*)engine->currentCamera)->getFrame();
+	if(frame)
+		Matrix::invert(&invMat, frame->getLTM());
+	else
+		invMat.setIdentity();
+	convMatrix(&invMtx, &invMat);
+	invMtx.pos.set(0.0f, 0.0f, 0.0f);
+	if(MatFX::envMapFlipU)
+		normal2texcoord.right.x = -0.5f;
+	RawMatrix::mult(out, &invMtx, &normal2texcoord);
+}
 
 void
 matfxRenderCB(Atomic *atomic, InstanceDataHeader *header)

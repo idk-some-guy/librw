@@ -92,7 +92,18 @@ struct UniformSkin
 	RawMatrix bones[MAXSKINBONES];
 };
 
+struct UniformMatFX
+{
+	RawMatrix texMatrix;
+	float32   fxParams[4];
+	RGBAf     colorClamp;
+	RGBAf     envColor;
+};
+
 static_assert(sizeof(UniformSkin) == 4096, "skin block size");
+static_assert(sizeof(UniformMatFX) == 112, "matfx block size");
+static_assert(offsetof(UniformMatFX, fxParams) == 64 && offsetof(UniformMatFX, colorClamp) == 80 &&
+	offsetof(UniformMatFX, envColor) == 96, "UniformMatFX layout");
 static_assert(sizeof(UniformObject) == 64 && sizeof(UniformLights) == 528 && sizeof(UniformMaterial) == 32, "block sizes");
 static_assert(offsetof(UniformLights, lightParams) == 16 && offsetof(UniformLights, lightPosition) == 144 &&
 	offsetof(UniformLights, lightDirection) == 272 && offsetof(UniformLights, lightColor) == 400, "UniformLights layout");
@@ -104,6 +115,7 @@ static UniformObject uniformObject;
 static UniformLights uniformLights;
 static UniformMaterial uniformMaterial;
 static UniformSkin uniformSkin;
+static UniformMatFX uniformMatFX;
 static uint8 customConstants[MAXCUSTOMCONSTANTS];
 
 enum
@@ -115,8 +127,12 @@ enum
 	BLOCK_STATE,
 	BLOCK_CUSTOM,
 	BLOCK_SKIN,
+	BLOCK_MATFX,
 	NUMBLOCKS
 };
+
+static_assert(NUMBLOCKS <= 8, "block masks are uint8");
+static_assert(BUFFER_MATFX < sizeof(StateStats::blockUploads)/sizeof(StateStats::blockUploads[0]), "stat arrays");
 
 struct BlockInfo
 {
@@ -133,6 +149,7 @@ static BlockInfo blockInfo[NUMBLOCKS] = {
 	{ BUFFER_STATE, &uniformState, sizeof(UniformState) },
 	{ BUFFER_CUSTOM, customConstants, 0 },
 	{ BUFFER_SKIN, &uniformSkin, sizeof(UniformSkin) },
+	{ BUFFER_MATFX, &uniformMatFX, sizeof(UniformMatFX) },
 };
 
 static bool32 stateDirty = 1;
@@ -1313,6 +1330,21 @@ setMaterial(const RGBA &color, const SurfaceProperties &surfaceprops, float extr
 	if(memcmp(&uniformMaterial, &mat, sizeof(mat)) != 0){
 		uniformMaterial = mat;
 		blockDirty[BLOCK_MATERIAL] = true;
+	}
+}
+
+void
+setMatFXConstants(const RawMatrix *texMatrix, const float32 *fxParams, const RGBAf *colorClamp, const RGBAf *envColor)
+{
+	UniformMatFX fx;
+
+	fx.texMatrix = *texMatrix;
+	memcpy(fx.fxParams, fxParams, sizeof(fx.fxParams));
+	fx.colorClamp = *colorClamp;
+	fx.envColor = *envColor;
+	if(memcmp(&uniformMatFX, &fx, sizeof(fx)) != 0){
+		uniformMatFX = fx;
+		blockDirty[BLOCK_MATFX] = true;
 	}
 }
 

@@ -39,6 +39,7 @@ void bindVertexBuffer(void *buffer, uint32 offset);
 
 extern Shader *im2dShader;
 extern Shader *skinShader;
+extern Shader *matfxEnvShader;
 extern Shader *im3dShader;
 extern uint32 im2dVertexLayout;
 extern uint32 im3dVertexLayout;
@@ -60,13 +61,14 @@ struct StateStats
 	uint32 ringGrows;
 	uint32 ringPeakBytes;
 	uint32 frameRingBytes;
-	uint32 blockUploads[8];
-	uint32 vertexBlockBinds[8];
-	uint32 fragmentBlockBinds[8];
+	uint32 blockUploads[9];
+	uint32 vertexBlockBinds[9];
+	uint32 fragmentBlockBinds[9];
 };
 StateStats getStateStats(void);
 enum { MAXSKINBONES = 64 };
 void setSkinMatrices(const RawMatrix *bones, int32 numBones);
+void setMatFXConstants(const RawMatrix *texMatrix, const float32 *fxParams, const RGBAf *colorClamp, const RGBAf *envColor);
 void countSkinnedUnrouted(void);
 void countDroppedDraw(void);
 void logStats(void);

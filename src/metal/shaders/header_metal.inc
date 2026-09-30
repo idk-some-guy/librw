@@ -18,6 +18,7 @@ const char *header_metal_src =
 "#define BUFFER_SKIN	5\n"
 "#define BUFFER_CUSTOM	6\n"
 "#define BUFFER_LIGHTS	7\n"
+"#define BUFFER_MATFX	8\n"
 
 "constant bool alphaTest [[function_constant(0)]];\n"
 "constant bool directionals [[function_constant(1)]];\n"

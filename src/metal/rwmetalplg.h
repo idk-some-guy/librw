@@ -5,6 +5,7 @@ namespace metal {
 void initMatFX(void);
 ObjPipeline *makeMatFXPipeline(void);
 void matfxRenderCB(Atomic *atomic, InstanceDataHeader *header);
+void matfxEnvMatrix(Frame *frame, RawMatrix *out);
 
 void initSkin(void);
 ObjPipeline *makeSkinPipeline(void);

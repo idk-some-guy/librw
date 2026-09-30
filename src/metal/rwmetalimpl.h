@@ -16,6 +16,8 @@ void openIm3D(void);
 void closeIm3D(void);
 bool32 openSkin(void);
 void closeSkin(void);
+bool32 openMatFX(void);
+void closeMatFX(void);
 void im3DTransform(void *vertices, int32 numVertices, Matrix *world, uint32 flags);
 void im3DRenderPrimitive(PrimitiveType primType);
 void im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndices);

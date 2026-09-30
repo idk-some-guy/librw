@@ -954,6 +954,8 @@ initMetal(void)
 	openIm3D();
 	if(!openSkin())
 		return 0;
+	if(!openMatFX())
+		return 0;
 	prewarmPipelines();
 	return 1;
 }
@@ -965,6 +967,7 @@ termMetal(void)
 	logStats();
 	closeIm3D();
 	closeSkin();
+	closeMatFX();
 	termRaster();
 	termState();
 	return 1;
