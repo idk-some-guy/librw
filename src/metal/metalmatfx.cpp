@@ -69,10 +69,65 @@ matfxEnvMatrix(Frame *frame, RawMatrix *out)
 	RawMatrix::mult(out, &invMtx, &normal2texcoord);
 }
 
+static void
+matfxDefaultRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits, uint32 flags)
+{
+	Material *m = inst->material;
+	setMaterial(flags, m->color, m->surfaceProps);
+	setTexture(0, m->texture);
+	rw::SetRenderState(VERTEXALPHA, inst->vertexAlpha || m->color.alpha != 0xFF);
+	defaultShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+	drawInst(header, inst);
+}
+
+static void
+matfxEnvRender(InstanceDataHeader *header, InstanceData *inst, int32 vsBits, uint32 flags, MatFX::Env *env)
+{
+	static const RGBAf zero = { 0.0f, 0.0f, 0.0f, 0.0f };
+	static const RGBAf one = { 1.0f, 1.0f, 1.0f, 1.0f };
+	Material *m = inst->material;
+	RawMatrix envMtx;
+	RGBAf envcol;
+
+	if(env->tex == nil || env->coefficient == 0.0f){
+		matfxDefaultRender(header, inst, vsBits, flags);
+		return;
+	}
+	setTexture(0, m->texture);
+	setTexture(1, env->tex);
+	matfxEnvMatrix(env->frame, &envMtx);
+	setMaterial(flags, m->color, m->surfaceProps);
+	float32 fxparams[4] = { env->coefficient, env->fbAlpha ? 0.0f : 1.0f, 0.0f, 0.0f };
+	convColor(&envcol, MatFX::envMapUseMatColor ? &m->color : &MatFX::envMapColor);
+	setMatFXConstants(&envMtx, fxparams, MatFX::envMapApplyLight ? &zero : &one, &envcol);
+	rw::SetRenderState(VERTEXALPHA, 1);
+	rw::SetRenderState(SRCBLEND, BLENDONE);
+	matfxEnvShader->use(shaderVariant(vsBits & VSLIGHT_MASK, getAlphaTest()));
+	drawInst(header, inst);
+	rw::SetRenderState(SRCBLEND, BLENDSRCALPHA);
+}
+
 void
 matfxRenderCB(Atomic *atomic, InstanceDataHeader *header)
 {
-	defaultRenderCB(atomic, header);
+	uint32 flags = atomic->geometry->flags;
+	setWorldMatrix(atomic->getFrame()->getLTM(), atomic);
+	int32 vsBits = lightingCB(atomic);
+
+	setupVertexInput(header);
+
+	InstanceData *inst = header->inst;
+	int32 n = header->numMeshes;
+
+	while(n--){
+		MatFX *matfx = MatFX::get(inst->material);
+		if(matfx && matfx->type == MatFX::ENVMAP)
+			matfxEnvRender(header, inst, vsBits, flags, &matfx->fx[0].env);
+		else
+			matfxDefaultRender(header, inst, vsBits, flags);
+		inst++;
+	}
+	teardownVertexInput(header);
 }
 
 ObjPipeline*
