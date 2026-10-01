@@ -14,12 +14,20 @@
 #include "host_checks.h"
 #include "objc_checks.h"
 #include "msaa_checks.h"
+#ifdef LIBRW_COCOA
+#include <src/metal/metaldrawable.h>
+#include "cocoa_checks.h"
+#endif
 
 using namespace rw;
 
 struct Context
 {
+#ifdef LIBRW_COCOA
+	void *window;
+#else
 	GLFWwindow *window;
+#endif
 	Camera *camera;
 	Frame *frame;
 };
@@ -35,6 +43,24 @@ static const RGBA RED = { 255, 0, 0, 255 };
 static const RGBA GREEN = { 0, 255, 0, 255 };
 static const RGBA BLUE = { 0, 0, 255, 255 };
 static const RGBA GREY = { 128, 128, 128, 255 };
+
+#ifdef LIBRW_COCOA
+static double Seconds(void) { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static void FramebufferSize(int *w, int *h) { CocoaFramebufferSize(ctx.window, w, h); }
+static void WindowSize(int *w, int *h) { CocoaWindowSize(ctx.window, w, h); }
+static void SetWindowSize(int w, int h) { CocoaSetWindowSize(ctx.window, w, h); }
+static float WindowContentScale(void) { return CocoaContentScale(ctx.window); }
+static int WindowShown(void) { return CocoaWindowShown(ctx.window); }
+static void PumpEvents(void) { CocoaPumpEvents(); }
+#else
+static double Seconds(void) { return glfwGetTime(); }
+static void FramebufferSize(int *w, int *h) { glfwGetFramebufferSize(ctx.window, w, h); }
+static void WindowSize(int *w, int *h) { glfwGetWindowSize(ctx.window, w, h); }
+static void SetWindowSize(int w, int h) { glfwSetWindowSize(ctx.window, w, h); }
+static float WindowContentScale(void) { float xs, ys; glfwGetWindowContentScale(ctx.window, &xs, &ys); return xs; }
+static int WindowShown(void) { return glfwGetWindowAttrib(ctx.window, GLFW_VISIBLE); }
+static void PumpEvents(void) {}
+#endif
 
 static void
 Detail(const char *fmt, ...)
@@ -115,6 +141,7 @@ DrawFrameFlags(RGBA col, uint32 flags)
 	ctx.camera->beginUpdate();
 	ctx.camera->endUpdate();
 	ctx.camera->showRaster(flags);
+	PumpEvents();
 }
 
 static void
@@ -146,7 +173,12 @@ static bool
 StartEngine(int w, int h)
 {
 	static EngineOpenParams params;
+#ifdef LIBRW_COCOA
+	params.cocoaWindow = &ctx.window;
+	params.host = &metal::cocoaHost;
+#else
 	params.window = &ctx.window;
+#endif
 	params.width = w;
 	params.height = h;
 	params.windowtitle = "metal_smoke";
@@ -3881,7 +3913,7 @@ CheckRingGuardHeldFrame(void)
 {
 	const int frames = 5;
 	uint32 earlyBefore = metal::getStateStats().ringEarlyReuses;
-	double t0 = glfwGetTime();
+	double t0 = Seconds();
 	for(int f = 0; f < frames; f++){
 		BeginFrame(GREY);
 		DrawQuad(20.0f + f*20.0f, 100.0f, 30.0f + f*20.0f, 110.0f, FrameQuadColour(f, 0));
@@ -3889,7 +3921,7 @@ CheckRingGuardHeldFrame(void)
 			metal::holdFrameForTest(0.25);
 		EndFrame();
 	}
-	double elapsed = glfwGetTime() - t0;
+	double elapsed = Seconds() - t0;
 	bool ok = elapsed >= 0.2;
 	if(!ok)
 		Detail("  %d frames took %.3f s; the held frame did not hold\n", frames, elapsed);
@@ -4394,8 +4426,8 @@ CheckHostSurfaceSize(void)
 	int fw, fh, ww, wh, lw = 0, lh = 0;
 	double ls = 0.0;
 	int32 hw, hh;
-	glfwGetFramebufferSize(ctx.window, &fw, &fh);
-	glfwGetWindowSize(ctx.window, &ww, &wh);
+	FramebufferSize(&fw, &fh);
+	WindowSize(&ww, &wh);
 	host->drawableSize(&hw, &hh);
 	float32 scale = host->backingScale();
 	bool ok = ww == 640 && wh == 480 && hw == fw && hh == fh;
@@ -4410,9 +4442,9 @@ CheckHostSurfaceSize(void)
 static bool
 CheckHostVisible(void)
 {
-	bool ok = Host()->visible() && !glfwGetWindowAttrib(ctx.window, GLFW_VISIBLE);
+	bool ok = Host()->visible() && !WindowShown();
 	if(!ok)
-		Detail("  host visible %d, window visible %d\n", Host()->visible(), glfwGetWindowAttrib(ctx.window, GLFW_VISIBLE));
+		Detail("  host visible %d, window visible %d\n", Host()->visible(), WindowShown());
 	return Report(ok, "a window created hidden counts as visible for rendering");
 }
 
@@ -4422,10 +4454,10 @@ CheckHostSizeChangeOnce(void)
 	metal::MetalHost *host = Host();
 	DrawFrame(GREY);
 	bool before = host->pollSizeChange();
-	glfwSetWindowSize(ctx.window, 700, 500);
+	SetWindowSize(700, 500);
 	bool first = host->pollSizeChange();
 	bool second = host->pollSizeChange();
-	glfwSetWindowSize(ctx.window, 640, 480);
+	SetWindowSize(640, 480);
 	DrawFrame(GREY);
 	bool ok = !before && first && !second;
 	if(!ok)
@@ -4438,7 +4470,7 @@ LayerMatchesWindow(void)
 {
 	int fw, fh, lw = 0, lh = 0;
 	double ls;
-	glfwGetFramebufferSize(ctx.window, &fw, &fh);
+	FramebufferSize(&fw, &fh);
 	bool ok = LayerDrawableSize(&lw, &lh, &ls) && lw == fw && lh == fh;
 	if(!ok)
 		Detail("  layer %dx%d, framebuffer %dx%d\n", lw, lh, fw, fh);
@@ -4449,16 +4481,16 @@ static bool
 CheckLayerFollowsResize(void)
 {
 	int fw, fh;
-	float xs, ys;
-	glfwSetWindowSize(ctx.window, 720, 540);
+	float xs;
+	SetWindowSize(720, 540);
 	DrawFrame(GREY);
-	glfwGetFramebufferSize(ctx.window, &fw, &fh);
-	glfwGetWindowContentScale(ctx.window, &xs, &ys);
+	FramebufferSize(&fw, &fh);
+	xs = WindowContentScale();
 	bool ok = fw == (int)(720*xs + 0.5f);
 	if(!ok)
 		Detail("  framebuffer %dx%d after the resize, scale %g\n", fw, fh, xs);
 	ok &= LayerMatchesWindow();
-	glfwSetWindowSize(ctx.window, 640, 480);
+	SetWindowSize(640, 480);
 	DrawFrame(GREY);
 	ok &= LayerMatchesWindow();
 	ok &= CornersAndCentreAre(GREY);

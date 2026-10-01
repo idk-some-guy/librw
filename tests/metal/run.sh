@@ -1,9 +1,15 @@
 #!/bin/bash
 cd "$(dirname "$0")/../.."
 
-BIN=bin/macosx-arm64-metal/Release
+PLATFORM=macosx-arm64-metal
+PURE="metal_fan_test metal_format_test metal_inst_test metal_keys_test metal_pass_test metal_modes_test metal_drawable_test"
+if [ "$METAL_SMOKE_HOST" = cocoa ]; then
+	PLATFORM=macosx-arm64-metal-cocoa
+	PURE=
+fi
+BIN=bin/$PLATFORM/Release
 status=0
-for t in metal_fan_test metal_format_test metal_inst_test metal_keys_test metal_pass_test metal_modes_test metal_drawable_test; do
+for t in $PURE; do
 	echo "== $t"
 	"$BIN/$t" || status=1
 done
