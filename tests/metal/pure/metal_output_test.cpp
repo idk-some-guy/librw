@@ -43,11 +43,74 @@ TestShoulderAbove(void)
 	CHECK(SDR_SHOULDER_KNEE == 1.0f);
 }
 
+static void
+TestLinear(void)
+{
+	CHECK(srgbToLinear(0.0f) == 0.0f);
+	CHECK(Near(srgbToLinear(1.0f), 1.0f, 1e-6f));
+	CHECK(Near(srgbToLinear(0.5f), 0.214041f, 1e-5f));
+	CHECK(Near(srgbToLinear(128/255.0f), 0.215861f, 1e-5f));
+	CHECK(Near(srgbToLinear(0.04045f), 0.0031308f, 1e-6f));
+	CHECK(Near(srgbToLinear(0.0405f), srgbToLinear(0.04045f), 1e-5f));
+}
+
+static void
+TestPeak(void)
+{
+	CHECK(edrPeak(1000.0f, 4.0f) == 4.0f);
+	CHECK(edrPeak(1000.0f, 16.0f) == 10.0f);
+	CHECK(edrPeak(400.0f, 16.0f) == 4.0f);
+	CHECK(edrPeak(4000.0f, 2.5f) == 2.5f);
+	CHECK(edrPeak(1000.0f, 1.0f) == 1.0f);
+	CHECK(edrPeak(50.0f, 16.0f) == 1.0f);
+	CHECK(edrPeak(1000.0f, NAN) == 1.0f);
+	CHECK(EDR_REFERENCE_WHITE_NITS == 100.0f);
+}
+
+static void
+TestEdrChannel(void)
+{
+	for(int i = 0; i <= 255; i++){
+		float x = i/255.0f;
+		CHECK(edrChannel(x, 4.0f) == srgbToLinear(x));
+	}
+	CHECK(Near(edrChannel(1.0f, 4.0f), 1.0f, 1e-6f));
+	float h = 1e-3f;
+	CHECK(Near((edrChannel(1.0f + h, 4.0f) - 1.0f)/h, EDR_SLOPE, 0.01f));
+	CHECK(Near((1.0f - edrChannel(1.0f - h, 4.0f))/h, EDR_SLOPE, 0.01f));
+	float prev = 1.0f;
+	for(int i = 1; i <= 200; i++){
+		float y = edrChannel(1.0f + i*0.25f, 4.0f);
+		CHECK(y > prev && y < 4.0f);
+		prev = y;
+	}
+	CHECK(edrChannel(1000.0f, 4.0f) > 3.95f);
+	CHECK(Near(edrChannel(8.0f, 4.0f), 1.0f + 3.0f*7.0f*EDR_SLOPE/(3.0f + 7.0f*EDR_SLOPE), 1e-5f));
+	CHECK(edrChannel(5.0f, 1.0f) == 1.0f);
+	CHECK(edrChannel(0.5f, 1.0f) == srgbToLinear(0.5f));
+	CHECK(edrChannel(1.2f, 0.5f) == 1.0f);
+	CHECK(edrChannel(-0.5f, 4.0f) == 0.0f);
+}
+
+static void
+TestWanted(void)
+{
+	CHECK(edrWanted(1, 0, 4.0f));
+	CHECK(edrWanted(2, 0, 1.5f));
+	CHECK(!edrWanted(0, 0, 4.0f));
+	CHECK(!edrWanted(1, 1, 4.0f));
+	CHECK(!edrWanted(1, 0, 1.0f));
+}
+
 int
 main(void)
 {
 	TestShoulderUnity();
 	TestShoulderAbove();
+	TestLinear();
+	TestPeak();
+	TestEdrChannel();
+	TestWanted();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;

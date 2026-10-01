@@ -58,3 +58,22 @@ frameCopyPostFS(FrameVSOut in [[stage_in]],
 {
 	return sdrPixel(frameColour(in.uv, scene, overlay));
 }
+
+fragment float4
+frameCompositeEdrFS(FrameVSOut in [[stage_in]],
+                    texture2d<float> scene [[texture(0)]],
+                    texture2d<float> overlay [[texture(1)]],
+                    constant float4 &out [[buffer(0)]])
+{
+	float3 c = frameColour(in.uv, scene, overlay);
+	return float4(edrChannel(c.r, out.x), edrChannel(c.g, out.x), edrChannel(c.b, out.x), 1.0);
+}
+
+fragment float4
+frameClassicEdrFS(FrameVSOut in [[stage_in]],
+                  texture2d<float> tex [[texture(0)]])
+{
+	constexpr sampler smp(filter::linear, address::clamp_to_edge);
+	float3 c = tex.sample(smp, in.uv).rgb;
+	return float4(srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b), 1.0);
+}

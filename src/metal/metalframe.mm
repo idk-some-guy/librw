@@ -68,6 +68,7 @@ struct FrameState
 	bool32 gradeResult = 0;
 	uint32 gradeBuilds = 0;
 	id<MTLRenderPipelineState> compositeBGRA = nil, copyScene = nil, copyPost = nil;
+	id<MTLRenderPipelineState> compositeEdr = nil, classicEdr = nil;
 	id<MTLTexture> bloomDown[BLOOM_LEVELS], bloomUp[BLOOM_LEVELS];
 	id<MTLComputePipelineState> bloomDownFirst = nil, bloomDownPipe = nil, bloomUpPipe = nil;
 	bool karis = true;
@@ -311,6 +312,8 @@ frameInit(void)
 			frame.compositeBGRA = framePipeline(@"frameCompositeFS", MTLPixelFormatBGRA8Unorm);
 			frame.copyScene = framePipeline(@"frameCopySceneFS", MTLPixelFormatRGBA8Unorm);
 			frame.copyPost = framePipeline(@"frameCopyPostFS", MTLPixelFormatRGBA8Unorm);
+			frame.compositeEdr = framePipeline(@"frameCompositeEdrFS", MTLPixelFormatRGBA16Float);
+			frame.classicEdr = framePipeline(@"frameClassicEdrFS", MTLPixelFormatRGBA16Float);
 		}else
 			fprintf(stderr, "rw::metal: frame shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		frame.grade = buildGrade(defaultHostGrade, &err);

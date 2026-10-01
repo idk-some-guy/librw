@@ -24,5 +24,39 @@ const char *output_metal_src =
 "	return OUTPUT_MIN(x + w*(1.0f - x), 1.0f);\n"
 "}\n"
 
+"#define EDR_REFERENCE_WHITE_NITS 100.0f\n"
+"#define EDR_SLOPE 2.2748815f\n"
+
+"static inline float\n"
+"srgbToLinear(float c)\n"
+"{\n"
+"	return c <= 0.04045f ? c/12.92f : OUTPUT_POW((c + 0.055f)/1.055f, 2.4f);\n"
+"}\n"
+
+"static inline float\n"
+"edrPeak(float nits, float headroom)\n"
+"{\n"
+"	if(!(headroom > 1.0f))\n"
+"		return 1.0f;\n"
+"	return OUTPUT_MAX(1.0f, OUTPUT_MIN(nits/EDR_REFERENCE_WHITE_NITS, headroom));\n"
+"}\n"
+
+"static inline float\n"
+"edrChannel(float x, float peak)\n"
+"{\n"
+"	float base = srgbToLinear(OUTPUT_MIN(OUTPUT_MAX(x, 0.0f), 1.0f));\n"
+"	float e = OUTPUT_MAX(x - 1.0f, 0.0f);\n"
+"	float room = peak - 1.0f;\n"
+"	if(!(room > 0.0f))\n"
+"		return base;\n"
+"	return base + room*e*EDR_SLOPE/(room + e*EDR_SLOPE);\n"
+"}\n"
+
+"static inline bool\n"
+"edrWanted(int tier, int hdrOutput, float potential)\n"
+"{\n"
+"	return tier != 0 && hdrOutput == 0 && potential > 1.0f;\n"
+"}\n"
+
 "#endif\n"
 ;

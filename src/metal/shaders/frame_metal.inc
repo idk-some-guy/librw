@@ -59,4 +59,23 @@ const char *frame_metal_src =
 "{\n"
 "	return sdrPixel(frameColour(in.uv, scene, overlay));\n"
 "}\n"
+
+"fragment float4\n"
+"frameCompositeEdrFS(FrameVSOut in [[stage_in]],\n"
+"                    texture2d<float> scene [[texture(0)]],\n"
+"                    texture2d<float> overlay [[texture(1)]],\n"
+"                    constant float4 &out [[buffer(0)]])\n"
+"{\n"
+"	float3 c = frameColour(in.uv, scene, overlay);\n"
+"	return float4(edrChannel(c.r, out.x), edrChannel(c.g, out.x), edrChannel(c.b, out.x), 1.0);\n"
+"}\n"
+
+"fragment float4\n"
+"frameClassicEdrFS(FrameVSOut in [[stage_in]],\n"
+"                  texture2d<float> tex [[texture(0)]])\n"
+"{\n"
+"	constexpr sampler smp(filter::linear, address::clamp_to_edge);\n"
+"	float3 c = tex.sample(smp, in.uv).rgb;\n"
+"	return float4(srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b), 1.0);\n"
+"}\n"
 ;
