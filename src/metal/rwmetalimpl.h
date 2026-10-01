@@ -98,6 +98,9 @@ void uploadInstanceVertices(InstanceDataHeader *header);
 int32 getMaxFramesInFlight(void);
 void holdFrameForTest(double seconds);
 void setSurfaceHiddenForTest(bool32 hidden);
+#ifdef LIBRW_COCOA
+bool32 cocoaFullscreenSizeForTest(int32 mode, int32 *width, int32 *height);
+#endif
 bool32 passIsOpen(void);
 bool32 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth);
 bool32 compositeCameraPixels(Raster *raster, uint8 *dst);

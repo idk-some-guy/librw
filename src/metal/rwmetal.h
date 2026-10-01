@@ -13,6 +13,9 @@ struct EngineOpenParams
 #ifdef LIBRW_GLFW
 	GLFWwindow **window;
 #endif
+#ifdef LIBRW_COCOA
+	void **cocoaWindow = nil;
+#endif
 	int width, height;
 	const char *windowtitle;
 	bool hidden = false;
@@ -48,6 +51,9 @@ struct MetalHost
 
 #ifdef LIBRW_GLFW
 extern MetalHost glfwHost;
+#endif
+#ifdef LIBRW_COCOA
+extern MetalHost cocoaHost;
 #endif
 
 void registerPlatformPlugins(void);

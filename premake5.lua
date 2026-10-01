@@ -71,7 +71,7 @@ workspace "librw"
 			includedirs { "/usr/include/SDL2" }
 		end
 	filter { "system:macosx" }
-		platforms { "macosx-arm64-metal" }
+		platforms { "macosx-arm64-metal", "macosx-arm64-metal-cocoa" }
 	filter {}
 
 	filter "configurations:Debug"
@@ -126,16 +126,20 @@ export FREESCE_GCC
 			buildoptions { "-nostdlib", "-fno-common" }
 			includedirs { "$(PS2SDK)/ee/include", "$(PS2SDK)/common/include" }
 		end
+	filter { "platforms:*metal or *metal-cocoa" }
+		defines { "RW_METAL" }
+		cppdialect "gnu++14"
+		buildoptions { "-target", "arm64-apple-macos14" }
+		linkoptions { "-target", "arm64-apple-macos14" }
 	filter { "platforms:*metal" }
 		if os.istarget("macosx") and _OPTIONS["gfxlib"] ~= "glfw" then
 			premake.warn("--gfxlib=%s is ignored: the Metal platform always uses GLFW", _OPTIONS["gfxlib"])
 		end
-		defines { "RW_METAL", "LIBRW_GLFW" }
-		cppdialect "gnu++14"
+		defines { "LIBRW_GLFW" }
 		includedirs { path.join(HomebrewPrefix, "include") }
 		libdirs { path.join(HomebrewPrefix, "lib") }
-		buildoptions { "-target", "arm64-apple-macos14" }
-		linkoptions { "-target", "arm64-apple-macos14" }
+	filter { "platforms:*metal-cocoa" }
+		defines { "LIBRW_COCOA" }
 
 	filter { "platforms:*amd64*" }
 		architecture "x86_64"
@@ -199,7 +203,7 @@ project "librw"
         vucode()
         filter { "platforms:ps2" }
                 files { "src/ps2/vu1/*.dsm" }
-	filter { "platforms:not *metal" }
+	filter { "platforms:not *metal", "platforms:not *metal-cocoa" }
 		removefiles { "src/metal/**" }
 	filter { "files:**.mm" }
 		compileas "Objective-C++"
@@ -431,7 +435,11 @@ if os.istarget("macosx") then
 		includedirs { "." }
 		files { "tests/metal/smoke/*.cpp", "tests/metal/smoke/*.h", "tests/metal/smoke/*.mm" }
 		libdirs { Libdir }
-		links { "librw", "glfw", "Metal.framework", "QuartzCore.framework", "Cocoa.framework" }
+		filter { "platforms:*metal" }
+			links { "librw", "glfw", "Metal.framework", "QuartzCore.framework", "Cocoa.framework" }
+		filter { "platforms:*metal-cocoa" }
+			links { "librw", "Metal.framework", "QuartzCore.framework", "AppKit.framework" }
+		filter {}
 		if _OPTIONS["metal-asan"] then
 			targetsuffix "_asan"
 			objdir "build/obj-asan"

@@ -829,9 +829,12 @@ openDevice(EngineOpenParams *openparams)
 	const MetalHostMode *modes;
 	int32 num = 0;
 
-#ifdef LIBRW_GLFW
+#if defined(LIBRW_GLFW)
 	if(host == nil)
 		host = &glfwHost;
+#elif defined(LIBRW_COCOA)
+	if(host == nil)
+		host = &cocoaHost;
 #endif
 	metalGlobals.host = host;
 	if(host == nil){
