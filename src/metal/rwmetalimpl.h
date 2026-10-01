@@ -25,28 +25,17 @@ void im3DRenderPrimitive(PrimitiveType primType);
 void im3DRenderIndexedPrimitive(PrimitiveType primType, void *indices, int32 numIndices);
 void im3DEnd(void);
 
-struct DisplayMode
-{
-	GLFWvidmode mode;
-	int32 depth;
-	uint32 flags;
-};
-
 struct MetalGlobals
 {
-	GLFWwindow **pWindow;
-	GLFWwindow *window;
+	MetalHost *host;
+	int numDisplays;
+	int currentDisplay;
+	int surfaceDisplay;
 
-	GLFWmonitor *monitor;
-	int numMonitors;
-	int currentMonitor;
-
-	DisplayMode *modes;
+	MetalHostMode *modes;
 	int numModes;
 	int currentMode;
 
-	int winWidth, winHeight;
-	const char *winTitle;
 	bool winHidden;
 	uint32 numSamples;
 

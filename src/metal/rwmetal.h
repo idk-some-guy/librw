@@ -1,18 +1,54 @@
 #ifdef RW_METAL
+#ifdef LIBRW_GLFW
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#endif
 
 namespace rw {
 
+namespace metal { struct MetalHost; }
+
 struct EngineOpenParams
 {
+#ifdef LIBRW_GLFW
 	GLFWwindow **window;
+#endif
 	int width, height;
 	const char *windowtitle;
 	bool hidden = false;
+	metal::MetalHost *host = nil;
 };
 
 namespace metal {
+
+struct MetalHostMode
+{
+	int32 width, height;
+	int32 depth;
+	int32 refresh;
+	uint32 flags;
+};
+
+struct MetalHost
+{
+	bool32 (*open)(EngineOpenParams *params);
+	void (*close)(void);
+	int32 (*numDisplays)(void);
+	const char *(*displayName)(int32 display);
+	bool32 (*displayMode)(int32 display, MetalHostMode *mode);
+	const MetalHostMode *(*getModes)(int32 display, int32 *numModes);
+	void *(*createSurface)(int32 display, int32 mode, bool32 windowed, bool32 hidden);
+	void (*destroySurface)(void);
+	void (*drawableSize)(int32 *width, int32 *height);
+	float32 (*backingScale)(void);
+	int32 (*refreshRate)(void);
+	bool32 (*visible)(void);
+	bool32 (*pollSizeChange)(void);
+};
+
+#ifdef LIBRW_GLFW
+extern MetalHost glfwHost;
+#endif
 
 void registerPlatformPlugins(void);
 void setStatsInterval(uint32 seconds);

@@ -6,8 +6,6 @@
 #include "metalkeys.h"
 #include "rwmetalshader.h"
 
-#define GLFW_EXPOSE_NATIVE_COCOA
-#include <GLFW/glfw3native.h>
 #import <Cocoa/Cocoa.h>
 
 #define PLUGIN_ID 0
@@ -802,186 +800,92 @@ beginDraw(void)
 }
 
 static void
-addVideoMode(const GLFWvidmode *mode)
-{
-	int i;
-
-	for(i = 1; i < metalGlobals.numModes; i++){
-		if(metalGlobals.modes[i].mode.width == mode->width &&
-		   metalGlobals.modes[i].mode.height == mode->height &&
-		   metalGlobals.modes[i].mode.redBits == mode->redBits &&
-		   metalGlobals.modes[i].mode.greenBits == mode->greenBits &&
-		   metalGlobals.modes[i].mode.blueBits == mode->blueBits){
-			if(mode->refreshRate > metalGlobals.modes[i].mode.refreshRate)
-				metalGlobals.modes[i].mode.refreshRate = mode->refreshRate;
-			return;
-		}
-	}
-
-	metalGlobals.modes[metalGlobals.numModes].mode = *mode;
-	metalGlobals.modes[metalGlobals.numModes].flags = VIDEOMODEEXCLUSIVE;
-	metalGlobals.numModes++;
-}
-
-static void
-makeVideoModeList(GLFWmonitor *monitor)
-{
-	int i, num;
-	const GLFWvidmode *modes;
-
-	modes = glfwGetVideoModes(monitor, &num);
-	rwFree(metalGlobals.modes);
-	metalGlobals.modes = rwNewT(DisplayMode, num+1, ID_DRIVER | MEMDUR_EVENT);
-
-	metalGlobals.modes[0].mode = *glfwGetVideoMode(monitor);
-	metalGlobals.modes[0].flags = 0;
-	metalGlobals.numModes = 1;
-
-	for(i = 0; i < num; i++)
-		addVideoMode(&modes[i]);
-
-	for(i = 0; i < metalGlobals.numModes; i++){
-		num = metalGlobals.modes[i].mode.redBits +
-			metalGlobals.modes[i].mode.greenBits +
-			metalGlobals.modes[i].mode.blueBits;
-		for(metalGlobals.modes[i].depth = 1; metalGlobals.modes[i].depth < num; metalGlobals.modes[i].depth <<= 1);
-	}
-}
-
-static void
-makeWindowedModeList(int width, int height)
+forgetModes(void)
 {
 	rwFree(metalGlobals.modes);
-	metalGlobals.modes = rwNewT(DisplayMode, 1, ID_DRIVER | MEMDUR_EVENT);
-
-	metalGlobals.modes[0].mode.width = width;
-	metalGlobals.modes[0].mode.height = height;
-	metalGlobals.modes[0].mode.redBits = 8;
-	metalGlobals.modes[0].mode.greenBits = 8;
-	metalGlobals.modes[0].mode.blueBits = 8;
-	metalGlobals.modes[0].mode.refreshRate = GLFW_DONT_CARE;
-	metalGlobals.modes[0].depth = 32;
-	metalGlobals.modes[0].flags = 0;
-	metalGlobals.numModes = 1;
+	metalGlobals.modes = nil;
+	metalGlobals.numModes = 0;
 	metalGlobals.currentMode = 0;
 }
 
 static int
-openGLFW(EngineOpenParams *openparams)
+openDevice(EngineOpenParams *openparams)
 {
-	GLFWmonitor **monitors;
+	MetalHost *host = openparams->host;
+	const MetalHostMode *modes;
+	int32 num = 0;
 
-	metalGlobals.winWidth = openparams->width;
-	metalGlobals.winHeight = openparams->height;
-	metalGlobals.winTitle = openparams->windowtitle;
+#ifdef LIBRW_GLFW
+	if(host == nil)
+		host = &glfwHost;
+#endif
+	if(host == nil){
+		RWERROR((ERR_GENERAL, "no window host"));
+		return 0;
+	}
+	metalGlobals.host = host;
 	metalGlobals.winHidden = openparams->hidden;
-	metalGlobals.pWindow = openparams->window;
 
 	@autoreleasepool {
 		if(metalGlobals.context == nil && !createContext())
 			return 0;
-
-		glfwInitHint(GLFW_COCOA_MENUBAR, metalGlobals.winHidden ? GLFW_FALSE : GLFW_TRUE);
-		if(!glfwInit()){
-			RWERROR((ERR_GENERAL, "glfwInit() failed"));
+		if(!host->open(openparams)){
+			forgetModes();
 			return 0;
 		}
-
-		monitors = glfwGetMonitors(&metalGlobals.numMonitors);
-		if(metalGlobals.numMonitors == 0 && metalGlobals.winHidden){
-			metalGlobals.monitor = nil;
-			metalGlobals.currentMonitor = 0;
-			makeWindowedModeList(metalGlobals.winWidth, metalGlobals.winHeight);
-			return 1;
+		metalGlobals.numDisplays = host->numDisplays();
+		if(metalGlobals.numDisplays == 0)
+			metalGlobals.currentDisplay = 0;
+		metalGlobals.surfaceDisplay = 0;
+		modes = host->getModes(0, &num);
+		if(modes == nil || num <= 0){
+			RWERROR((ERR_GENERAL, "window host lists no video modes"));
+			forgetModes();
+			host->close();
+			return 0;
 		}
-		if(metalGlobals.numMonitors == 0){
-			RWERROR((ERR_GENERAL, "no monitor found"));
-			rwFree(metalGlobals.modes);
-			metalGlobals.modes = nil;
-			metalGlobals.numModes = 0;
+		rwFree(metalGlobals.modes);
+		metalGlobals.modes = rwNewT(MetalHostMode, num, ID_DRIVER | MEMDUR_EVENT);
+		memcpy(metalGlobals.modes, modes, num*sizeof(MetalHostMode));
+		metalGlobals.numModes = num;
+		if(metalGlobals.currentMode >= num)
 			metalGlobals.currentMode = 0;
-			glfwTerminate();
-			return 0;
-		}
-		metalGlobals.monitor = monitors[0];
-
-		makeVideoModeList(metalGlobals.monitor);
 	}
-
 	return 1;
 }
 
 static int
-closeGLFW(void)
+closeDevice(void)
 {
 	@autoreleasepool {
-		glfwTerminate();
+		metalGlobals.host->close();
 	}
 	return 1;
 }
 
-static void
-glfwerr(int error, const char *desc)
-{
-	fprintf(stderr, "GLFW Error: %s\n", desc);
-}
-
 static int
-startGLFW(void)
+startDevice(void)
 {
 	MetalContext *ctx = getContext();
-	GLFWwindow *win;
-	DisplayMode *mode;
-	NSWindow *nswin;
-	NSView *view;
+	MetalHostMode *mode;
 	CAMetalLayer *layer;
-	int w, h;
 
 	if(ctx == nil || metalGlobals.modes == nil)
 		return 0;
 	mode = &metalGlobals.modes[metalGlobals.currentMode];
 
 	@autoreleasepool {
-		glfwSetErrorCallback(glfwerr);
-		glfwWindowHint(GLFW_RED_BITS, mode->mode.redBits);
-		glfwWindowHint(GLFW_GREEN_BITS, mode->mode.greenBits);
-		glfwWindowHint(GLFW_BLUE_BITS, mode->mode.blueBits);
-		glfwWindowHint(GLFW_REFRESH_RATE, mode->mode.refreshRate);
-		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-		glfwWindowHint(GLFW_VISIBLE, metalGlobals.winHidden ? GLFW_FALSE : GLFW_TRUE);
-		glfwWindowHint(GLFW_FOCUSED, metalGlobals.winHidden ? GLFW_FALSE : GLFW_TRUE);
-
-		if((mode->flags & VIDEOMODEEXCLUSIVE) && !metalGlobals.winHidden)
-			win = glfwCreateWindow(mode->mode.width, mode->mode.height, metalGlobals.winTitle, metalGlobals.monitor, nil);
-		else
-			win = glfwCreateWindow(metalGlobals.winWidth, metalGlobals.winHeight, metalGlobals.winTitle, nil, nil);
-		if(win == nil){
-			RWERROR((ERR_GENERAL, "glfwCreateWindow() failed"));
+		layer = (__bridge CAMetalLayer*)metalGlobals.host->createSurface(metalGlobals.surfaceDisplay,
+			metalGlobals.currentMode, !(mode->flags & VIDEOMODEEXCLUSIVE), metalGlobals.winHidden);
+		if(layer == nil)
 			return 0;
-		}
-
-		nswin = glfwGetCocoaWindow(win);
-		view = nswin.contentView;
-
-		layer = [CAMetalLayer layer];
 		layer.device = ctx->device;
 		layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 		layer.framebufferOnly = YES;
 		layer.maximumDrawableCount = 3;
 		layer.displaySyncEnabled = YES;
-		layer.contentsScale = nswin.backingScaleFactor;
-		glfwGetFramebufferSize(win, &w, &h);
-		layer.drawableSize = CGSizeMake(w, h);
-
-		view.layer = layer;
-		view.wantsLayer = YES;
-
-		ctx->window = win;
 		ctx->layer = layer;
 	}
-
-	metalGlobals.window = win;
-	*metalGlobals.pWindow = win;
 	return 1;
 }
 
@@ -1001,7 +905,7 @@ finishGPUWork(void)
 }
 
 static int
-stopGLFW(void)
+stopDevice(void)
 {
 	MetalContext *ctx = getContext();
 
@@ -1012,12 +916,10 @@ stopGLFW(void)
 			ctx->commandBuffer = nil;
 			ctx->lastCommitted = nil;
 			ctx->layer = nil;
-			ctx->window = nil;
 		}
 		currentFrameBuffer = nil;
-		glfwDestroyWindow(metalGlobals.window);
+		metalGlobals.host->destroySurface();
 	}
-	metalGlobals.window = nil;
 	return 1;
 }
 
@@ -1057,45 +959,48 @@ finalizeMetal(void)
 }
 
 static int
-deviceSystemGLFW(DeviceReq req, void *arg, int32 n)
+deviceSystem(DeviceReq req, void *arg, int32 n)
 {
-	GLFWmonitor **monitors;
 	VideoMode *rwmode;
 
 	switch(req){
 	case DEVICEOPEN:
-		return openGLFW((EngineOpenParams*)arg);
+		return openDevice((EngineOpenParams*)arg);
 	case DEVICECLOSE:
-		return closeGLFW();
+		return closeDevice();
 
 	case DEVICEINIT:
-		return startGLFW() && initMetal();
+		return startDevice() && initMetal();
 	case DEVICETERM:
-		return termMetal() && stopGLFW();
+		return termMetal() && stopDevice();
 
 	case DEVICEFINALIZE:
 		return finalizeMetal();
 
 
 	case DEVICEGETNUMSUBSYSTEMS:
-		return metalGlobals.numMonitors;
+		return metalGlobals.numDisplays;
 
 	case DEVICEGETCURRENTSUBSYSTEM:
-		return metalGlobals.currentMonitor;
+		return metalGlobals.currentDisplay;
 
 	case DEVICESETSUBSYSTEM:
-		monitors = glfwGetMonitors(&metalGlobals.numMonitors);
-		if(n >= metalGlobals.numMonitors)
+		if(metalGlobals.host == nil)
 			return 0;
-		metalGlobals.currentMonitor = n;
-		metalGlobals.monitor = monitors[metalGlobals.currentMonitor];
+		metalGlobals.numDisplays = metalGlobals.host->numDisplays();
+		if(n >= metalGlobals.numDisplays)
+			return 0;
+		metalGlobals.currentDisplay = n;
+		metalGlobals.surfaceDisplay = n;
 		return 1;
 
 	case DEVICEGETSUBSSYSTEMINFO:
-		monitors = glfwGetMonitors(&metalGlobals.numMonitors);
-		if(n >= metalGlobals.numMonitors)
+		if(metalGlobals.host == nil)
 			return 0;
-		strncpy(((SubSystemInfo*)arg)->name, glfwGetMonitorName(monitors[n]), sizeof(SubSystemInfo::name));
+		metalGlobals.numDisplays = metalGlobals.host->numDisplays();
+		if(n >= metalGlobals.numDisplays)
+			return 0;
+		strncpy(((SubSystemInfo*)arg)->name, metalGlobals.host->displayName(n), sizeof(SubSystemInfo::name));
 		return 1;
 
 
@@ -1113,8 +1018,8 @@ deviceSystemGLFW(DeviceReq req, void *arg, int32 n)
 
 	case DEVICEGETVIDEOMODEINFO:
 		rwmode = (VideoMode*)arg;
-		rwmode->width = metalGlobals.modes[n].mode.width;
-		rwmode->height = metalGlobals.modes[n].mode.height;
+		rwmode->width = metalGlobals.modes[n].width;
+		rwmode->height = metalGlobals.modes[n].height;
 		rwmode->depth = metalGlobals.modes[n].depth;
 		rwmode->flags = metalGlobals.modes[n].flags;
 		return 1;
@@ -1257,13 +1162,14 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
 static void
 syncLayer(MetalContext *ctx)
 {
-	NSWindow *nswin = glfwGetCocoaWindow(ctx->window);
+	MetalHost *host = metalGlobals.host;
 	CGSize size = ctx->layer.drawableSize;
-	int w, h;
+	float32 scale = host->backingScale();
+	int32 w, h;
 
-	if(nswin && ctx->layer.contentsScale != nswin.backingScaleFactor)
-		ctx->layer.contentsScale = nswin.backingScaleFactor;
-	glfwGetFramebufferSize(ctx->window, &w, &h);
+	if(scale > 0.0f && ctx->layer.contentsScale != scale)
+		ctx->layer.contentsScale = scale;
+	host->drawableSize(&w, &h);
 	if(w > 0 && h > 0 && (size.width != w || size.height != h))
 		ctx->layer.drawableSize = CGSizeMake(w, h);
 }
@@ -1317,11 +1223,11 @@ compositeCameraPixels(Raster *raster, uint8 *dst)
 }
 
 static void
-waitWithoutDrawable(MetalContext *ctx)
+waitWithoutDrawable(void)
 {
-	NSWindow *nswin = ctx->window ? (NSWindow*)glfwGetCocoaWindow(ctx->window) : nil;
-	NSScreen *screen = nswin.screen;
-	NSInteger fps = screen && screen.maximumFramesPerSecond > 0 ? screen.maximumFramesPerSecond : 60;
+	int32 fps = metalGlobals.host ? metalGlobals.host->refreshRate() : 0;
+	if(fps <= 0)
+		fps = 60;
 	[NSThread sleepForTimeInterval:1.0/fps];
 }
 
@@ -1336,8 +1242,9 @@ showRaster(Raster *raster, uint32 flags)
 	@autoreleasepool {
 		passManager.show();
 		runPassActions();
-		if(ctx->layer && ctx->window){
-			syncLayer(ctx);
+		if(ctx->layer){
+			if(metalGlobals.host->pollSizeChange())
+				syncLayer(ctx);
 			ctx->layer.displaySyncEnabled = (flags & Raster::FLIPWAITVSYNCH) != 0;
 			if(ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0){
 				auto start = std::chrono::steady_clock::now();
@@ -1356,7 +1263,7 @@ showRaster(Raster *raster, uint32 flags)
 			logStatsIfDue();
 		finishFrame(ctx, drawable);
 		if(drawable == nil)
-			waitWithoutDrawable(ctx);
+			waitWithoutDrawable();
 		drawable = nil;
 	}
 }
@@ -1378,7 +1285,7 @@ Device renderdevice = {
 	metal::im3DRenderPrimitive,
 	metal::im3DRenderIndexedPrimitive,
 	metal::im3DEnd,
-	metal::deviceSystemGLFW
+	metal::deviceSystem
 };
 
 }

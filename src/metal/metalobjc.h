@@ -31,7 +31,6 @@ struct MetalContext
 	id<MTLDevice> device;
 	id<MTLCommandQueue> queue;
 
-	GLFWwindow *window;
 	CAMetalLayer *layer;
 
 	dispatch_semaphore_t frameSemaphore;
