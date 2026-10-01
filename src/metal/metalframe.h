@@ -6,6 +6,8 @@ namespace metal {
 
 const char *frameStatsTail(void);
 void frameTierChanged(void);
+uint32 activeFormatMask(void);
+void applyPendingSettings(void);
 
 }
 }

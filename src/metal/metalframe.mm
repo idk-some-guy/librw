@@ -1,6 +1,8 @@
 #ifdef RW_METAL
 #include "metalobjc.h"
 #include "metalframe.h"
+#include "metalstate.h"
+#include "metalkeys.h"
 
 namespace rw {
 namespace metal {
@@ -17,6 +19,8 @@ struct FrameState
 	bool32 edr = 0;
 	float32 headroom = 1.0f, potentialHeadroom = 1.0f, peak = 1.0f;
 	float32 bloomWeight = 0.0f;
+	RenderSettings pending;
+	bool havePending = false;
 	char tail[256] = "";
 };
 
@@ -45,21 +49,29 @@ setTierCapsForTest(const TierCaps *caps)
 		frame.testCaps = *caps;
 }
 
-void
-setRenderSettings(const RenderSettings *s)
+static RenderSettings
+clampSettings(const RenderSettings *s)
 {
 	RenderSettings n = *s;
-	int32 reason, active;
 
+	if(n.tier < TIER_CLASSIC || n.tier >= NUMTIERS)
+		n.tier = TIER_CLASSIC;
 	if(n.upscale < UPSCALE_NATIVE || n.upscale >= NUMUPSCALES)
 		n.upscale = UPSCALE_NATIVE;
 	n.dynamicResolution = 0;
 	n.hdrOutput = n.hdrOutput == HDROUTPUT_OFF ? HDROUTPUT_OFF : HDROUTPUT_AUTO;
 	n.emitterPeakNits = clampRange(n.emitterPeakNits, EMITTERPEAK_MIN, EMITTERPEAK_MAX, EMITTERPEAK_DEFAULT);
 	n.softness = clampRange(n.softness, SOFTNESS_MIN, SOFTNESS_MAX, SOFTNESS_DEFAULT);
-	active = resolveTier(n.tier, getSupportedTier(), &reason);
-	if(n.tier < TIER_CLASSIC || n.tier >= NUMTIERS)
-		n.tier = TIER_CLASSIC;
+	return n;
+}
+
+static void
+applySettings(const RenderSettings *s)
+{
+	RenderSettings n = clampSettings(s);
+	int32 reason, active;
+
+	active = resolveTier(s->tier, getSupportedTier(), &reason);
 	if(reason != TIERREASON_NONE && (n.tier != frame.settings.tier || reason != frame.tierReason))
 		fprintf(stderr, "rw::metal: tier %s requested, using %s; %s %s\n", tierName(n.tier), tierName(active),
 			tierName(n.tier), tierReasonText(reason));
@@ -71,10 +83,33 @@ setRenderSettings(const RenderSettings *s)
 		frameTierChanged();
 }
 
+void
+setRenderSettings(const RenderSettings *s)
+{
+	MetalContext *ctx = getContext();
+
+	if(ctx && ctx->frameStarted){
+		frame.pending = *s;
+		frame.havePending = true;
+		return;
+	}
+	frame.havePending = false;
+	applySettings(s);
+}
+
+void
+applyPendingSettings(void)
+{
+	if(!frame.havePending)
+		return;
+	frame.havePending = false;
+	applySettings(&frame.pending);
+}
+
 RenderSettings
 getRenderSettings(void)
 {
-	return frame.settings;
+	return frame.havePending ? clampSettings(&frame.pending) : frame.settings;
 }
 
 FrameInfo
@@ -96,9 +131,19 @@ getFrameInfo(void)
 	return f;
 }
 
+uint32
+activeFormatMask(void)
+{
+	if(frame.activeTier == TIER_CLASSIC)
+		return 1u << COLORFMT_RGBA8;
+	return 1u << COLORFMT_RGBA8 | 1u << COLORFMT_SCENE | 1u << COLORFMT_OVERLAY;
+}
+
 void
 frameTierChanged(void)
 {
+	if(getContext() != nil)
+		prewarmFormats(activeFormatMask());
 }
 
 const char*

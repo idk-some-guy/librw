@@ -104,6 +104,127 @@ CheckTierFallback(void)
 	return Report(ok, name);
 }
 
+static uint64
+Im2DHostKey(uint32 fmt)
+{
+	metal::PipelineDesc d;
+	memset(&d, 0, sizeof(d));
+	d.shader = metal::im2dShader->shaderId;
+	d.variant = metal::VARIANT_ALPHATEST & metal::im2dShader->variantMask;
+	d.vertexLayout = metal::im2dVertexLayout;
+	d.blendEnable = true;
+	d.srcBlend = BLENDINVDESTALPHA;
+	d.destBlend = BLENDSRCALPHASAT;
+	d.writeMask = 15;
+	d.colorFormat = fmt;
+	d.depthFormat = metal::DEPTHFMT_D32S8;
+	d.sampleCount = 1;
+	return metal::pipelineKey(d);
+}
+
+static uint64
+Im2DKey(uint32 fmt)
+{
+	metal::PipelineDesc d;
+	memset(&d, 0, sizeof(d));
+	d.shader = metal::im2dShader->shaderId;
+	d.variant = metal::VARIANT_ALPHATEST & metal::im2dShader->variantMask;
+	d.vertexLayout = metal::im2dVertexLayout;
+	d.blendEnable = true;
+	d.srcBlend = BLENDSRCALPHA;
+	d.destBlend = BLENDINVSRCALPHA;
+	d.writeMask = 15;
+	d.colorFormat = fmt;
+	d.depthFormat = metal::DEPTHFMT_NONE;
+	d.sampleCount = 1;
+	return metal::pipelineKey(d);
+}
+
+static bool
+CheckClassicPrewarm(void)
+{
+	const char *name = "the classic tier prewarms only the camera format";
+	bool rgba8 = metal::pipelineCached(Im2DKey(metal::COLORFMT_RGBA8)) != 0;
+	bool scene = metal::pipelineCached(Im2DKey(metal::COLORFMT_SCENE)) != 0;
+	bool overlay = metal::pipelineCached(Im2DKey(metal::COLORFMT_OVERLAY)) != 0;
+	if(!rgba8 || scene || overlay)
+		Detail("  cached: rgba8 %d scene %d overlay %d\n", rgba8, scene, overlay);
+	return Report(rgba8 && !scene && !overlay, name);
+}
+
+static bool
+CheckHostPrewarmAcrossTiers(void)
+{
+	const char *name = "a host pipeline prewarmed in the classic tier gains the scene and overlay formats at the first switch";
+	metal::TierCaps m1 = { true, false, false };
+	bool32 built = metal::prewarmIm2DShader(metal::im2dShader, 0, 1, BLENDINVDESTALPHA, BLENDSRCALPHASAT, 1);
+	bool rgba8 = metal::pipelineCached(Im2DHostKey(metal::COLORFMT_RGBA8)) != 0;
+	bool sceneBefore = metal::pipelineCached(Im2DHostKey(metal::COLORFMT_SCENE)) != 0;
+	metal::setTierCapsForTest(&m1);
+	SetTier(metal::TIER_ENHANCED);
+	bool scene = metal::pipelineCached(Im2DHostKey(metal::COLORFMT_SCENE)) != 0;
+	bool overlay = metal::pipelineCached(Im2DHostKey(metal::COLORFMT_OVERLAY)) != 0;
+	SetTier(metal::TIER_CLASSIC);
+	metal::setTierCapsForTest(nil);
+	bool ok = built && rgba8 && !sceneBefore && scene && overlay;
+	if(!ok)
+		Detail("  built %d; classic: rgba8 %d scene %d; enhanced: scene %d overlay %d\n", built, rgba8, sceneBefore, scene, overlay);
+	return Report(ok, name);
+}
+
+static bool
+CheckEnhancedPrewarm(void)
+{
+	const char *name = "an enhanced tier has the scene and overlay formats warm; switching tiers builds nothing again";
+	metal::TierCaps m1 = { true, false, false };
+	metal::setTierCapsForTest(&m1);
+	SetTier(metal::TIER_ENHANCED);
+	bool scene = metal::pipelineCached(Im2DKey(metal::COLORFMT_SCENE)) != 0;
+	bool overlay = metal::pipelineCached(Im2DKey(metal::COLORFMT_OVERLAY)) != 0;
+	metal::StateStats before = metal::getStateStats();
+	SetTier(metal::TIER_CLASSIC);
+	SetTier(metal::TIER_ENHANCED);
+	SetTier(metal::TIER_CLASSIC);
+	metal::setTierCapsForTest(nil);
+	metal::StateStats after = metal::getStateStats();
+	bool ok = scene && overlay && after.pipelinesAtInit == before.pipelinesAtInit && after.pipelinesLate == before.pipelinesLate &&
+		after.formatPrewarms == before.formatPrewarms;
+	if(!ok)
+		Detail("  scene %d overlay %d; pipelines at init %u -> %u, late %u -> %u, format prewarms %u -> %u\n", scene, overlay,
+			before.pipelinesAtInit, after.pipelinesAtInit, before.pipelinesLate, after.pipelinesLate,
+			before.formatPrewarms, after.formatPrewarms);
+	return Report(ok, name);
+}
+
+static bool
+CheckTierLatchedMidFrame(void)
+{
+	const char *name = "a tier written mid-frame applies when the frame ends";
+	RGBA col = { 0, 0, 0, 255 };
+	metal::TierCaps m1 = { true, false, false };
+	metal::setTierCapsForTest(&m1);
+	cam->clear(&col, Camera::CLEARIMAGE);
+	cam->beginUpdate();
+	metal::startFrame();
+	SetTier(metal::TIER_ENHANCED);
+	int32 during = metal::getFrameInfo().tier;
+	int32 written = metal::getRenderSettings().tier;
+	cam->endUpdate();
+	cam->beginUpdate();
+	int32 update = metal::getFrameInfo().tier;
+	cam->endUpdate();
+	cam->showRaster(0);
+	int32 after = metal::getFrameInfo().tier;
+	SetTier(metal::TIER_CLASSIC);
+	metal::setTierCapsForTest(nil);
+	bool ok = during == metal::TIER_CLASSIC && written == metal::TIER_ENHANCED && update == metal::TIER_CLASSIC &&
+		after == metal::TIER_ENHANCED && metal::getFrameInfo().tier == metal::TIER_CLASSIC;
+	if(!ok)
+		Detail("  during the frame %d, written %d, at the next update %d, after the frame %d, reset %d\n", during, written,
+			update, after, metal::getFrameInfo().tier);
+	return Report(ok, name);
+}
+
 static bool
 CheckStatsTail(void)
 {
@@ -130,7 +251,11 @@ RunFrameChecks(Camera *camera)
 	failures = 0;
 	cam = camera;
 	CheckSettingsDefaults();
+	CheckClassicPrewarm();
+	CheckHostPrewarmAcrossTiers();
 	CheckTierFallback();
+	CheckEnhancedPrewarm();
+	CheckTierLatchedMidFrame();
 	CheckStatsTail();
 	SetTier(metal::TIER_CLASSIC);
 	return failures;

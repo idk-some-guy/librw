@@ -10,6 +10,7 @@ enum { MAXSKINBONES = 64 };
 
 bool32 initState(void);
 void prewarmPipelines(void);
+void prewarmFormats(uint32 mask);
 void termState(void);
 void startFrame(void);
 void beginFrameState(void);
@@ -88,6 +89,7 @@ struct StateStats
 	uint32 vertexBlockBinds[9];
 	uint32 fragmentBlockBinds[9];
 	uint64 hostPrewarmUs;
+	uint32 formatPrewarms;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);

@@ -4,6 +4,7 @@
 #include "metalpass.h"
 #include "metalstate.h"
 #include "metalkeys.h"
+#include "metalframe.h"
 #include "rwmetalshader.h"
 
 #import <Cocoa/Cocoa.h>
@@ -153,6 +154,7 @@ createContext(void)
 	ctx->device = device;
 	ctx->queue = [device newCommandQueue];
 	ctx->frameSemaphore = dispatch_semaphore_create(MAXFRAMESINFLIGHT);
+	ctx->encoderColorFormat = COLORFMT_RGBA8;
 
 	metalCaps.bcSupported = device.supportsBCTextureCompression;
 	metalCaps.maxAnisotropy = 16.0f;
@@ -223,6 +225,7 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 	}
 	ctx->commandBuffer = nil;
 	ctx->frameStarted = false;
+	applyPendingSettings();
 }
 
 static void
@@ -307,6 +310,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	if(depth)
 		GETMETALRASTEREXT(zb)->msaaCurrent = samples > 1;
 	ctx->encoderSamples = samples;
+	ctx->encoderColorFormat = COLORFMT_RGBA8;
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
 	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
 	if(fb)

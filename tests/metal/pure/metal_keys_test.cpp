@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 #include "metalkeys.h"
 
 using namespace rw::metal;
@@ -503,6 +504,31 @@ TestPrewarmSampleCounts(void)
 	CHECK(prewarmSampleCounts(8, c) == 2 && c[0] == 1 && c[1] == 8);
 }
 
+static void
+TestColorFormatKeys(void)
+{
+	PipelineDesc d;
+	memset(&d, 0, sizeof(d));
+	d.shader = 5;
+	d.variant = 1;
+	d.vertexLayout = 3;
+	d.blendEnable = true;
+	d.srcBlend = 5;
+	d.destBlend = 6;
+	d.writeMask = 15;
+	d.depthFormat = DEPTHFMT_D32S8;
+	d.sampleCount = 4;
+	d.colorFormat = COLORFMT_RGBA8;
+	uint64_t rgba8 = pipelineKey(d);
+	d.colorFormat = COLORFMT_SCENE;
+	uint64_t scene = pipelineKey(d);
+	d.colorFormat = COLORFMT_OVERLAY;
+	uint64_t overlay = pipelineKey(d);
+	CHECK(rgba8 != scene && rgba8 != overlay && scene != overlay);
+	CHECK(COLORFMT_SCENE == 3 && COLORFMT_OVERLAY == 4);
+	CHECK(COLORFMT_OVERLAY < 16);
+}
+
 int
 main(void)
 {
@@ -524,6 +550,7 @@ main(void)
 	TestLateDepthOnlyIm2dKey();
 	TestSupportedSampleCount();
 	TestPrewarmSampleCounts();
+	TestColorFormatKeys();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;
