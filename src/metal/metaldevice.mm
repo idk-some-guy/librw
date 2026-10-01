@@ -575,6 +575,16 @@ readRasterPixels(Raster *raster, uint8 *dst)
 
 		passManager.flush();
 		runPassActions();
+		if(frameReadsComposite(raster)){
+			MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+				width:raster->width height:raster->height mipmapped:NO];
+			desc.usage = MTLTextureUsageRenderTarget;
+			desc.storageMode = MTLStorageModePrivate;
+			id<MTLTexture> composed = [ctx->device newTextureWithDescriptor:desc];
+			if(composed == nil || !frameRenderCopy(raster, composed, 0, 0, raster->width, raster->height))
+				return 0;
+			return copyTexturePixels(ctx, composed, 0, 0, raster->width, raster->height, dst);
+		}
 		return copyTexturePixels(ctx, tex, raster->offsetX, raster->offsetY,
 			raster->width, raster->height, dst);
 	}

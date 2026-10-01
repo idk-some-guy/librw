@@ -250,6 +250,25 @@ CheckOverlayComposite(void)
 }
 
 static bool
+CheckShownReadback(void)
+{
+	const char *name = "a shown enhanced frame reads back from the camera raster as the composite";
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(SKY);
+	metal::endScene(nil);
+	Quad(10, 10, 40, 40, GREEN, DRAW_OPAQUE);
+	Finish();
+	Image *img = cam->frameBuffer->toImage();
+	bool ok = ImageNear(img, 60, 60, 60, 90, 120, 255, 0);
+	ok = ImageNear(img, 20, 20, 0, 255, 0, 255, 0) && ok;
+	if(img)
+		img->destroy();
+	EnhancedOff();
+	return Report(ok, name);
+}
+
+static bool
 CheckSceneCopy(void)
 {
 	const char *name = "a copy of the camera raster reads the scene during a scene and the composite after it";
@@ -932,6 +951,7 @@ RunFrameChecks(Camera *camera)
 	CheckClassicBeginScene();
 	CheckSceneRouting();
 	CheckOverlayComposite();
+	CheckShownReadback();
 	CheckSceneCopy();
 	CheckShowWithoutEnd();
 	Identity("enhanced frames are within 1/255 of classic frames at one sample");

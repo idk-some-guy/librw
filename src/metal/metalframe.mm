@@ -522,6 +522,12 @@ frameCopyRoute(Raster *src)
 	return COPY_RENDER;
 }
 
+bool
+frameReadsComposite(Raster *src)
+{
+	return src && src->parent == frame.mainColor && frame.output && frame.phase == PHASE_SHOWN;
+}
+
 bool32
 frameRenderCopy(Raster *src, id<MTLTexture> dst, int32 dx, int32 dy, int32 w, int32 h)
 {
