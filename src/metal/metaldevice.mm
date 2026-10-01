@@ -162,6 +162,9 @@ createContext(void)
 			metalCaps.maxSamples = n;
 			break;
 		}
+	metalCaps.appleGPU = [device supportsFamily:MTLGPUFamilyApple7];
+	metalCaps.apple9 = [device supportsFamily:MTLGPUFamilyApple9];
+	metalCaps.raytracing = device.supportsRaytracing;
 	if(!createFramePipelines(ctx)){
 		delete ctx;
 		return 0;

@@ -1,4 +1,5 @@
 #ifdef RW_METAL
+#include "metalsettings.h"
 #ifdef LIBRW_GLFW
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -304,6 +305,9 @@ struct MetalCaps
 	bool bcSupported;
 	float maxAnisotropy;
 	uint32 maxSamples;
+	bool appleGPU;
+	bool apple9;
+	bool raytracing;
 };
 extern MetalCaps metalCaps;
 
@@ -317,6 +321,33 @@ uint32 getSizeNativeTexture(Texture *tex);
 extern int32 nativeRasterOffset;
 void registerNativeRaster(void);
 #define GETMETALRASTEREXT(raster) PLUGINOFFSET(MetalRaster, raster, rw::metal::nativeRasterOffset)
+
+struct RenderSettings
+{
+	int32 tier;
+	int32 upscale;
+	bool32 dynamicResolution;
+	int32 hdrOutput;
+	float32 emitterPeakNits;
+	float32 softness;
+};
+
+struct FrameInfo
+{
+	int32 tier;
+	int32 tierReason;
+	int32 internalWidth, internalHeight;
+	int32 outputWidth, outputHeight;
+	int32 upscaler;
+	bool32 edr;
+	float32 headroom, potentialHeadroom, peak;
+	float32 bloom;
+};
+
+void setRenderSettings(const RenderSettings *s);
+RenderSettings getRenderSettings(void);
+int32 getSupportedTier(void);
+FrameInfo getFrameInfo(void);
 
 }
 }

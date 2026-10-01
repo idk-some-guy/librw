@@ -13,7 +13,7 @@
 
 The device owns no window. `EngineOpenParams::host` points to a `MetalHost` table (`rwmetal.h`) of thirteen functions that open the window system, describe the displays and create the surface the backend presents to. When `host` is `nil` the device uses `metal::glfwHost`, which exists only when `LIBRW_GLFW` is defined and writes the `GLFWwindow` it creates through `EngineOpenParams::window`. Without `LIBRW_GLFW`, a nil `host` selects `metal::cocoaHost` when `LIBRW_COCOA` is defined; without either, the device reports "no window host".
 
-A native macOS application, one that runs its own `NSApplication`, menus and input, uses the Cocoa host, and nothing in its build links GLFW. The GLFW host is for applications that already open their window with GLFW, and for the smoke test's default configuration. Both hosts run the same 273 checks; the Cocoa host adds seven of its own.
+A native macOS application, one that runs its own `NSApplication`, menus and input, uses the Cocoa host, and nothing in its build links GLFW. The GLFW host is for applications that already open their window with GLFW, and for the smoke test's default configuration. Both hosts run the same 276 checks; the Cocoa host adds seven of its own.
 
 The library and every host must be built with the same `LIBRW_GLFW` and `LIBRW_COCOA` settings. The `window` and `cocoaWindow` fields of `EngineOpenParams` exist only under them, so the layout of the struct depends on them.
 
@@ -210,6 +210,12 @@ glowStop(void)
 
 `glowParams` (the host's custom block) and `glow_metal_src` (its shader source, defining `glowVS` and `glowFS`) belong to the host. Create the `ObjPipeline` once per process (`metal::ObjPipeline::create()`, with `defaultInstanceCB`, `defaultUninstanceCB` and `glowRenderCB`), call `glowStart` after every `Engine::start`, and `glowStop` before every `Engine::stop`.
 
+## Render tiers
+
+The backend renders in one of three tiers. `classic` is the parity path and changes nothing. `enhanced` and `modern` render the host's scene into a scene target, grade, bloom, upscale and composite it as described under "The frame". In this version `modern` renders the enhanced frame; its own features come later.
+
+`setRenderSettings` takes a `RenderSettings` struct: `tier`, `upscale` (native, 1.5x, 1.7x, 2x, 3x), `dynamicResolution` (stored as off; not implemented), `hdrOutput` (auto or off), `emitterPeakNits` (400 to 4000) and `softness` (0 to 3). The backend clamps out-of-range values. The default is the classic tier. `getSupportedTier` reports what the device can run: enhanced needs GPU family Apple 7, modern also needs Apple 9 and hardware ray tracing. A request above the device's tier falls back, logs `rw::metal: tier <requested> requested, using <tier>; <requested> <reason>` once, and `getFrameInfo().tierReason` tells the host why.
+
 ## Log lines
 
 The backend writes these lines to stderr, each starting with `rw::metal:`. Errors such as a pipeline that fails to build, an oversized custom block or a texture that cannot be created go through librw's error mechanism (`RWERROR`) instead.
@@ -222,10 +228,10 @@ The backend writes these lines to stderr, each starting with `rw::metal:`. Error
 ### Statistics line
 
 ```
-rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms host prewarm %.1f ms samples %u
+rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms host prewarm %.1f ms samples %u tier %s internal %dx%d output %dx%d upscaler %s edr %s headroom %.2f/%.2f peak %.2f bloom %.3f
 ```
 
-The backend prints it at every `Engine::stop`, and every `n` seconds while frames are shown after the host calls `metal::setStatsInterval(n)`. The default interval is 0, which prints only the line at stop. Counters start again from zero at every `Engine::start`.
+The backend prints it at every `Engine::stop`, and every `n` seconds while frames are shown after the host calls `metal::setStatsInterval(n)`. The default interval is 0, which prints only the line at stop. Counters start again from zero at every `Engine::start`. The line ends with the frame: tier, internal and output size, upscaler (none or spatial), EDR state (on or off), the current and potential headroom, the emitter peak and the bloom weight.
 
 | Field | Meaning | Counted over |
 |---|---|---|
@@ -276,8 +282,8 @@ METAL_SMOKE_ASAN=1 bash tests/metal/build.sh && METAL_SMOKE_ASAN=1 bash tests/me
 METAL_SMOKE_HOST=cocoa bash tests/metal/build.sh && METAL_SMOKE_HOST=cocoa bash tests/metal/run.sh
 ```
 
-- `tests/metal/pure/` holds seven tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes). They need no GPU.
-- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU and a display. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. With the GLFW host it prints `PASS` or `FAIL` for each of its 273 checks; with `METAL_SMOKE_HOST=cocoa` it opens the Cocoa host instead, runs the same 273 checks and 7 more for the Cocoa window (280), and skips the pure tests. Both end with `all tests passed`, and both print the same 273 check names for the checks they share. The Cocoa window is never ordered in: nothing appears on screen.
+- `tests/metal/pure/` holds eight tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes, render settings). They need no GPU.
+- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU and a display. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. With the GLFW host it prints `PASS` or `FAIL` for each of its 276 checks; with `METAL_SMOKE_HOST=cocoa` it opens the Cocoa host instead, runs the same 276 checks and 7 more for the Cocoa window (283), and skips the pure tests. Both end with `all tests passed`, and both print the same 276 check names for the checks they share. The Cocoa window is never ordered in: nothing appears on screen.
 - The Cocoa run covers only the hidden window. Showing a window, entering and leaving fullscreen and activating the application need a run with a shown window, and a Retina display needs a run on a display with a backing scale above 1.
 - The ASan build instruments the test code, not the library. `METAL_SMOKE_ASAN=1` combines with either host.
 - A host can add its own checks to the same run: compile `tests/metal/smoke/*.cpp` and `*.mm` except `no_host_checks.cpp`, and define `RunHostChecks(camera)` and `RunRestartHostChecks(restart, camera)` (`host_checks.h`). The driver calls the first after its render-target checks and the second after its restart render-target checks, before the multisampling checks, with the engine running.

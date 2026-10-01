@@ -2,7 +2,7 @@
 cd "$(dirname "$0")/../.."
 
 PLATFORM=macosx-arm64-metal
-PURE="metal_fan_test metal_format_test metal_inst_test metal_keys_test metal_pass_test metal_modes_test metal_drawable_test"
+PURE="metal_fan_test metal_format_test metal_inst_test metal_keys_test metal_pass_test metal_modes_test metal_drawable_test metal_settings_test"
 if [ "$METAL_SMOKE_HOST" = cocoa ]; then
 	PLATFORM=macosx-arm64-metal-cocoa
 	PURE=

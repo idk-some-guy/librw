@@ -8,6 +8,7 @@
 #include "rwmetalshader.h"
 #include "metalstate.h"
 #include "metalkeys.h"
+#include "metalframe.h"
 
 #define PLUGIN_ID 0
 
@@ -2083,7 +2084,7 @@ logStats(void)
 		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f "
 		"custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms "
-		"host prewarm %.1f ms samples %u\n",
+		"host prewarm %.1f ms samples %u%s\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
@@ -2097,7 +2098,7 @@ logStats(void)
 		interval ? (double)(stats.blockUploads[BUFFER_MATERIAL] - statsLog.materialUploads)/interval : 0.0,
 		interval - (f.drawablesAcquired - statsLog.drawablesAcquired),
 		f.drawableWaitMaxUs/1000.0, stats.hostPrewarmUs/1000.0,
-		metalGlobals.numSamples ? metalGlobals.numSamples : 1);
+		metalGlobals.numSamples ? metalGlobals.numSamples : 1, frameStatsTail());
 	resetDrawableWaitMax();
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();
