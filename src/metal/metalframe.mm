@@ -612,6 +612,8 @@ frameShow(void)
 		}
 		endScene(nil);
 	}
+	if(frame.phase == PHASE_CLASSIC)
+		frame.bloomWeight = 0.0f;
 	frame.phase = phaseOnShow(frame.phase);
 }
 

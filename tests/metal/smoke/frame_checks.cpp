@@ -1245,6 +1245,37 @@ CheckStatsTail(void)
 	return Report(ok, name);
 }
 
+static float
+StatsBloom(void)
+{
+	metal::logStats();
+	const char *tail = strstr(metal::getStatsLine(), " bloom ");
+	float bloom = -1.0f;
+	if(tail == nil || sscanf(tail, " bloom %f", &bloom) != 1)
+		return -1.0f;
+	return bloom;
+}
+
+static bool
+CheckStatsBloomClassic(void)
+{
+	const char *name = "the stats line reads bloom 0 again once a classic frame follows a bloomed one";
+	RGBA black = { 0, 0, 0, 255 };
+	EnhancedOn();
+	BloomFrame(black, 300, 220, 340, 260, 1.0f, 0.5f);
+	Finish();
+	float bloomed = StatsBloom();
+	EnhancedOff();
+	metal::beginScene(cam);
+	Begin(black);
+	Finish();
+	float classic = StatsBloom();
+	bool ok = bloomed > 0.0f && classic == 0.0f;
+	if(!ok)
+		Detail("  bloom after the bloomed frame %.3f, after the classic frame %.3f\n", bloomed, classic);
+	return Report(ok, name);
+}
+
 int
 RunFrameChecks(Camera *camera)
 {
@@ -1277,6 +1308,7 @@ RunFrameChecks(Camera *camera)
 	CheckGradeAboveWhite();
 	CheckGradeCompileFailure();
 	CheckBloomWeight();
+	CheckStatsBloomClassic();
 	CheckBloomSpread();
 	CheckBloomFlat();
 	CheckBloomFirefly();
