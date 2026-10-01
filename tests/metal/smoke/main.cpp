@@ -175,7 +175,6 @@ StartEngine(int w, int h)
 	static EngineOpenParams params;
 #ifdef LIBRW_COCOA
 	params.cocoaWindow = &ctx.window;
-	params.host = &metal::cocoaHost;
 #else
 	params.window = &ctx.window;
 #endif
@@ -4601,6 +4600,69 @@ CheckCocoaLayerFollowsOddSize(void)
 	ok &= CornersAndCentreAre(GREY);
 	return Report(ok, "the layer's drawable follows a resize to an odd size at the next frame");
 }
+
+static bool
+CheckCocoaFullscreenLetterbox(void)
+{
+	metal::MetalHost *host = Host();
+	int32 num = 0, w = 0, h = 0;
+	const metal::MetalHostMode *modes = host->getModes(0, &num);
+	int nw = 0, nh = 0, sw = 0, sh = 0;
+	CocoaLayerInfo li = {};
+	bool ok = modes && num >= 2 && CocoaNativeDisplayPixels(&nw, &nh) && CocoaScreenPixels(&sw, &sh);
+	for(int32 i = 1; ok && i < num; i++)
+		if(!metal::cocoaFullscreenSizeForTest(i, &w, &h) || w != modes[i].width || h != modes[i].height){
+			Detail("  mode %d %dx%d renders at %dx%d\n", i, modes[i].width, modes[i].height, w, h);
+			ok = false;
+		}
+	if(ok && (!metal::cocoaFullscreenSizeForTest(num-1, &w, &h) || w != nw || h != nh)){
+		Detail("  the last mode renders at %dx%d, native %dx%d\n", w, h, nw, nh);
+		ok = false;
+	}
+	if(ok && (metal::cocoaFullscreenSizeForTest(num, &w, &h) || metal::cocoaFullscreenSizeForTest(-1, &w, &h))){
+		Detail("  a mode index outside the list was accepted\n");
+		ok = false;
+	}
+	if(ok){
+		metal::cocoaFullscreenSizeForTest(1, &w, &h);
+		metal::HostRect fit = metal::hostFitRect(w, h, sw, sh);
+		ok = fit.width > 0 && fit.height > 0 && (fit.width == sw || fit.height == sh) &&
+		     2*fit.x + fit.width >= sw - 1 && 2*fit.x + fit.width <= sw &&
+		     2*fit.y + fit.height >= sh - 1 && 2*fit.y + fit.height <= sh;
+		if(!ok)
+			Detail("  %dx%d on a %dx%d screen fits at %d,%d %dx%d\n", w, h, sw, sh, fit.x, fit.y, fit.width, fit.height);
+	}
+	ok = ok && CocoaLayerInfoOf(ctx.window, &li) && li.gravityAspect && li.backgroundBlack;
+	if(!ok)
+		Detail("  layer gravity aspect %d, black background %d\n", li.gravityAspect, li.backgroundBlack);
+	return Report(ok, "a fullscreen mode renders at its own size up to native, and the layer letterboxes it on the screen");
+}
+
+static bool
+CheckCocoaWindowClosed(void)
+{
+	metal::MetalHost *host = &metal::cocoaHost;
+	CocoaWindowInfo info = {};
+	int onScreen = 0;
+	bool before = CocoaWindowInfoOf(ctx.window, &info) && CocoaServerWindow(info.number, &onScreen);
+	WatchObject(ctx.window);
+	StopEngine();
+	bool listed = true;
+	for(double t0 = Seconds(); listed && Seconds() - t0 < 1.0; ){
+		PumpEvents();
+		listed = CocoaServerWindow(info.number, &onScreen);
+	}
+	int32 w = -1, h = -1;
+	host->drawableSize(&w, &h);
+	bool alive = WatchedObjectAlive();
+	bool ok = before && ctx.window == nil && !alive && !listed && w == 0 && h == 0 &&
+	          host->backingScale() == 0.0f && !host->visible() && !host->pollSizeChange() && host->refreshRate() == 0;
+	WatchObject(nil);
+	if(!ok)
+		Detail("  window pointer %p, alive %d, server window %ld listed %d, drawable %dx%d, scale %.2f, visible %d\n",
+		       ctx.window, alive, info.number, listed, w, h, host->backingScale(), host->visible());
+	return Report(ok, "stopping the engine closes the Cocoa window and the host reports no surface");
+}
 #endif
 
 static bool
@@ -4687,6 +4749,7 @@ CheckHostTable(void)
 	CheckCocoaWindowOffScreen();
 	CheckCocoaSizeChangeReported();
 	CheckCocoaLayerFollowsOddSize();
+	CheckCocoaFullscreenLetterbox();
 #endif
 }
 
@@ -4816,7 +4879,11 @@ main(void)
 		failures += RunRestartTargetChecks(RestartEngine, CurrentCamera);
 		failures += RunRestartHostChecks(RestartEngine, CurrentCamera);
 		failures += RunMsaaChecks(RestartEngineSamples, CurrentCamera);
+#ifdef LIBRW_COCOA
+		CheckCocoaWindowClosed();
+#else
 		StopEngine();
+#endif
 	}
 
 	if(failures){

@@ -250,8 +250,13 @@ displayMode(int32 display, MetalHostMode *mode)
 static const MetalHostMode*
 getModes(int32 display, int32 *numModes)
 {
-	if(display != cocoaGlobals.modeDisplay && makeModeList(display))
+	if(display != cocoaGlobals.modeDisplay){
+		if(!makeModeList(display)){
+			*numModes = 0;
+			return nil;
+		}
 		cocoaGlobals.modeDisplay = display;
+	}
 	*numModes = cocoaGlobals.numModes;
 	return cocoaGlobals.modes;
 }
@@ -300,12 +305,21 @@ observe(NSWindow *win)
 {
 	NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
 	NSArray<NSNotificationName> *names = @[ NSWindowDidResizeNotification,
-		NSWindowDidChangeBackingPropertiesNotification, NSWindowDidChangeScreenNotification,
-		NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification ];
+		NSWindowDidChangeBackingPropertiesNotification, NSWindowDidChangeScreenNotification ];
 	hostObservers = [NSMutableArray array];
 	for(NSNotificationName name in names)
 		[hostObservers addObject:[center addObserverForName:name object:win queue:nil
 			usingBlock:^(NSNotification *note){ hostSizeDirty = true; }]];
+	[hostObservers addObject:[center addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil
+		usingBlock:^(NSNotification *note){
+			cocoaGlobals.fullscreen = cocoaGlobals.renderWidth > 0;
+			hostSizeDirty = true;
+		}]];
+	[hostObservers addObject:[center addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil
+		usingBlock:^(NSNotification *note){
+			cocoaGlobals.fullscreen = false;
+			hostSizeDirty = true;
+		}]];
 }
 
 static void*
@@ -336,6 +350,7 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 	RWMetalHostView *view = [[RWMetalHostView alloc] initWithFrame:content];
 	view.wantsLayer = YES;
 	view.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
+	view.layerContentsPlacement = NSViewLayerContentsPlacementScaleProportionallyToFit;
 	win.contentView = view;
 	CAMetalLayer *layer = (CAMetalLayer*)view.layer;
 	if(![layer isKindOfClass:[CAMetalLayer class]]){
@@ -351,12 +366,18 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 	hostView = view;
 	cocoaGlobals.createdHidden = hidden;
 	cocoaGlobals.fullscreen = fullscreen;
+	cocoaGlobals.renderWidth = 0;
+	cocoaGlobals.renderHeight = 0;
 	if(fullscreen)
 		fullscreenSize(mode, &cocoaGlobals.renderWidth, &cocoaGlobals.renderHeight);
 	int32 w, h;
 	drawableSize(&w, &h);
 	layer.drawableSize = CGSizeMake(w, h);
 	observe(win);
+	hostSizeDirty = false;
+	cocoaGlobals.lastWidth = w;
+	cocoaGlobals.lastHeight = h;
+	cocoaGlobals.lastScale = backingScale();
 
 	if(!hidden){
 		[win center];
@@ -371,10 +392,6 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 			[win toggleFullScreen:nil];
 	}
 
-	hostSizeDirty = false;
-	cocoaGlobals.lastWidth = w;
-	cocoaGlobals.lastHeight = h;
-	cocoaGlobals.lastScale = backingScale();
 	if(cocoaGlobals.pWindow)
 		*cocoaGlobals.pWindow = (__bridge void*)win;
 	return (__bridge void*)layer;

@@ -1007,7 +1007,9 @@ deviceSystem(DeviceReq req, void *arg, int32 n)
 	case DEVICESETSUBSYSTEM:
 		if(metalGlobals.host == nil)
 			return 0;
-		metalGlobals.numDisplays = metalGlobals.host->numDisplays();
+		@autoreleasepool {
+			metalGlobals.numDisplays = metalGlobals.host->numDisplays();
+		}
 		if(n >= metalGlobals.numDisplays)
 			return 0;
 		metalGlobals.currentDisplay = n;
@@ -1017,10 +1019,12 @@ deviceSystem(DeviceReq req, void *arg, int32 n)
 	case DEVICEGETSUBSSYSTEMINFO:
 		if(metalGlobals.host == nil)
 			return 0;
-		metalGlobals.numDisplays = metalGlobals.host->numDisplays();
-		if(n >= metalGlobals.numDisplays)
-			return 0;
-		strncpy(((SubSystemInfo*)arg)->name, metalGlobals.host->displayName(n), sizeof(SubSystemInfo::name));
+		@autoreleasepool {
+			metalGlobals.numDisplays = metalGlobals.host->numDisplays();
+			if(n >= metalGlobals.numDisplays)
+				return 0;
+			strncpy(((SubSystemInfo*)arg)->name, metalGlobals.host->displayName(n), sizeof(SubSystemInfo::name));
+		}
 		return 1;
 
 
