@@ -364,6 +364,7 @@ void endScene(const GradeParams *params);
 bool32 enhancedFrame(void);
 void setEmissiveScale(float32 s);
 float32 getEmissiveScale(void);
+bool32 setGradeShader(const char *src);
 
 }
 }

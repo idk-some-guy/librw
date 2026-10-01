@@ -4,6 +4,7 @@
 #include "metalstate.h"
 #include "metalkeys.h"
 #include "rwmetalshader.h"
+#include <string>
 
 namespace rw {
 namespace metal {
@@ -60,6 +61,9 @@ struct FrameState
 
 	id<MTLLibrary> library = nil;
 	id<MTLComputePipelineState> grade = nil;
+	std::string gradeSource;
+	bool32 gradeResult = 0;
+	uint32 gradeBuilds = 0;
 	id<MTLRenderPipelineState> compositeBGRA = nil, copyScene = nil, copyPost = nil;
 	char tail[256] = "";
 };
@@ -225,6 +229,7 @@ buildGrade(const char *host, NSString **error)
 {
 	const char *parts[] = { frameHead, host, grade_metal_src, nil };
 	NSError *err = nil;
+	frame.gradeBuilds++;
 	id<MTLLibrary> lib = frameLibrary(parts, error);
 	if(lib == nil)
 		return nil;
@@ -238,6 +243,38 @@ buildGrade(const char *host, NSString **error)
 	if(p == nil && error)
 		*error = err.localizedDescription;
 	return p;
+}
+
+uint32
+gradeBuildsForTest(void)
+{
+	return frame.gradeBuilds;
+}
+
+bool32
+setGradeShader(const char *src)
+{
+	NSString *err = nil;
+
+	if(getContext() == nil)
+		return 0;
+	if(src == nil)
+		src = defaultHostGrade;
+	if(frame.gradeSource == src)
+		return frame.gradeResult;
+	frame.gradeSource = src;
+	@autoreleasepool {
+		id<MTLComputePipelineState> p = buildGrade(src, &err);
+		if(p == nil){
+			fprintf(stderr, "rw::metal: grade shader failed to compile, keeping the previous one: %s\n",
+				err ? err.UTF8String : "no gradeKernel");
+			frame.gradeResult = 0;
+			return 0;
+		}
+		frame.grade = p;
+	}
+	frame.gradeResult = 1;
+	return 1;
 }
 
 static id<MTLRenderPipelineState>
@@ -271,6 +308,8 @@ frameInit(void)
 		}else
 			fprintf(stderr, "rw::metal: frame shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		frame.grade = buildGrade(defaultHostGrade, &err);
+		frame.gradeSource = defaultHostGrade;
+		frame.gradeResult = frame.grade != nil;
 		if(frame.grade == nil)
 			fprintf(stderr, "rw::metal: grade kernel failed to build: %s\n", err ? err.UTF8String : "");
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
@@ -342,15 +381,11 @@ ensureSceneTargets(Raster *main, Raster *depth)
 static void
 encodeGrade(const GradeParams *p)
 {
-	static const float32 zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	GradeFrame g = { 0.0f, p && p->grade ? 1u : 0u, 0.0f, 0.0f };
-	const void *constants = zero;
-	uint32 size = sizeof(zero);
+	float32 constants[MAXGRADECONSTANTS*4] = {};
 
-	if(p && p->constants && p->numConstants > 0){
-		constants = p->constants;
-		size = (p->numConstants > MAXGRADECONSTANTS ? MAXGRADECONSTANTS : p->numConstants)*4*sizeof(float32);
-	}
+	if(p && p->constants && p->numConstants > 0)
+		memcpy(constants, p->constants, (p->numConstants > MAXGRADECONSTANTS ? MAXGRADECONSTANTS : p->numConstants)*4*sizeof(float32));
 	frame.bloomWeight = 0.0f;
 	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
 	[enc setComputePipelineState:frame.grade];
@@ -358,7 +393,7 @@ encodeGrade(const GradeParams *p)
 	[enc setTexture:frame.black atIndex:2];
 	[enc setTexture:frame.output atIndex:3];
 	[enc setBytes:&g length:sizeof(g) atIndex:0];
-	[enc setBytes:constants length:size atIndex:1];
+	[enc setBytes:constants length:sizeof(constants) atIndex:1];
 	[enc dispatchThreads:MTLSizeMake(frame.outputWidth, frame.outputHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
 }

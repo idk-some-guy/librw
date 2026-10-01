@@ -663,6 +663,141 @@ CheckShoulder(void)
 	return Report(ok, name);
 }
 
+static const char *testGrade =
+"static float4\n"
+"hostGrade(float4 c, constant float4 *params)\n"
+"{\n"
+"	return float4(c.rgb*params[0].rgb, 1.0);\n"
+"}\n";
+
+static bool
+CheckHostGrade(void)
+{
+	const char *name = "a host grade function runs in the grade pass with its constants";
+	float32 k[4] = { 0.5f, 1.0f, 2.0f, 0.0f };
+	metal::GradeParams on = { 1, k, 1, 0.0f };
+	metal::GradeParams off = { 0, k, 1, 0.0f };
+	RGBA grey = { 100, 100, 100, 255 };
+	bool compiled = metal::setGradeShader(testGrade) != 0;
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::endScene(&on);
+	Finish();
+	uint8 *graded = Composite();
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::endScene(&off);
+	Finish();
+	uint8 *plain = Composite();
+	EnhancedOff();
+	bool restored = metal::setGradeShader(nil) != 0;
+	bool ok = compiled && restored && CompositeNear(graded, 100, 100, 50, 100, 200, 0) && CompositeNear(plain, 100, 100, 100, 100, 100, 0);
+	if(!restored)
+		Detail("  setGradeShader(nil) failed\n");
+	delete[] graded;
+	delete[] plain;
+	return Report(ok, name);
+}
+
+static bool
+CheckGradeAboveWhite(void)
+{
+	const char *name = "values above white pass the grade scaled by the grade's gain";
+	float32 k[4] = { 0.5f, 1.0f, 2.0f, 0.0f };
+	metal::GradeParams on = { 1, k, 1, 0.0f };
+	RGBA black = { 0, 0, 0, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	metal::setGradeShader(testGrade);
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(black);
+	metal::setEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, white, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(&on);
+	float o[4];
+	bool read = metal::readFrameOutput(30, 30, o);
+	Finish();
+	EnhancedOff();
+	metal::setGradeShader(nil);
+	bool ok = read && NearF(o[0], 1.5f, 0.01f) && NearF(o[1], 3.0f, 0.01f) && NearF(o[2], 5.0f, 0.02f);
+	if(read && !ok)
+		Detail("  output %.3f,%.3f,%.3f, expected 1.5,3,5\n", o[0], o[1], o[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckGradeCompileFailure(void)
+{
+	const char *name = "a grade function that fails to compile keeps the grade it had";
+	float32 k[4] = { 0.5f, 1.0f, 2.0f, 0.0f };
+	metal::GradeParams on = { 1, k, 1, 0.0f };
+	RGBA grey = { 100, 100, 100, 255 };
+	bool first = metal::setGradeShader(testGrade) != 0;
+	bool bad = metal::setGradeShader("static float4 hostGrade(") != 0;
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::endScene(&on);
+	Finish();
+	uint8 *px = Composite();
+	EnhancedOff();
+	metal::setGradeShader(nil);
+	bool ok = first && !bad && CompositeNear(px, 100, 100, 50, 100, 200, 0);
+	delete[] px;
+	return Report(ok, name);
+}
+
+static bool
+CheckGradeSourceCached(void)
+{
+	const char *name = "setting the grade source it already has compiles nothing";
+	const char *bad = "static float4 hostGrade(float4";
+	char *copy = strdup(testGrade);
+	uint32 start = metal::gradeBuildsForTest();
+	bool first = metal::setGradeShader(testGrade) != 0;
+	bool again = metal::setGradeShader(testGrade) != 0;
+	bool same = metal::setGradeShader(copy) != 0;
+	bool failed = metal::setGradeShader(bad) == 0;
+	bool failedAgain = metal::setGradeShader(bad) == 0;
+	bool restored = metal::setGradeShader(nil) != 0;
+	uint32 builds = metal::gradeBuildsForTest() - start;
+	free(copy);
+	bool ok = first && again && same && failed && failedAgain && restored && builds == 3;
+	if(!ok)
+		Detail("  %u grade builds, expected 3; results %d %d %d %d %d %d\n", builds, first, again, same, failed,
+			failedAgain, restored);
+	return Report(ok, name);
+}
+
+static bool
+CheckGradeConstantsPadded(void)
+{
+	const char *name = "grade constants past numConstants read as zero";
+	const char *src =
+		"static float4\n"
+		"hostGrade(float4 c, constant float4 *params)\n"
+		"{\n"
+		"	return float4(c.rgb*params[0].rgb + params[1].rgb, 1.0);\n"
+		"}\n";
+	float32 k[metal::MAXGRADECONSTANTS*4] = { 0.5f, 1.0f, 2.0f, 0.0f, 0.25f, 0.25f, 0.25f, 0.0f };
+	metal::GradeParams on = { 1, k, 1, 0.0f };
+	RGBA grey = { 100, 100, 100, 255 };
+	bool compiled = metal::setGradeShader(src) != 0;
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::endScene(&on);
+	Finish();
+	uint8 *px = Composite();
+	EnhancedOff();
+	bool restored = metal::setGradeShader(nil) != 0;
+	bool ok = compiled && restored && CompositeNear(px, 100, 100, 50, 100, 200, 0);
+	delete[] px;
+	return Report(ok, name);
+}
+
 static bool
 CheckEmissiveReset(void)
 {
@@ -963,6 +1098,11 @@ RunFrameChecks(Camera *camera)
 	CheckEmission();
 	CheckEmissionClassic();
 	CheckShoulder();
+	CheckHostGrade();
+	CheckGradeAboveWhite();
+	CheckGradeCompileFailure();
+	CheckGradeSourceCached();
+	CheckGradeConstantsPadded();
 	CheckEmissiveReset();
 	SetTier(metal::TIER_CLASSIC);
 	return failures;
