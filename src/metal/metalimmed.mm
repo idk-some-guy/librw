@@ -4,6 +4,7 @@
 #include "metalstate.h"
 #include "metalkeys.h"
 #include "metalfan.h"
+#include "metalframe.h"
 
 #define PLUGIN_ID 0
 
@@ -116,19 +117,29 @@ im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint
 	RingSpace space;
 	float32 xform[4];
 	uint32 size;
+	bool emit, ok;
 
 	if(cam == nil || cam->frameBuffer == nil)
 		return 0;
 	shader->use();
 	if(!beginDraw())
 		return 0;
+	emit = shader == im2dShader && im2dEmitShader && frameEmissiveScale() > 1.0f &&
+		getContext()->encoderColorFormat == COLORFMT_SCENE;
+	if(emit)
+		im2dEmitShader->use();
 	setVertexLayout(layout);
 	xform[0] = 2.0f/cam->frameBuffer->width;
 	xform[1] = -2.0f/cam->frameBuffer->height;
 	xform[2] = -1.0f;
 	xform[3] = 1.0f;
 	setIm2DXform(xform);
-	if(!flushCache())
+	if(emit)
+		setDrawEmissiveScale(frameEmissiveScale());
+	ok = flushCache();
+	if(emit)
+		setDrawEmissiveScale(1.0f);
+	if(!ok)
 		return 0;
 
 	size = numVertices*stride;

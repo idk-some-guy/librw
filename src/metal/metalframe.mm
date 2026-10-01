@@ -10,6 +10,7 @@ namespace metal {
 
 #include "shaders/frame_metal.inc"
 #include "shaders/grade_metal.inc"
+#include "shaders/output_metal.inc"
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -55,6 +56,7 @@ struct FrameState
 	bool32 edr = 0;
 	float32 headroom = 1.0f, potentialHeadroom = 1.0f, peak = 1.0f;
 	float32 bloomWeight = 0.0f;
+	float32 emissiveScale = 1.0f;
 
 	id<MTLLibrary> library = nil;
 	id<MTLComputePipelineState> grade = nil;
@@ -257,7 +259,7 @@ bool32
 frameInit(void)
 {
 	NSString *err = nil;
-	const char *parts[] = { frameHead, frame_metal_src, nil };
+	const char *parts[] = { frameHead, output_metal_src, frame_metal_src, nil };
 	uint16 zero[4] = { 0, 0, 0, 0 };
 
 	@autoreleasepool {
@@ -364,6 +366,7 @@ encodeGrade(const GradeParams *p)
 void
 beginScene(Camera *cam)
 {
+	frame.emissiveScale = 1.0f;
 	if(getContext() == nil || cam == nil || cam->frameBuffer == nil)
 		return;
 	@autoreleasepool {
@@ -400,6 +403,24 @@ bool32
 enhancedFrame(void)
 {
 	return frame.phase == PHASE_SCENE || frame.phase == PHASE_POST;
+}
+
+void
+setEmissiveScale(float32 s)
+{
+	frame.emissiveScale = clampRange(s, 1.0f, 64.0f, 1.0f);
+}
+
+float32
+getEmissiveScale(void)
+{
+	return frame.emissiveScale;
+}
+
+float32
+frameEmissiveScale(void)
+{
+	return frame.emissiveScale;
 }
 
 static FrameRoute

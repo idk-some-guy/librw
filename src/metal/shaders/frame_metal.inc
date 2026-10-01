@@ -29,12 +29,19 @@ const char *frame_metal_src =
 "	return s*(1.0 - o.a) + o.rgb;\n"
 "}\n"
 
+"static float4\n"
+"sdrPixel(float3 c)\n"
+"{\n"
+"	float m = max(c.r, max(c.g, c.b));\n"
+"	return float4(sdrShoulder(c.r, m), sdrShoulder(c.g, m), sdrShoulder(c.b, m), 1.0);\n"
+"}\n"
+
 "fragment float4\n"
 "frameCompositeFS(FrameVSOut in [[stage_in]],\n"
 "                 texture2d<float> scene [[texture(0)]],\n"
 "                 texture2d<float> overlay [[texture(1)]])\n"
 "{\n"
-"	return float4(frameColour(in.uv, scene, overlay), 1.0);\n"
+"	return sdrPixel(frameColour(in.uv, scene, overlay));\n"
 "}\n"
 
 "fragment float4\n"
@@ -50,6 +57,6 @@ const char *frame_metal_src =
 "                texture2d<float> scene [[texture(0)]],\n"
 "                texture2d<float> overlay [[texture(1)]])\n"
 "{\n"
-"	return float4(saturate(frameColour(in.uv, scene, overlay)), 1.0);\n"
+"	return sdrPixel(frameColour(in.uv, scene, overlay));\n"
 "}\n"
 ;

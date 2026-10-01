@@ -24,6 +24,7 @@ const char *frameStatsTail(void);
 void frameTierChanged(void);
 uint32 activeFormatMask(void);
 void applyPendingSettings(void);
+float32 frameEmissiveScale(void);
 
 PassTarget frameRoute(const PassTarget &t);
 void frameNoteUpdate(const PassTarget &t);

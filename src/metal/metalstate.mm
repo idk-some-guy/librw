@@ -37,6 +37,7 @@ static_assert(VARIANT_DIRECTIONALS == LIGHTBIT_DIRECT << 1 && VARIANT_POINTLIGHT
 #include "shaders/im2d_metal.inc"
 #include "shaders/simple_metal.inc"
 #include "shaders/default_metal.inc"
+#include "shaders/emit_metal.inc"
 
 static int32   alphaFunc;
 static float32 alphaRef;
@@ -198,6 +199,7 @@ static RwStateCache rwStateCache;
 static int32 numStagesUsed = 1;
 
 Shader *im2dShader;
+Shader *im2dEmitShader;
 Shader *defaultShader, *defaultShader_noAT;
 Shader *defaultShader_fullLight, *defaultShader_fullLight_noAT;
 uint32 im2dVertexLayout;
@@ -1855,6 +1857,11 @@ prewarmEngineLayouts(uint32 samples, uint32 fmt)
 		for(i = 0; i < (int32)nelem(im2dBlends); i++)
 			prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
 				depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE, samples, fmt);
+	if(fmt == COLORFMT_SCENE && im2dEmitShader)
+		for(depth = 0; depth < 2; depth++)
+			for(i = 0; i < (int32)nelem(im2dBlends); i++)
+				prewarm(im2dEmitShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
+					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE, samples, fmt);
 	for(i = 0; i < (int32)nelem(im2dTargetBlends); i++)
 		prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dTargetBlends[i], DEPTHFMT_D32S8, samples, fmt);
 	for(i = 0; i < (int32)nelem(worldLayouts); i++){
@@ -2046,6 +2053,16 @@ prewarmShader(Shader *shader, const AttribDesc *attribs, int32 numAttribs, uint3
 	return hostPrewarm(shader, layout, variant, blend, srcBlend, destBlend, depth);
 }
 
+void
+openIm2DEmit(void)
+{
+	const char *src[] = { header_metal_src, im2d_metal_src, emit_metal_src, nil };
+
+	@autoreleasepool {
+		im2dEmitShader = Shader::create(src, "im2dVS", "emitFS", VARIANT_ALPHATEST);
+	}
+}
+
 bool32
 initState(void)
 {
@@ -2083,6 +2100,10 @@ termState(void)
 	if(im2dShader){
 		im2dShader->destroy();
 		im2dShader = nil;
+	}
+	if(im2dEmitShader){
+		im2dEmitShader->destroy();
+		im2dEmitShader = nil;
 	}
 	if(defaultShader)
 		defaultShader->destroy();

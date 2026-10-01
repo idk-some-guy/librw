@@ -28,12 +28,19 @@ frameColour(float2 uv, texture2d<float> scene, texture2d<float> overlay)
 	return s*(1.0 - o.a) + o.rgb;
 }
 
+static float4
+sdrPixel(float3 c)
+{
+	float m = max(c.r, max(c.g, c.b));
+	return float4(sdrShoulder(c.r, m), sdrShoulder(c.g, m), sdrShoulder(c.b, m), 1.0);
+}
+
 fragment float4
 frameCompositeFS(FrameVSOut in [[stage_in]],
                  texture2d<float> scene [[texture(0)]],
                  texture2d<float> overlay [[texture(1)]])
 {
-	return float4(frameColour(in.uv, scene, overlay), 1.0);
+	return sdrPixel(frameColour(in.uv, scene, overlay));
 }
 
 fragment float4
@@ -49,5 +56,5 @@ frameCopyPostFS(FrameVSOut in [[stage_in]],
                 texture2d<float> scene [[texture(0)]],
                 texture2d<float> overlay [[texture(1)]])
 {
-	return float4(saturate(frameColour(in.uv, scene, overlay)), 1.0);
+	return sdrPixel(frameColour(in.uv, scene, overlay));
 }

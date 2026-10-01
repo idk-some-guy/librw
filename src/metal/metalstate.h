@@ -10,6 +10,7 @@ enum { MAXSKINBONES = 64 };
 
 bool32 initState(void);
 void prewarmPipelines(void);
+void openIm2DEmit(void);
 void prewarmFormats(uint32 mask);
 void termState(void);
 void startFrame(void);
@@ -59,6 +60,7 @@ void logStats(void);
 void logStatsIfDue(void);
 
 extern Shader *im2dShader;
+extern Shader *im2dEmitShader;
 extern Shader *skinShader;
 extern Shader *matfxEnvShader;
 extern Shader *im3dShader;

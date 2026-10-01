@@ -18,6 +18,7 @@ using namespace metal;
 #define BUFFER_CUSTOM	6
 #define BUFFER_LIGHTS	7
 #define BUFFER_MATFX	8
+#define BUFFER_EMISSIVE	9
 
 constant bool alphaTest [[function_constant(0)]];
 constant bool directionals [[function_constant(1)]];

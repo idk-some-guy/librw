@@ -1020,6 +1020,7 @@ initMetal(void)
 		return 0;
 	if(!openMatFX())
 		return 0;
+	openIm2DEmit();
 	prewarmPipelines();
 	openIm2DUV2();
 	return 1;

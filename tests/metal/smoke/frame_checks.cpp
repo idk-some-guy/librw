@@ -8,6 +8,7 @@
 #include <src/metal/rwmetalimpl.h>
 #include <src/metal/metalstate.h>
 #include <src/metal/metalkeys.h>
+#include <src/metal/metaloutput.h>
 #include "frame_checks.h"
 
 using namespace rw;
@@ -535,6 +536,157 @@ CheckSceneBlendInShader(void)
 }
 
 static bool
+NearF(float a, float b, float tol)
+{
+	return fabsf(a - b) <= tol;
+}
+
+static bool
+CheckEmission(void)
+{
+	const char *name = "an emissive draw writes its colour times the scale into the scene";
+	RGBA dark = { 20, 20, 20, 255 };
+	RGBA glow = { 60, 30, 15, 255 };
+	Raster *dst = Raster::create(cam->frameBuffer->width, cam->frameBuffer->height, 0, Raster::C8888 | Raster::CAMERATEXTURE);
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(dark);
+	metal::setEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, glow, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	Quad(100, 10, 150, 60, glow, DRAW_ADD);
+	Raster::pushContext(dst);
+	cam->frameBuffer->renderFast(0, 0);
+	Raster::popContext();
+	Image *scene = dst->toImage();
+	metal::endScene(nil);
+	float e[4], p[4];
+	bool read = metal::readFrameOutput(30, 30, e) && metal::readFrameOutput(120, 30, p);
+	Finish();
+	EnhancedOff();
+	bool ok = read && ImageNear(scene, 30, 30, 200, 110, 65, -1, 1) && ImageNear(scene, 120, 30, 80, 50, 35, -1, 1);
+	ok = ok && NearF(e[0], 200/255.0f, 0.002f) && NearF(e[1], 110/255.0f, 0.002f) && NearF(e[2], 65/255.0f, 0.002f);
+	ok = ok && NearF(p[0], 80/255.0f, 0.002f) && NearF(p[1], 50/255.0f, 0.002f) && NearF(p[2], 35/255.0f, 0.002f);
+	if(read && !ok)
+		Detail("  output: emitter %.4f,%.4f,%.4f plain %.4f,%.4f,%.4f\n", e[0], e[1], e[2], p[0], p[1], p[2]);
+	if(scene)
+		scene->destroy();
+	dst->destroy();
+	return Report(ok, name);
+}
+
+static bool
+CheckEmissionClassic(void)
+{
+	const char *name = "the emissive scale changes nothing in the classic tier";
+	RGBA dark = { 20, 20, 20, 255 };
+	RGBA glow = { 60, 30, 15, 255 };
+	SetTier(metal::TIER_CLASSIC);
+	metal::beginScene(cam);
+	Begin(dark);
+	metal::setEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, glow, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	Finish();
+	uint8 *px = Composite();
+	cam->showRaster(0);
+	bool ok = CompositeNear(px, 30, 30, 80, 50, 35, 0);
+	delete[] px;
+	return Report(ok, name);
+}
+
+static bool
+CheckShoulder(void)
+{
+	const char *name = "the SDR composite and a copy after endScene are unity below white and pull a pixel above white toward white";
+	RGBA black = { 0, 0, 0, 255 };
+	RGBA glow = { 200, 100, 40, 255 };
+	RGBA grey = { 77, 77, 77, 255 };
+	Raster *dst = Raster::create(cam->frameBuffer->width, cam->frameBuffer->height, 0, Raster::C8888 | Raster::CAMERATEXTURE);
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(black);
+	metal::setEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, glow, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	Quad(100, 10, 150, 60, grey, DRAW_OPAQUE);
+	metal::endScene(nil);
+	float o[4];
+	bool read = metal::readFrameOutput(30, 30, o);
+	Raster::pushContext(dst);
+	cam->frameBuffer->renderFast(0, 0);
+	Raster::popContext();
+	Image *copy = dst->toImage();
+	Finish();
+	uint8 *px = Composite();
+	EnhancedOff();
+	bool ok = read && NearF(o[0], 600/255.0f, 0.01f) && NearF(o[1], 300/255.0f, 0.01f) && NearF(o[2], 120/255.0f, 0.002f);
+	if(!read)
+		Detail("  the frame output was not read\n");
+	else if(!ok)
+		Detail("  output: emitter %.4f,%.4f,%.4f\n", o[0], o[1], o[2]);
+	if(read){
+		float m = fmaxf(o[0], fmaxf(o[1], o[2]));
+		int er = (int)lroundf(sdrShoulder(o[0], m)*255.0f);
+		int eg = (int)lroundf(sdrShoulder(o[1], m)*255.0f);
+		int eb = (int)lroundf(sdrShoulder(o[2], m)*255.0f);
+		ok = CompositeNear(px, 30, 30, er, eg, eb, 1) && ok;
+		ok = ImageNear(copy, 30, 30, er, eg, eb, -1, 1) && ok;
+		ok = eb > 150 && ok;
+	}
+	ok = CompositeNear(px, 120, 30, 77, 77, 77, 0) && ok;
+	ok = ImageNear(copy, 120, 30, 77, 77, 77, -1, 0) && ok;
+	delete[] px;
+	if(copy)
+		copy->destroy();
+	dst->destroy();
+	return Report(ok, name);
+}
+
+static bool
+CheckEmissiveReset(void)
+{
+	const char *name = "a plain draw after an emitter saturates, and a new scene starts with the emissive scale at 1.0";
+	RGBA grey = { 100, 100, 100, 255 };
+	RGBA glow = { 60, 30, 15, 255 };
+	RGBA bright = { 200, 200, 200, 255 };
+	const float white[3] = { 1.0f, 1.0f, 1.0f };
+	float after[4], next[4];
+	EnhancedOn();
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::setEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, glow, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	Quad(100, 10, 150, 60, bright, DRAW_ADD);
+	metal::setEmissiveScale(3.0f);
+	cam->endUpdate();
+	bool read = metal::readScenePixel(120, 30, after);
+	metal::endScene(nil);
+	cam->showRaster(0);
+	metal::beginScene(cam);
+	float scale = metal::getEmissiveScale();
+	Begin(grey);
+	Quad(100, 10, 150, 60, bright, DRAW_ADD);
+	cam->endUpdate();
+	read = metal::readScenePixel(120, 30, next) && read;
+	metal::endScene(nil);
+	cam->showRaster(0);
+	metal::setEmissiveScale(1.0f);
+	EnhancedOff();
+	bool ok = read && SceneNear(after, white, 0.0f, "the plain draw after the emitter");
+	ok = read && SceneNear(next, white, 0.0f, "the plain draw in the next scene") && ok;
+	if(!read)
+		Detail("  the scene was not read\n");
+	if(scale != 1.0f){
+		Detail("  the emissive scale is %.2f after beginScene\n", scale);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
+static bool
 CheckSceneResize(void)
 {
 	const char *name = "the scene targets follow a camera raster resize without a restart";
@@ -788,6 +940,10 @@ RunFrameChecks(Camera *camera)
 	CheckSceneOpaqueClamp();
 	CheckSceneSourceSaturates();
 	CheckSceneResize();
+	CheckEmission();
+	CheckEmissionClassic();
+	CheckShoulder();
+	CheckEmissiveReset();
 	SetTier(metal::TIER_CLASSIC);
 	return failures;
 }
