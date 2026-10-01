@@ -4458,6 +4458,75 @@ CheckLayerFollowsResize(void)
 	return Report(ok, "the layer's drawable follows a window resize at the next frame");
 }
 
+static bool
+CheckNoDrawableWhileNotVisible(void)
+{
+	metal::FrameStats f0 = metal::getFrameStats();
+	metal::setSurfaceHiddenForTest(1);
+	for(int i = 0; i < 4; i++)
+		DrawFrame(GREY);
+	DrawFrame(RED);
+	metal::FrameStats f1 = metal::getFrameStats();
+	bool pixels = CornersAndCentreAre(RED);
+	metal::setSurfaceHiddenForTest(0);
+	DrawFrame(GREEN);
+	metal::FrameStats f2 = metal::getFrameStats();
+	uint32 shown = f1.framesShown - f0.framesShown;
+	uint32 acquired = f1.drawablesAcquired - f0.drawablesAcquired;
+	uint32 presented = f1.framesPresented - f0.framesPresented;
+	uint32 after = f2.drawablesAcquired - f1.drawablesAcquired;
+	bool ok = pixels && shown == 5 && acquired == 0 && presented == 0 && after == 1;
+	if(!ok)
+		Detail("  not visible: %u shown, %u acquired, %u presented; visible again: %u acquired; expected 5, 0, 0, 1\n",
+		       shown, acquired, presented, after);
+	return Report(ok, "no drawable is acquired while the surface is not visible, and the camera still renders");
+}
+
+static bool
+CheckStatsFramesWhileNotVisible(void)
+{
+	metal::logStats();
+	metal::setSurfaceHiddenForTest(1);
+	for(int i = 0; i < 5; i++)
+		DrawFrame(GREY);
+	metal::setSurfaceHiddenForTest(0);
+	uint32 waitUs = metal::getFrameStats().drawableWaitMaxUs;
+	metal::logStats();
+	const char *line = metal::getStatsLine();
+	StatsTail t;
+	bool ok = ParseStatsTail(line, &t) && t.withoutDrawable == 5 && waitUs == 0 && t.waitMaxMs == 0.0;
+	if(!ok)
+		Detail("  got \"%s\", wait max %u us, expected 5 frames without drawable and no drawable wait\n", line, waitUs);
+	return Report(ok, "the stats line counts frames shown while not visible as frames without drawable");
+}
+
+// sleepForTimeInterval sleeps at least the interval, so the lower bound is safe
+static bool
+CheckNotVisibleWaitFollowsVsync(void)
+{
+	int32 hz = Host()->refreshRate();
+	if(hz <= 0)
+		hz = 60;
+	double period = 1.0/hz;
+	metal::setSurfaceHiddenForTest(1);
+	auto t0 = std::chrono::steady_clock::now();
+	for(int i = 0; i < 20; i++)
+		DrawFrameFlags(GREY, Raster::FLIPWAITVSYNCH);
+	auto t1 = std::chrono::steady_clock::now();
+	for(int i = 0; i < 20; i++)
+		DrawFrameFlags(GREY, 0);
+	auto t2 = std::chrono::steady_clock::now();
+	metal::setSurfaceHiddenForTest(0);
+	DrawFrame(GREY);
+	double waited = std::chrono::duration<double>(t1 - t0).count();
+	double unpaced = std::chrono::duration<double>(t2 - t1).count();
+	bool ok = waited >= 20*period*0.95 && unpaced < 10*period;
+	if(!ok)
+		Detail("  20 vsync frames %.1f ms, 20 no-wait frames %.1f ms, refresh %d Hz\n",
+		       waited*1000.0, unpaced*1000.0, hz);
+	return Report(ok, "while not visible a vsync frame sleeps one refresh and a no-wait frame does not");
+}
+
 static void
 CheckHostTable(void)
 {
@@ -4467,6 +4536,15 @@ CheckHostTable(void)
 	CheckHostVisible();
 	CheckHostSizeChangeOnce();
 	CheckLayerFollowsResize();
+}
+
+// logStats starts a new interval, so this runs before checks that draw
+static void
+CheckSurfaceNotVisible(void)
+{
+	CheckNoDrawableWhileNotVisible();
+	CheckStatsFramesWhileNotVisible();
+	CheckNotVisibleWaitFollowsVsync();
 }
 
 static bool
@@ -4569,6 +4647,7 @@ main(void)
 		failures++;
 	CheckDestroyEvictsRaster();
 	CheckIm2D();
+	CheckSurfaceNotVisible();
 	failures += RunWorldChecks(ctx.camera);
 	failures += RunSkinChecks(ctx.camera);
 	failures += RunMatFXChecks(ctx.camera);

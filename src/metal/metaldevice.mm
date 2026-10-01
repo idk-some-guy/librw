@@ -457,6 +457,20 @@ holdFrameForTest(double seconds)
 	}
 }
 
+static bool32 surfaceHiddenForTest;
+
+void
+setSurfaceHiddenForTest(bool32 hidden)
+{
+	surfaceHiddenForTest = hidden;
+}
+
+static bool
+surfaceVisible(void)
+{
+	return !surfaceHiddenForTest && metalGlobals.host->visible();
+}
+
 static bool32
 copyTexturePixels(MetalContext *ctx, id<MTLTexture> tex, int32 x, int32 y, int32 w, int32 h, uint8 *dst)
 {
@@ -1236,17 +1250,19 @@ showRaster(Raster *raster, uint32 flags)
 {
 	MetalContext *ctx = getContext();
 	id<CAMetalDrawable> drawable = nil;
+	bool hidden;
 
 	if(ctx == nil)
 		return;
 	@autoreleasepool {
 		passManager.show();
 		runPassActions();
+		hidden = ctx->layer && !surfaceVisible();
 		if(ctx->layer){
 			if(metalGlobals.host->pollSizeChange())
 				syncLayer(ctx);
 			ctx->layer.displaySyncEnabled = (flags & Raster::FLIPWAITVSYNCH) != 0;
-			if(ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0){
+			if(!hidden && ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0){
 				auto start = std::chrono::steady_clock::now();
 				drawable = [ctx->layer nextDrawable];
 				uint32 us = (uint32)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
@@ -1262,7 +1278,7 @@ showRaster(Raster *raster, uint32 flags)
 		if((frameStats.framesShown & 63) == 0)
 			logStatsIfDue();
 		finishFrame(ctx, drawable);
-		if(drawable == nil)
+		if(drawable == nil && (!hidden || (flags & Raster::FLIPWAITVSYNCH)))
 			waitWithoutDrawable();
 		drawable = nil;
 	}
