@@ -13,6 +13,12 @@ enum ShaderVariant
 	NUMVARIANTS = 16
 };
 
+enum ShaderConstant
+{
+	SHADERCONST_SCENESRCBLEND = 4,
+	SHADERCONST_SCENEDESTBLEND = 5
+};
+
 enum BufferIndices
 {
 	BUFFER_VERTEX = 0,
@@ -40,9 +46,12 @@ struct Shader
 	int32 textureStages;
 	void *vertexFns[NUMVARIANTS];
 	void *fragmentFns[NUMVARIANTS];
+	char *sceneSource;
+	void *sceneLibrary;
 
 	static Shader *create(const char **src, const char *vs, const char *fs, uint32 variantMask = VARIANT_ALPHATEST);
 	bool32 getFunctions(uint32 variant, void **vs, void **fs);
+	bool32 getSceneFunction(uint32 variant, bool32 blended, uint32 srcFactor, uint32 destFactor, void **fs);
 	void use(uint32 variant = VARIANT_ALPHATEST);
 	void destroy(void);
 };

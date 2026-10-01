@@ -227,6 +227,9 @@ struct PipelineEntry
 	uint8 fragmentBlocks;
 	uint32 blockSizes[NUMBLOCKS];
 	uint8 textureStages;
+	bool fixedBlend;
+	bool shaderBlend;
+	bool emissive;
 };
 static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
 static std::unordered_map<uint64_t, id<MTLDepthStencilState>> depthStencilCache;
@@ -238,6 +241,7 @@ static std::unordered_map<uint32_t, id<MTLSamplerState>> samplerCache;
 static bool prewarming;
 static bool hostPrewarming;
 static uint32 warmedFormats;
+static float32 drawEmissive = 1.0f;
 
 struct HostPrewarmRecord
 {
@@ -285,6 +289,7 @@ struct EncoderState
 	id<MTLSamplerState> samplers[MAXNUMSTAGES];
 	id<MTLBuffer> vertexData;
 	uint32 vertexDataOffset;
+	float32 emissive;
 };
 static EncoderState enc;
 static bool haveViewport;
@@ -436,6 +441,7 @@ invalidateEncoderState(void)
 		enc.samplers[i] = nil;
 	}
 	enc.vertexData = nil;
+	enc.emissive = -1.0f;
 }
 
 static void
@@ -588,7 +594,7 @@ static MTLPixelFormat depthFormatMap[] = {
 };
 
 static MTLRenderPipelineDescriptor*
-makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults)
+makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults, bool *shaderBlend)
 {
 	MTLRenderPipelineDescriptor *pd;
 	void *vfn, *ffn;
@@ -596,6 +602,10 @@ makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults
 
 	if(!shader->getFunctions(d.variant, &vfn, &ffn))
 		return nil;
+	*shaderBlend = false;
+	if(d.colorFormat == COLORFMT_SCENE)
+		*shaderBlend = shader->getSceneFunction(d.variant, d.blendEnable, blendFactor(d.srcBlend), blendFactor(d.destBlend), &ffn) &&
+			d.blendEnable;
 	vs = (__bridge id<MTLFunction>)vfn;
 	fs = (__bridge id<MTLFunction>)ffn;
 
@@ -605,7 +615,7 @@ makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults
 	pd.vertexDescriptor = makeVertexDescriptor(d.vertexLayout, vs, usesDefaults);
 	pd.colorAttachments[0].pixelFormat = colorFormatMap[d.colorFormat];
 	pd.colorAttachments[0].writeMask = (MTLColorWriteMask)d.writeMask;
-	if(d.blendEnable){
+	if(d.blendEnable && !*shaderBlend){
 		pd.colorAttachments[0].blendingEnabled = YES;
 		pd.colorAttachments[0].sourceRGBBlendFactor = (MTLBlendFactor)blendFactor(d.srcBlend);
 		pd.colorAttachments[0].sourceAlphaBlendFactor = (MTLBlendFactor)blendFactor(d.srcBlend);
@@ -640,6 +650,8 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 				e->textureStages |= 1<<b.index;
 			if(b.type != MTLBindingTypeBuffer)
 				continue;
+			if(s == 1 && b.index == BUFFER_EMISSIVE)
+				e->emissive = true;
 			for(i = 0; i < NUMBLOCKS; i++){
 				if(blockInfo[i].index != b.index)
 					continue;
@@ -684,7 +696,8 @@ getPipeline(Shader *shader, const PipelineDesc &d, uint64 key)
 	}
 
 	@autoreleasepool {
-		pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
+		pd = makePipelineDescriptor(shader, d, &e.defaultAttribs, &e.shaderBlend);
+		e.fixedBlend = pd && pd.colorAttachments[0].blendingEnabled;
 		if(pd)
 			e.state = [ctx->device newRenderPipelineStateWithDescriptor:pd
 				options:MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo
@@ -721,6 +734,25 @@ pipelineCached(uint64 key)
 {
 	auto it = pipelineCache.find(key);
 	return it != pipelineCache.end() && it->second.state != nil;
+}
+
+PipelineBlendInfo
+pipelineBlendInfo(uint64 key)
+{
+	PipelineBlendInfo b = { 0, 0, 0 };
+	auto it = pipelineCache.find(key);
+	if(it == pipelineCache.end() || it->second.state == nil)
+		return b;
+	b.cached = 1;
+	b.fixedBlend = it->second.fixedBlend;
+	b.shaderBlend = it->second.shaderBlend;
+	return b;
+}
+
+void
+setDrawEmissiveScale(float32 s)
+{
+	drawEmissive = s;
 }
 
 void
@@ -1579,6 +1611,10 @@ flushCache(void)
 		[e setVertexBytes:&defaultAttribs length:sizeof(defaultAttribs) atIndex:BUFFER_DEFAULTATTRIBS];
 		enc.defaultAttribs = true;
 	}
+	if(pipe->emissive && enc.emissive != drawEmissive){
+		[e setFragmentBytes:&drawEmissive length:sizeof(drawEmissive) atIndex:BUFFER_EMISSIVE];
+		enc.emissive = drawEmissive;
+	}
 
 	dd.hasDepth = ctx->encoderHasDepth;
 	dd.ztest = rwStateCache.ztest;
@@ -1643,7 +1679,7 @@ checkBlockSizes(MetalContext *ctx, Shader *shader, const PipelineDesc &d)
 	uint32 used = 0;
 	int i;
 
-	pd = makePipelineDescriptor(shader, d, &e.defaultAttribs);
+	pd = makePipelineDescriptor(shader, d, &e.defaultAttribs, &e.shaderBlend);
 	if(pd == nil)
 		return 0;
 	[ctx->device newRenderPipelineStateWithDescriptor:pd
@@ -2063,6 +2099,7 @@ termState(void)
 	depthStencilCache.clear();
 	samplerCache.clear();
 	warmedFormats = 0;
+	drawEmissive = 1.0f;
 	hostRecords.clear();
 	currentLayout = 0;
 	im2dVertexLayout = 0;

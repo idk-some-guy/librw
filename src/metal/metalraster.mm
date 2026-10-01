@@ -397,22 +397,25 @@ writeLevel(Raster *raster, int32 level, const TexFormat &fmt, uint8 *px)
 		rwFree(rgba);
 }
 
+static bool sceneFormat;
+
 static Raster*
 rasterCreateCamera(Raster *raster)
 {
 	MetalRaster *natras = GETMETALRASTEREXT(raster);
+	MTLPixelFormat fmt = sceneFormat ? MTLPixelFormatRGBA16Float : MTLPixelFormatRGBA8Unorm;
 
 	raster->format = Raster::C8888;
-	natras->format = MTLPixelFormatRGBA8Unorm;
+	natras->format = fmt;
 	natras->hasAlpha = 1;
-	natras->bpp = 4;
+	natras->bpp = sceneFormat ? 8 : 4;
 	natras->autogenMipmap = 0;
 
-	if(!createTexture(raster, MTLPixelFormatRGBA8Unorm)){
+	if(!createTexture(raster, fmt)){
 		RWERROR((ERR_GENERAL, "can't create camera texture"));
 		return nil;
 	}
-	if(metalGlobals.numSamples > 1 && !createMsaaTexture(raster, MTLPixelFormatRGBA8Unorm, metalGlobals.numSamples)){
+	if(metalGlobals.numSamples > 1 && !createMsaaTexture(raster, fmt, metalGlobals.numSamples)){
 		RWERROR((ERR_GENERAL, "can't create multisampled camera texture"));
 		@autoreleasepool {
 			id<MTLTexture> tex = (__bridge_transfer id<MTLTexture>)natras->texture;
@@ -422,6 +425,15 @@ rasterCreateCamera(Raster *raster)
 		return nil;
 	}
 	return raster;
+}
+
+Raster*
+createSceneRaster(int32 width, int32 height)
+{
+	sceneFormat = true;
+	Raster *r = Raster::create(width, height, 0, Raster::CAMERA);
+	sceneFormat = false;
+	return r;
 }
 
 static Raster*

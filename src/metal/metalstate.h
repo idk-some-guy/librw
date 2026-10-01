@@ -97,6 +97,14 @@ const char *getStatsLine(void);
 const char *getDropLine(void);
 uint32 checkShaderBlockSizes(Shader *shader, uint32 variant);
 bool32 pipelineCached(uint64 key);
+struct PipelineBlendInfo
+{
+	bool32 cached;
+	bool32 fixedBlend;
+	bool32 shaderBlend;
+};
+PipelineBlendInfo pipelineBlendInfo(uint64 key);
+void setDrawEmissiveScale(float32 s);
 int32 getVertexLayout(uint32 layout, AttribDesc *attribs, int32 maxAttribs);
 
 }

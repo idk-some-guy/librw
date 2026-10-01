@@ -349,6 +349,20 @@ RenderSettings getRenderSettings(void);
 int32 getSupportedTier(void);
 FrameInfo getFrameInfo(void);
 
+enum { MAXGRADECONSTANTS = 16 };
+
+struct GradeParams
+{
+	bool32 grade;
+	const float32 *constants;
+	uint32 numConstants;
+	float32 bloomWeight;
+};
+
+void beginScene(Camera *cam);
+void endScene(const GradeParams *params);
+bool32 enhancedFrame(void);
+
 }
 }
 #endif

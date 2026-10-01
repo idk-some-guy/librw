@@ -45,6 +45,7 @@ struct MetalContext
 
 	id<MTLRenderPipelineState> compositePipeline;
 	id<MTLRenderPipelineState> clearPipelines[4][2][2];
+	id<MTLRenderPipelineState> clearScenePipelines[4][2][2];
 	id<MTLDepthStencilState> clearDepthStates[2][2];
 };
 

@@ -1,4 +1,4 @@
-all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc
+all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc
 
 header_metal.inc: header.metal
 	(echo 'const char *header_metal_src =';\
@@ -39,3 +39,13 @@ matfx_env_metal.inc: matfx_env.metal
 	(echo 'const char *matfx_env_metal_src =';\
 	 sed 's/..*/"&\\n"/' matfx_env.metal;\
 	 echo ';') >matfx_env_metal.inc
+
+frame_metal.inc: frame.metal
+	(echo 'const char *frame_metal_src =';\
+	 sed 's/..*/"&\\n"/' frame.metal;\
+	 echo ';') >frame_metal.inc
+
+grade_metal.inc: grade.metal
+	(echo 'const char *grade_metal_src =';\
+	 sed 's/..*/"&\\n"/' grade.metal;\
+	 echo ';') >grade_metal.inc

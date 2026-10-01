@@ -124,7 +124,10 @@ createFramePipelines(MetalContext *ctx)
 				ctx->clearPipelines[s][c][d] = makePipeline(ctx->device, lib, @"clearVS", @"clearFS",
 					MTLPixelFormatRGBA8Unorm,
 					d ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid, c, 1u << s);
-				if(ctx->clearPipelines[s][c][d] == nil)
+				ctx->clearScenePipelines[s][c][d] = makePipeline(ctx->device, lib, @"clearVS", @"clearFS",
+					MTLPixelFormatRGBA16Float,
+					d ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid, c, 1u << s);
+				if(ctx->clearPipelines[s][c][d] == nil || ctx->clearScenePipelines[s][c][d] == nil)
 					built = 0;
 			}
 		if(built)
@@ -173,6 +176,7 @@ createContext(void)
 	}
 
 	metalGlobals.context = ctx;
+	frameInit();
 	return 1;
 }
 
@@ -243,12 +247,18 @@ setViewport(MetalContext *ctx, Raster *target)
 {
 	MTLViewport vp = { 0.0, 0.0, (double)ctx->encoderWidth, (double)ctx->encoderHeight, 0.0, 1.0 };
 	Raster *fb = currentFrameBuffer;
+	HostRect r;
 
 	if(fb && fb != target && fb->parent == target){
 		vp.originX = fb->offsetX;
 		vp.originY = fb->offsetY;
 		vp.width = fb->width;
 		vp.height = fb->height;
+	}else if(fb && fb != target && frameSubViewport(fb, target, &r)){
+		vp.originX = r.x;
+		vp.originY = r.y;
+		vp.width = r.width;
+		vp.height = r.height;
 	}
 	setEncoderViewport(vp.originX, vp.originY, vp.width, vp.height);
 }
@@ -310,7 +320,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	if(depth)
 		GETMETALRASTEREXT(zb)->msaaCurrent = samples > 1;
 	ctx->encoderSamples = samples;
-	ctx->encoderColorFormat = COLORFMT_RGBA8;
+	ctx->encoderColorFormat = frameColorFormat(fb);
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
 	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
 	if(fb)
@@ -348,7 +358,9 @@ drawClearQuad(MetalContext *ctx, const PassAction *a)
 	[enc setViewport:vp];
 	[enc setScissorRect:r];
 	[enc setCullMode:MTLCullModeNone];
-	[enc setRenderPipelineState:ctx->clearPipelines[sampleSlot(ctx->encoderSamples)][writeColor][ctx->encoderHasDepth]];
+	[enc setRenderPipelineState:ctx->encoderColorFormat == COLORFMT_SCENE ?
+		ctx->clearScenePipelines[sampleSlot(ctx->encoderSamples)][writeColor][ctx->encoderHasDepth] :
+		ctx->clearPipelines[sampleSlot(ctx->encoderSamples)][writeColor][ctx->encoderHasDepth]];
 	if(ctx->encoderHasDepth){
 		[enc setDepthStencilState:ctx->clearDepthStates[writeDepth][writeStencil]];
 		[enc setStencilReferenceValue:c->stencil];
@@ -385,6 +397,39 @@ runPassActions(void)
 	}
 }
 
+void
+flushPasses(void)
+{
+	passManager.flush();
+	runPassActions();
+}
+
+void
+clearPassTarget(const PassTarget &t, const PassClear &c)
+{
+	passManager.clear(t, c);
+	runPassActions();
+}
+
+id<MTLCommandBuffer>
+frameCommandBuffer(void)
+{
+	return getCommandBuffer(getContext());
+}
+
+bool32
+commitAndWait(id<MTLCommandBuffer> cb)
+{
+	MetalContext *ctx = getContext();
+	[cb commit];
+	ctx->lastCommitted = cb;
+	[cb waitUntilCompleted];
+	ctx->commandBuffer = nil;
+	if(cb.error)
+		fprintf(stderr, "rw::metal: command buffer error: %s\n", cb.error.localizedDescription.UTF8String);
+	return cb.status == MTLCommandBufferStatusCompleted;
+}
+
 static PassTarget
 getCameraTarget(Camera *cam)
 {
@@ -393,12 +438,14 @@ getCameraTarget(Camera *cam)
 		t.color = cam->frameBuffer->parent;
 	if(cam->zBuffer)
 		t.depth = cam->zBuffer->parent;
-	return t;
+	frameNoteUpdate(t);
+	return frameRoute(t);
 }
 
 void
 forgetRasterTarget(Raster *raster)
 {
+	frameForget(raster);
 	if(currentFrameBuffer && (currentFrameBuffer == raster || currentFrameBuffer->parent == raster))
 		currentFrameBuffer = nil;
 	passManager.forget(raster);
@@ -697,12 +744,29 @@ waitForGPUWrites(uint64 frameId)
 	}
 }
 
+static void
+markCopied(Raster *dst, id<MTLTexture> dtex)
+{
+	MetalRaster *natras;
+
+	natras = GETMETALRASTEREXT(dst->parent);
+	if(natras->autogenMipmap && dtex.mipmapLevelCount > 1){
+		encodeMipmapGeneration(natras->texture);
+		rasterStats.mipmapBlits++;
+		natras->filledMask = (1u << dtex.mipmapLevelCount) - 1;
+		natras->filledLevels = (int8)dtex.mipmapLevelCount;
+	}else{
+		natras->filledMask = 1;
+		natras->filledLevels = 1;
+	}
+	natras->gpuWriteFrame = getFrameId();
+}
+
 static bool32
 rasterRenderFast(Raster *raster, int32 x, int32 y)
 {
 	MetalContext *ctx = getContext();
 	Raster *dst = Raster::getCurrentContext();
-	MetalRaster *natras;
 	id<MTLTexture> stex, dtex;
 	id<MTLBlitCommandEncoder> blit;
 	int32 dx, dy, w, h;
@@ -711,6 +775,7 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 		return 0;
 	if(dst->type != Raster::NORMAL && dst->type != Raster::TEXTURE && dst->type != Raster::CAMERATEXTURE)
 		return 0;
+	int32 route = frameCopyRoute(raster);
 	stex = getRasterTexture(raster->parent);
 	dtex = getRasterTexture(dst->parent);
 	if(stex == nil || dtex == nil || dtex.pixelFormat != MTLPixelFormatRGBA8Unorm)
@@ -724,26 +789,21 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 	@autoreleasepool {
 		passManager.flush();
 		runPassActions();
-		blit = [getCommandBuffer(ctx) blitCommandEncoder];
-		[blit copyFromTexture:stex sourceSlice:0 sourceLevel:0
-			sourceOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)
-			sourceSize:MTLSizeMake(w, h, 1)
-			toTexture:dtex destinationSlice:0 destinationLevel:0
-			destinationOrigin:MTLOriginMake(dx, dy, 0)];
-		[blit endEncoding];
+		if(route == COPY_RENDER){
+			if(!frameRenderCopy(raster, dtex, dx, dy, w, h))
+				return 0;
+		}else{
+			blit = [getCommandBuffer(ctx) blitCommandEncoder];
+			[blit copyFromTexture:stex sourceSlice:0 sourceLevel:0
+				sourceOrigin:MTLOriginMake(raster->offsetX, raster->offsetY, 0)
+				sourceSize:MTLSizeMake(w, h, 1)
+				toTexture:dtex destinationSlice:0 destinationLevel:0
+				destinationOrigin:MTLOriginMake(dx, dy, 0)];
+			[blit endEncoding];
+		}
 		frameStats.copies++;
 	}
-	natras = GETMETALRASTEREXT(dst->parent);
-	if(natras->autogenMipmap && dtex.mipmapLevelCount > 1){
-		encodeMipmapGeneration(natras->texture);
-		rasterStats.mipmapBlits++;
-		natras->filledMask = (1u << dtex.mipmapLevelCount) - 1;
-		natras->filledLevels = (int8)dtex.mipmapLevelCount;
-	}else{
-		natras->filledMask = 1;
-		natras->filledLevels = 1;
-	}
-	natras->gpuWriteFrame = getFrameId();
+	markCopied(dst, dtex);
 	return 1;
 }
 
@@ -974,6 +1034,7 @@ termMetal(void)
 	closeIm2DUV2();
 	closeSkin();
 	closeMatFX();
+	frameTerm();
 	termRaster();
 	termState();
 	return 1;
@@ -1177,11 +1238,14 @@ clearCamera(Camera *cam, RGBA *col, uint32 mode)
 		clear.w = fb->width;
 		clear.h = fb->height;
 	}
+	PassTarget target = getCameraTarget(cam);
+	if(clear.subRect && target.color == frameSceneBase())
+		frameScaleClear(&clear);
 
 	prev = currentFrameBuffer;
 	currentFrameBuffer = fb;
 	@autoreleasepool {
-		passManager.clear(getCameraTarget(cam), clear);
+		passManager.clear(target, clear);
 		runPassActions();
 		currentFrameBuffer = prev;
 		MetalContext *ctx = getContext();
@@ -1212,6 +1276,8 @@ composite(MetalContext *ctx, Raster *raster, id<MTLTexture> target)
 	MTLRenderPassDescriptor *desc;
 	id<MTLRenderCommandEncoder> enc;
 
+	if(frameEncodeComposite(raster, target))
+		return;
 	if(raster && raster->parent->type == Raster::CAMERA && ctx->compositePipeline)
 		src = getRasterTexture(raster->parent);
 
@@ -1272,6 +1338,7 @@ showRaster(Raster *raster, uint32 flags)
 	if(ctx == nil)
 		return;
 	@autoreleasepool {
+		frameShow();
 		passManager.show();
 		runPassActions();
 		hidden = ctx->layer && !surfaceVisible();

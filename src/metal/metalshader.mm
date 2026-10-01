@@ -1,8 +1,11 @@
 #ifdef RW_METAL
+#include <unordered_map>
+#include <unordered_set>
 #include "metalobjc.h"
 #include "rwmetalshader.h"
 #include "metalstate.h"
 #include "metalkeys.h"
+#include "metalsceneblend.h"
 
 #define PLUGIN_ID 0
 
@@ -14,6 +17,16 @@ namespace metal {
 Shader *currentShader;
 uint32 currentVariant;
 static uint32 shaderIds[(1<<PIPEKEY_SHADERBITS)/32] = { 1 };
+static std::unordered_map<uint32, id<MTLFunction>> sceneFns;
+static std::unordered_set<uint32> sceneReported;
+
+static uint32
+sceneFnKey(uint32 shaderId, uint32 variant, bool32 blended, uint32 srcFactor, uint32 destFactor)
+{
+	if(!blended)
+		srcFactor = destFactor = 0;
+	return shaderId<<16 | (blended ? 1u : 0u)<<15 | variant<<8 | (srcFactor & 15)<<4 | (destFactor & 15);
+}
 
 static uint32
 allocShaderId(void)
@@ -36,7 +49,7 @@ copyString(const char *s)
 }
 
 static id<MTLFunction>
-specialise(id<MTLLibrary> lib, const char *name, uint32 variant)
+specialise(id<MTLLibrary> lib, const char *name, uint32 variant, const uint32 *sceneFactors = nil)
 {
 	MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
 	NSError *err = nil;
@@ -47,6 +60,10 @@ specialise(id<MTLLibrary> lib, const char *name, uint32 variant)
 	for(i = 0; i < 4; i++){
 		v = (variant >> i) & 1;
 		[values setConstantValue:&v type:MTLDataTypeBool atIndex:i];
+	}
+	if(sceneFactors){
+		[values setConstantValue:&sceneFactors[0] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENESRCBLEND];
+		[values setConstantValue:&sceneFactors[1] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENEDESTBLEND];
 	}
 	fn = [lib newFunctionWithName:[NSString stringWithUTF8String:name] constantValues:values error:&err];
 	if(fn == nil)
@@ -95,6 +112,9 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variantM
 		sh->shaderId = sid;
 		sh->variantMask = variantMask & (NUMVARIANTS-1);
 		sh->textureStages = -1;
+		std::string scene;
+		if(sceneBlendSource(all.UTF8String, fs, &scene))
+			sh->sceneSource = copyString(scene.c_str());
 		if(!sh->getFunctions(0, &vfn, &ffn) || !sh->getFunctions(sh->variantMask, &vfn, &ffn)){
 			sh->destroy();
 			return nil;
@@ -127,6 +147,54 @@ Shader::getFunctions(uint32 variant, void **vs, void **fs)
 	return 1;
 }
 
+bool32
+Shader::getSceneFunction(uint32 variant, bool32 blended, uint32 srcFactor, uint32 destFactor, void **fs)
+{
+	MetalContext *ctx = getContext();
+	uint32 factors[2] = { srcFactor, destFactor };
+	NSError *err = nil;
+
+	variant &= NUMVARIANTS-1;
+	uint32 key = sceneFnKey(this->shaderId, variant, blended, srcFactor, destFactor);
+	auto it = sceneFns.find(key);
+	if(it != sceneFns.end()){
+		*fs = (__bridge void*)it->second;
+		return 1;
+	}
+	if(ctx == nil)
+		return 0;
+	if(this->sceneSource == nil && this->sceneLibrary == nil){
+		if(sceneReported.insert(this->shaderId).second)
+			fprintf(stderr, "rw::metal: shader %s/%s has no scene blend variant; its scene blends do not saturate\n",
+				this->vertexName, this->fragmentName);
+		return 0;
+	}
+	if(this->sceneLibrary == nil){
+		MTLCompileOptions *opts = [MTLCompileOptions new];
+		opts.preserveInvariance = YES;
+		id<MTLLibrary> lib = [ctx->device newLibraryWithSource:[NSString stringWithUTF8String:this->sceneSource]
+			options:opts error:&err];
+		rwFree(this->sceneSource);
+		this->sceneSource = nil;
+		if(lib == nil){
+			sceneReported.insert(this->shaderId);
+			fprintf(stderr, "rw::metal: shader %s/%s has no scene blend variant; its scene blends do not saturate: %s\n",
+				this->vertexName, this->fragmentName, err ? err.localizedDescription.UTF8String : "");
+			return 0;
+		}
+		this->sceneLibrary = (__bridge_retained void*)lib;
+	}
+	std::string name = this->fragmentName;
+	if(!blended)
+		name += "_rwOpaque";
+	id<MTLFunction> fn = specialise((__bridge id<MTLLibrary>)this->sceneLibrary, name.c_str(), variant, factors);
+	if(fn == nil)
+		return 0;
+	sceneFns[key] = fn;
+	*fs = (__bridge void*)fn;
+	return 1;
+}
+
 void
 Shader::use(uint32 variant)
 {
@@ -148,6 +216,16 @@ Shader::destroy(void)
 			CFBridgingRelease(this->fragmentFns[i]);
 	}
 	CFBridgingRelease(this->library);
+	if(this->sceneLibrary)
+		CFBridgingRelease(this->sceneLibrary);
+	if(this->sceneSource)
+		rwFree(this->sceneSource);
+	sceneReported.erase(this->shaderId);
+	for(auto it = sceneFns.begin(); it != sceneFns.end();)
+		if(it->first>>16 == this->shaderId)
+			it = sceneFns.erase(it);
+		else
+			++it;
 	forgetShaderPipelines(this->shaderId);
 	shaderIds[this->shaderId/32] &= ~(1u << this->shaderId%32);
 	rwFree(this->vertexName);
