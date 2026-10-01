@@ -1,13 +1,59 @@
 # Metal backend
 
-`rw::metal` renders through Apple's Metal API. It sits beside the gl3 and d3d9 backends, is compiled when `RW_METAL` is defined, and uses GLFW for the window.
+`rw::metal` renders through Apple's Metal API. It sits beside the gl3 and d3d9 backends, is compiled when `RW_METAL` is defined, and gets its window from a host table; the default host uses GLFW.
 
 ## Platform
 
 - Apple silicon Macs, macOS 14 or later. The build targets `arm64-apple-macos14`.
-- GLFW 3 (Homebrew `glfw`) for the window, with `LIBRW_GLFW` defined.
+- GLFW 3 (Homebrew `glfw`) for the default window host, with `LIBRW_GLFW` defined.
 - Xcode command line tools. Shaders are compiled at start-up; no offline shader tools are needed.
-- Build with premake (see "Build"). The CMake files have no Metal platform. The platform always uses GLFW; premake warns that `--gfxlib` is ignored if it names another library.
+- Build with premake (see "Build"). The CMake files have no Metal platform. The platform always uses GLFW; premake warns that `--gfxlib` is ignored if it names another library. A host can pass its own window host instead (see "Window hosts").
+
+## Window hosts
+
+The device owns no window. `EngineOpenParams::host` points to a `MetalHost` table (`rwmetal.h`) of thirteen functions that open the window system, describe the displays and create the surface the backend presents to. When `host` is `nil` the device uses `metal::glfwHost`, which exists only when `LIBRW_GLFW` is defined and writes the `GLFWwindow` it creates through `EngineOpenParams::window`. Without `LIBRW_GLFW` and without a host, the device reports "no window host". A native Cocoa host follows in a later milestone.
+
+The library and every host must be built with the same `LIBRW_GLFW` setting. The `window` field of `EngineOpenParams` exists only under it, so the layout of the struct depends on it.
+
+The device calls the table from the engine's device requests and from `showRaster`, so every call comes from the render thread, the thread that drives the engine. The GLFW host needs that to be the main thread, as GLFW does. A host is a singleton: it keeps one window system and one surface in its own state, and the device uses one host at a time.
+
+### Entries
+
+| Entry | Called | Must |
+|---|---|---|
+| `open(params)` | `Engine::open`, before any other entry | Start the window system and read `width`, `height`, `windowtitle` and `hidden`. Report a failure with `RWERROR` and return 0. |
+| `close()` | `Engine::close`, and `Engine::open` when `getModes(0)` lists nothing | Shut the window system down. `Engine::close` calls it even after a failed `open`. |
+| `numDisplays()` | `Engine::open`, `Engine::setSubSystem`, `Engine::getSubSystemInfo` | Return the number of displays, 0 when there are none. It must work before `open` succeeds and after `close`. |
+| `displayName(i)` | `Engine::getSubSystemInfo`, with `i` below the last `numDisplays()` | Return the display's name, never `nil`. Like `numDisplays`, it must work after `close`. |
+| `displayMode(i, &mode)` | not called by the device | Fill the display's current mode with `flags` 0; return 0 for an unknown display. |
+| `getModes(i, &n)` | `Engine::open`, display 0 only | Return the mode list and its length. After a successful `open` the list for display 0 is never empty. |
+| `createSurface(display, mode, windowed, hidden)` | `Engine::start` | Create the surface and return its `CAMetalLayer` as a `void *`, or report with `RWERROR` and return `nil`. See "Surfaces". |
+| `destroySurface()` | `Engine::stop` | Release the surface. The device has already finished its GPU work and dropped the layer. |
+| `drawableSize(&w, &h)` | `showRaster`, after `pollSizeChange()` returns true | The surface size in pixels, 0 by 0 when unknown. |
+| `backingScale()` | `showRaster`, after `pollSizeChange()` returns true | The scale from points to pixels, 0 when unknown. |
+| `refreshRate()` | `showRaster`, on a frame that sleeps without a drawable | The display's refresh rate in Hz, 0 when unknown (the device then uses 60). |
+| `visible()` | `showRaster`, every frame with a surface | See "Hidden surfaces". |
+| `pollSizeChange()` | `showRaster`, every frame with a surface | Return true once after the size or scale changed, counting from `createSurface`. The device then reads `drawableSize` and `backingScale` and updates the layer. |
+
+Across the table, 0 means none or unknown: a count, a size, a scale or a rate of 0, and a mode `refresh` of 0.
+
+### Modes and displays
+
+The host owns the mode arrays and the display names. A list stays valid until the next `getModes` or `close`, and a name until the next call; the device copies both at once. Entry 0 of a list is the windowed mode, the display's current mode with `flags` 0. Every other entry carries `VIDEOMODEEXCLUSIVE`.
+
+Displays are indexes, and display 0 is the main display. They are not stable: the GLFW host reads the display list again on every call, so connecting or removing a display can reorder them. The device takes its video modes from display 0 at `Engine::open`. The subsystem chosen with `Engine::setSubSystem` only picks the display a fullscreen surface goes to; `Engine::open` resets that choice to display 0.
+
+### Surfaces
+
+`createSurface` gets the chosen display and `mode`, an index into the list the host returned last, whatever display is passed. `windowed` repeats the mode's flag: it is true when the mode lacks `VIDEOMODEEXCLUSIVE`. `hidden` is the open parameter. A windowed or hidden surface takes its size from the open parameters' `width` and `height`; a fullscreen one takes the mode's size on the given display.
+
+The host returns the layer without transferring ownership. It keeps the layer attached to its view, with `contentsScale` and `drawableSize` set, until `destroySurface`. The device sets the Metal device, pixel format, `framebufferOnly`, drawable count and `displaySyncEnabled`, and afterwards writes `contentsScale` and `drawableSize` itself when `pollSizeChange` reports a change.
+
+### Hidden surfaces
+
+`visible()` is false while the surface is minimised or hidden, for example with cmd-H. A surface created with `hidden` set counts as visible while it is not minimised: it renders and presents. The GLFW host does not consider occlusion, so a window behind others counts as visible.
+
+While the surface is not visible the device acquires no drawable and composites nothing. The camera still renders, and `showRaster` still finishes and counts the frame, which the statistics line reports under "frames without drawable". A frame shown with `FLIPWAITVSYNCH` then sleeps one refresh, and any other frame does not sleep. A visible surface that gets no drawable sleeps one refresh whatever the flags. While the application is hidden, macOS stretches these sleeps well past one refresh.
 
 ## Scope
 
@@ -203,7 +249,7 @@ premake5 gmake2
 make -C build config=release_macosx-arm64-metal librw
 ```
 
-The library is `lib/macosx-arm64-metal/Release/librw.a`. A host that builds librw itself defines `RW_METAL` and `LIBRW_GLFW`, compiles `src/metal/*.mm` as Objective-C++ with `-fobjc-arc`, leaves `src/metal` out of other platforms, targets macOS 14, and links `Metal`, `QuartzCore`, `Cocoa` and `glfw`. Set `HOMEBREW_PREFIX` if Homebrew is not in `/opt/homebrew`.
+The library is `lib/macosx-arm64-metal/Release/librw.a`. A host that builds librw itself defines `RW_METAL` and, for the GLFW host, `LIBRW_GLFW`, compiles `src/metal/*.mm` as Objective-C++ with `-fobjc-arc`, leaves `src/metal` out of other platforms, targets macOS 14, and links `Metal`, `QuartzCore`, `Cocoa` and `glfw`. Set `HOMEBREW_PREFIX` if Homebrew is not in `/opt/homebrew`.
 
 ## Tests
 
@@ -214,7 +260,7 @@ METAL_SMOKE_ASAN=1 bash tests/metal/build.sh && METAL_SMOKE_ASAN=1 bash tests/me
 ```
 
 - `tests/metal/pure/` holds five tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking). They need no GPU.
-- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden GLFW window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. It prints `PASS` or `FAIL` for each of its 264 checks and ends with `all tests passed`.
+- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden GLFW window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. It prints `PASS` or `FAIL` for each of its 273 checks and ends with `all tests passed`.
 - The ASan build instruments the test code, not the library.
 - A host can add its own checks to the same run: compile `tests/metal/smoke/*.cpp` and `*.mm` except `no_host_checks.cpp`, and define `RunHostChecks(camera)` and `RunRestartHostChecks(restart, camera)` (`host_checks.h`). The driver calls the first after its render-target checks and the second after its restart render-target checks, before the multisampling checks, with the engine running.
 
