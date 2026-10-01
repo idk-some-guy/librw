@@ -1,21 +1,21 @@
 # Metal backend
 
-`rw::metal` renders through Apple's Metal API. It sits beside the gl3 and d3d9 backends, is compiled when `RW_METAL` is defined, and gets its window from a host table; the default host uses GLFW.
+`rw::metal` renders through Apple's Metal API. It sits beside the gl3 and d3d9 backends, is compiled when `RW_METAL` is defined, and gets its window from a host table: a GLFW host, or a native Cocoa host.
 
 ## Platform
 
 - Apple silicon Macs, macOS 14 or later. The build targets `arm64-apple-macos14`.
-- GLFW 3 (Homebrew `glfw`) for the default window host, with `LIBRW_GLFW` defined.
+- GLFW 3 (Homebrew `glfw`) for the GLFW window host, with `LIBRW_GLFW` defined. The Cocoa host needs only the system frameworks.
 - Xcode command line tools. Shaders are compiled at start-up; no offline shader tools are needed.
-- Build with premake (see "Build"). The CMake files have no Metal platform. The platform always uses GLFW; premake warns that `--gfxlib` is ignored if it names another library. A host can pass its own window host instead (see "Window hosts").
+- Build with premake (see "Build"). The CMake files have no Metal platform. Two platforms: `macosx-arm64-metal` with the GLFW host, and `macosx-arm64-metal-cocoa` with the Cocoa host and no GLFW. Premake warns that `--gfxlib` is ignored if it names another library. A host can pass its own window host instead (see "Window hosts").
 
 ## Window hosts
 
-The device owns no window. `EngineOpenParams::host` points to a `MetalHost` table (`rwmetal.h`) of thirteen functions that open the window system, describe the displays and create the surface the backend presents to. When `host` is `nil` the device uses `metal::glfwHost`, which exists only when `LIBRW_GLFW` is defined and writes the `GLFWwindow` it creates through `EngineOpenParams::window`. Without `LIBRW_GLFW` and without a host, the device reports "no window host". A native Cocoa host follows in a later milestone.
+The device owns no window. `EngineOpenParams::host` points to a `MetalHost` table (`rwmetal.h`) of thirteen functions that open the window system, describe the displays and create the surface the backend presents to. When `host` is `nil` the device uses `metal::glfwHost`, which exists only when `LIBRW_GLFW` is defined and writes the `GLFWwindow` it creates through `EngineOpenParams::window`. Without `LIBRW_GLFW`, a nil `host` selects `metal::cocoaHost` when `LIBRW_COCOA` is defined; without either, the device reports "no window host".
 
-The library and every host must be built with the same `LIBRW_GLFW` setting. The `window` field of `EngineOpenParams` exists only under it, so the layout of the struct depends on it.
+The library and every host must be built with the same `LIBRW_GLFW` and `LIBRW_COCOA` settings. The `window` and `cocoaWindow` fields of `EngineOpenParams` exist only under them, so the layout of the struct depends on them.
 
-The device calls the table from the engine's device requests and from `showRaster`, so every call comes from the render thread, the thread that drives the engine. The GLFW host needs that to be the main thread, as GLFW does. A host is a singleton: it keeps one window system and one surface in its own state, and the device uses one host at a time.
+The device calls the table from the engine's device requests and from `showRaster`, so every call comes from the render thread, the thread that drives the engine. The GLFW host needs that to be the main thread, as GLFW does. The Cocoa host needs the main thread too, as AppKit does, and fails `open` on any other. A host is a singleton: it keeps one window system and one surface in its own state, and the device uses one host at a time.
 
 ### Entries
 
@@ -41,7 +41,7 @@ Across the table, 0 means none or unknown: a count, a size, a scale or a rate of
 
 The host owns the mode arrays and the display names. A list stays valid until the next `getModes` or `close`, and a name until the next call; the device copies both at once. Entry 0 of a list is the windowed mode, the display's current mode with `flags` 0. Every other entry carries `VIDEOMODEEXCLUSIVE`.
 
-Displays are indexes, and display 0 is the main display. They are not stable: the GLFW host reads the display list again on every call, so connecting or removing a display can reorder them. The device takes its video modes from display 0 at `Engine::open`. The subsystem chosen with `Engine::setSubSystem` only picks the display a fullscreen surface goes to; `Engine::open` resets that fullscreen target to display 0, while the current subsystem that `Engine::getCurrentSubSystem` reports keeps its value.
+Displays are indexes, and display 0 is the main display. They are not stable: both hosts read the display list again on every call, so connecting or removing a display can reorder them. The device takes its video modes from display 0 at `Engine::open`. The subsystem chosen with `Engine::setSubSystem` only picks the display a fullscreen surface goes to; `Engine::open` resets that fullscreen target to display 0, while the current subsystem that `Engine::getCurrentSubSystem` reports keeps its value.
 
 ### Surfaces
 
@@ -51,9 +51,23 @@ The host returns the layer without transferring ownership. It keeps the layer at
 
 ### Hidden surfaces
 
-`visible()` is false while the surface is minimised or hidden, for example with cmd-H. A surface created with `hidden` set counts as visible while it is not minimised: it renders and presents. The GLFW host does not consider occlusion, so a window behind others counts as visible.
+`visible()` is false while the surface is minimised or hidden, for example with cmd-H. A surface created with `hidden` set counts as visible while it is not minimised: it renders and presents. The GLFW host does not consider occlusion, so a window behind others counts as visible; the Cocoa host does.
 
 While the surface is not visible the device acquires no drawable and composites nothing. The camera still renders, and `showRaster` still finishes and counts the frame, which the statistics line reports under "frames without drawable". A frame shown with `FLIPWAITVSYNCH` then sleeps one refresh, and any other frame does not sleep. A visible surface that gets no drawable sleeps one refresh whatever the flags. While the application is hidden, macOS can stretch these sleeps well past one refresh.
+
+### The Cocoa host
+
+Define `LIBRW_COCOA` (the `macosx-arm64-metal-cocoa` platform does), link `AppKit`, `QuartzCore` and `Metal`, and pass `&metal::cocoaHost` as `host`, or leave `host` nil in a build without `LIBRW_GLFW`. The host writes the `NSWindow *` it creates, unretained, through `EngineOpenParams::cocoaWindow`, and writes `nil` there when it closes the window.
+
+- Application. If `NSApp` exists when `open` runs, the host uses it as it is. Otherwise it creates it and sets the activation policy: accessory for a hidden surface, regular for a shown one, which it also launches and activates when it shows the window. Create `NSApp` yourself before `Engine::open` to keep its policy, menu and delegate your own.
+- Events and input are the application's. The host runs no event loop and handles no keyboard, mouse or pad. Pump events once per frame on the main thread, for example with `nextEventMatchingMask:untilDate:inMode:dequeue:` and `sendEvent:` in an `@autoreleasepool`; without it, occlusion, backing-scale and fullscreen changes never arrive. The host observes the window through notifications and leaves its delegate to the application.
+- Autorelease pools. The device calls every host entry inside an `@autoreleasepool`. An application that calls AppKit itself without a run loop (no `[NSApp run]`) provides its own pools around those calls, or the objects AppKit autoreleases there, windows included, are never released.
+- Displays are `NSScreen.screens`, display 0 being the screen with the menu bar, named by `localizedName`. Modes come from `CGDisplayCopyAllDisplayModes`, in pixels: the current mode first, then one entry per usable size up to the display's native size, sorted by width then height, each at its highest refresh rate (0 when the display reports none), depth 32. The native size is always listed.
+- Surface. One window, titled, closable, miniaturisable and resizable, whose content view is layer-backed with a `CAMetalLayer`. The layer's `contentsGravity` is `kCAGravityResizeAspect` over a black background. A windowed or hidden surface has the view's size in pixels as its drawable size. A fullscreen surface (an exclusive mode, not hidden) has the mode's size, capped at the native size, as its drawable size; the host enters the window's native fullscreen with `toggleFullScreen:` and the layer scales the drawable to the screen with black bars where the aspect differs. There is no display mode switch.
+- Fullscreen timing. `toggleFullScreen:` is asynchronous and `createSurface` does not wait for it; the drawable has the mode's size from the start. Activation is a request that macOS may decline. When the window leaves its fullscreen Space, the drawable returns to the view's size in pixels; a windowed surface that the user takes fullscreen keeps following the view.
+- Visibility. `visible()` is false while the window is miniaturised or fully occluded, which includes another Space, cmd-H and a sleeping display. A surface created hidden is never ordered in and counts as visible unless miniaturised.
+- Size changes. `pollSizeChange()` is true once after the view resized, its backing scale or screen changed, or the window entered or left fullscreen, and whenever the drawable size or scale differs from the last report.
+- Teardown. `destroySurface` orders the window out and closes it. AppKit releases the window-server window only at the next event pump after that.
 
 ## Scope
 
@@ -249,7 +263,7 @@ premake5 gmake2
 make -C build config=release_macosx-arm64-metal librw
 ```
 
-The library is `lib/macosx-arm64-metal/Release/librw.a`. A host that builds librw itself defines `RW_METAL` and, for the GLFW host, `LIBRW_GLFW`, compiles `src/metal/*.mm` as Objective-C++ with `-fobjc-arc`, leaves `src/metal` out of other platforms, targets macOS 14, and links `Metal`, `QuartzCore`, `Cocoa` and `glfw`. Set `HOMEBREW_PREFIX` if Homebrew is not in `/opt/homebrew`.
+The library is `lib/macosx-arm64-metal/Release/librw.a`. A host that builds librw itself defines `RW_METAL` and, for the GLFW host, `LIBRW_GLFW`, compiles `src/metal/*.mm` as Objective-C++ with `-fobjc-arc`, leaves `src/metal` out of other platforms, targets macOS 14, and links `Metal`, `QuartzCore`, `Cocoa` and `glfw`. Set `HOMEBREW_PREFIX` if Homebrew is not in `/opt/homebrew`. For the Cocoa host define `LIBRW_COCOA` instead of `LIBRW_GLFW` and link `AppKit` instead of `Cocoa` and `glfw`; build it with `make -C build config=release_macosx-arm64-metal-cocoa librw`, which writes `lib/macosx-arm64-metal-cocoa/Release/librw.a`.
 
 ## Tests
 
@@ -257,11 +271,13 @@ The library is `lib/macosx-arm64-metal/Release/librw.a`. A host that builds libr
 bash tests/metal/build.sh
 bash tests/metal/run.sh
 METAL_SMOKE_ASAN=1 bash tests/metal/build.sh && METAL_SMOKE_ASAN=1 bash tests/metal/run.sh
+METAL_SMOKE_HOST=cocoa bash tests/metal/build.sh && METAL_SMOKE_HOST=cocoa bash tests/metal/run.sh
 ```
 
 - `tests/metal/pure/` holds seven tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes). They need no GPU.
-- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden GLFW window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. It prints `PASS` or `FAIL` for each of its 273 checks and ends with `all tests passed`.
-- The ASan build instruments the test code, not the library.
+- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU and a display. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. With the GLFW host it prints `PASS` or `FAIL` for each of its 273 checks; with `METAL_SMOKE_HOST=cocoa` it opens the Cocoa host instead, runs the same 273 checks and 7 more for the Cocoa window (280), and skips the pure tests. Both end with `all tests passed`, and both print the same 273 check names for the checks they share. The Cocoa window is never ordered in: nothing appears on screen.
+- The Cocoa run covers only the hidden window. Showing a window, entering and leaving fullscreen and activating the application need a run with a shown window, and a Retina display needs a run on a display with a backing scale above 1.
+- The ASan build instruments the test code, not the library. `METAL_SMOKE_ASAN=1` combines with either host.
 - A host can add its own checks to the same run: compile `tests/metal/smoke/*.cpp` and `*.mm` except `no_host_checks.cpp`, and define `RunHostChecks(camera)` and `RunRestartHostChecks(restart, camera)` (`host_checks.h`). The driver calls the first after its render-target checks and the second after its restart render-target checks, before the multisampling checks, with the engine running.
 
 ## Changes to shared librw code
@@ -277,7 +293,7 @@ These apply only when `RW_METAL` is defined:
 - `src/raster.cpp`: conversion of native D3D8, D3D9 and Xbox textures to Metal, with DXT kept compressed; the alpha flag of a converted uncompressed texture comes from its level-0 texels.
 - Platform registration in `rw.h`, `src/rwbase.h`, `base.cpp`, `charset.cpp`, `engine.cpp`, `geoplg.cpp`, `matfx.cpp`, `skin.cpp`, `texture.cpp`.
 
-`src/CMakeLists.txt` exports `LIBRW_GLFW` as a public definition for GLFW builds, as `LIBRW_SDL2` already was. `premake5.lua` adds the `macosx-arm64-metal` platform, leaves `src/metal` out of other platforms and the tool projects out of macOS, and adds the Metal test projects.
+`src/CMakeLists.txt` exports `LIBRW_GLFW` as a public definition for GLFW builds, as `LIBRW_SDL2` already was. `premake5.lua` adds the `macosx-arm64-metal` and `macosx-arm64-metal-cocoa` platforms, leaves `src/metal` out of other platforms and the tool projects out of macOS, and adds the Metal test projects.
 
 ## Known defects outside the Metal backend
 
