@@ -4497,6 +4497,112 @@ CheckLayerFollowsResize(void)
 	return Report(ok, "the layer's drawable follows a window resize at the next frame");
 }
 
+#ifdef LIBRW_COCOA
+static bool
+CheckCocoaModeList(void)
+{
+	metal::MetalHost *host = Host();
+	int32 num = 0;
+	const metal::MetalHostMode *modes = host->getModes(0, &num);
+	int cw = 0, ch = 0, nw = 0, nh = 0;
+	bool native = false;
+	bool ok = host == &metal::cocoaHost && modes && num >= 2 &&
+	          CocoaCurrentDisplayPixels(&cw, &ch) && CocoaNativeDisplayPixels(&nw, &nh);
+	ok = ok && modes[0].flags == 0 && modes[0].width == cw && modes[0].height == ch && modes[0].depth == 32;
+	for(int32 i = 1; ok && i < num; i++){
+		const metal::MetalHostMode *m = &modes[i];
+		if(m->flags != VIDEOMODEEXCLUSIVE || m->depth != 32 || m->width > nw || m->height > nh){
+			Detail("  mode %d %dx%dx%d flags %u, native %dx%d\n", i, m->width, m->height, m->depth, m->flags, nw, nh);
+			ok = false;
+		}
+		if(i > 1 && (m->width < modes[i-1].width || (m->width == modes[i-1].width && m->height <= modes[i-1].height))){
+			Detail("  mode %d %dx%d is not after mode %d %dx%d\n", i, m->width, m->height, i-1, modes[i-1].width, modes[i-1].height);
+			ok = false;
+		}
+		if(m->width == nw && m->height == nh)
+			native = true;
+	}
+	if(ok && !native)
+		Detail("  native %dx%d is not listed\n", nw, nh);
+	ok = ok && native;
+	if(!ok)
+		Detail("  %d modes, entry 0 %dx%d flags %u, display current %dx%d\n", num,
+		       modes ? modes[0].width : 0, modes ? modes[0].height : 0, modes ? modes[0].flags : 0, cw, ch);
+	return Report(ok, "the Cocoa host lists the current mode first, then each size up to the display's native size in order");
+}
+
+static bool
+CheckCocoaSurfaceMatchesView(void)
+{
+	metal::MetalHost *host = Host();
+	int vw = 0, vh = 0;
+	int32 ew = 0, eh = 0, hw = 0, hh = 0;
+	CocoaLayerInfo li = {};
+	WindowSize(&vw, &vh);
+	float scale = WindowContentScale();
+	metal::hostWindowDrawable((float)vw, (float)vh, scale, &ew, &eh);
+	host->drawableSize(&hw, &hh);
+	bool ok = CocoaLayerInfoOf(ctx.window, &li) && li.hostView && li.metalLayer && li.deviceLayer;
+	ok = ok && hw == ew && hh == eh && li.drawableWidth == ew && li.drawableHeight == eh;
+	ok = ok && host->backingScale() == scale && li.contentsScale == scale;
+	if(!ok)
+		Detail("  view %dx%d scale %.2f, expected %dx%d, host %dx%d scale %.2f, layer %dx%d scale %.2f, host view %d metal %d device %d\n",
+		       vw, vh, scale, ew, eh, hw, hh, host->backingScale(), li.drawableWidth, li.drawableHeight, li.contentsScale,
+		       li.hostView, li.metalLayer, li.deviceLayer);
+	return Report(ok, "the Cocoa window's content view hosts the device's layer at the view's size in pixels");
+}
+
+static bool
+CheckCocoaWindowOffScreen(void)
+{
+	CocoaWindowInfo info = {};
+	int onScreen = 1;
+	bool listed = CocoaWindowInfoOf(ctx.window, &info) && CocoaServerWindow(info.number, &onScreen);
+	bool ok = listed && !onScreen && !info.shown && !info.key && !info.miniaturized && info.accessory &&
+	          Host()->visible();
+	if(!ok)
+		Detail("  listed %d, on screen %d, shown %d, key %d, miniaturised %d, occlusion visible %d, accessory %d, host visible %d\n",
+		       listed, onScreen, info.shown, info.key, info.miniaturized, info.occlusionVisible, info.accessory, Host()->visible());
+	return Report(ok, "the hidden Cocoa window stays off screen without focus, and counts as visible for rendering");
+}
+
+static bool
+CheckCocoaSizeChangeReported(void)
+{
+	metal::MetalHost *host = Host();
+	DrawFrame(GREY);
+	bool before = host->pollSizeChange();
+	SetWindowSize(700, 500);
+	SetWindowSize(640, 480);
+	bool first = host->pollSizeChange();
+	bool second = host->pollSizeChange();
+	DrawFrame(GREY);
+	bool ok = !before && first && !second && LayerMatchesWindow();
+	if(!ok)
+		Detail("  before %d, after a resize and back %d, again %d; expected 0, 1, 0\n", before, first, second);
+	return Report(ok, "a resize that ends at the starting size still reports one size change");
+}
+
+static bool
+CheckCocoaLayerFollowsOddSize(void)
+{
+	int32 ew = 0, eh = 0;
+	int lw = 0, lh = 0;
+	double ls = 0.0;
+	SetWindowSize(701, 433);
+	DrawFrame(GREY);
+	metal::hostWindowDrawable(701.0f, 433.0f, WindowContentScale(), &ew, &eh);
+	bool ok = LayerDrawableSize(&lw, &lh, &ls) && lw == ew && lh == eh && LayerMatchesWindow();
+	if(!ok)
+		Detail("  layer %dx%d after 701x433, expected %dx%d\n", lw, lh, ew, eh);
+	SetWindowSize(640, 480);
+	DrawFrame(GREY);
+	ok &= LayerMatchesWindow();
+	ok &= CornersAndCentreAre(GREY);
+	return Report(ok, "the layer's drawable follows a resize to an odd size at the next frame");
+}
+#endif
+
 static bool
 CheckNoDrawableWhileNotVisible(void)
 {
@@ -4575,6 +4681,13 @@ CheckHostTable(void)
 	CheckHostVisible();
 	CheckHostSizeChangeOnce();
 	CheckLayerFollowsResize();
+#ifdef LIBRW_COCOA
+	CheckCocoaModeList();
+	CheckCocoaSurfaceMatchesView();
+	CheckCocoaWindowOffScreen();
+	CheckCocoaSizeChangeReported();
+	CheckCocoaLayerFollowsOddSize();
+#endif
 }
 
 // logStats starts a new interval, so this runs before checks that draw
