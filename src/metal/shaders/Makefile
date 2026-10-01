@@ -1,4 +1,4 @@
-all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc emit_metal.inc output_metal.inc
+all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc emit_metal.inc output_metal.inc bloom_metal.inc bloomh_metal.inc
 
 header_metal.inc: header.metal
 	(echo 'const char *header_metal_src =';\
@@ -59,3 +59,13 @@ output_metal.inc: ../metaloutput.h
 	(echo 'const char *output_metal_src =';\
 	 sed 's/..*/"&\\n"/' ../metaloutput.h;\
 	 echo ';') >output_metal.inc
+
+bloom_metal.inc: bloom.metal
+	(echo 'const char *bloom_metal_src =';\
+	 sed 's/..*/"&\\n"/' bloom.metal;\
+	 echo ';') >bloom_metal.inc
+
+bloomh_metal.inc: ../metalbloom.h
+	(echo 'const char *bloomh_metal_src =';\
+	 sed 's/..*/"&\\n"/' ../metalbloom.h;\
+	 echo ';') >bloomh_metal.inc

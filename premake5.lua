@@ -429,6 +429,7 @@ if os.istarget("macosx") then
 	metalpuretest("metal_phase_test", nil)
 	metalpuretest("metal_sceneblend_test", nil)
 	metalpuretest("metal_output_test", nil)
+	metalpuretest("metal_bloom_test", nil)
 
 	project "metal_smoke"
 		kind "ConsoleApp"

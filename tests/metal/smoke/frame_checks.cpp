@@ -749,6 +749,125 @@ CheckGradeCompileFailure(void)
 	return Report(ok, name);
 }
 
+static void
+BloomFrame(RGBA clear, float x0, float y0, float x1, float y1, float scale, float weight)
+{
+	metal::GradeParams p = { 0, nil, 0, weight };
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	Begin(clear);
+	if(x1 > x0){
+		metal::setEmissiveScale(scale);
+		Quad(x0, y0, x1, y1, white, DRAW_ADD);
+		metal::setEmissiveScale(1.0f);
+	}
+	metal::endScene(&p);
+}
+
+static bool
+CheckBloomWeight(void)
+{
+	const char *name = "a bloom weight of zero stays within 1/255 of classic and a positive weight changes the frame";
+	RGBA black = { 0, 0, 0, 255 };
+	SetTier(metal::TIER_CLASSIC);
+	Begin(black);
+	Quad(300, 220, 340, 260, RGBA{ 255, 255, 255, 255 }, DRAW_ADD);
+	Finish();
+	uint8 *classic = Composite();
+	EnhancedOn();
+	BloomFrame(black, 300, 220, 340, 260, 1.0f, 0.0f);
+	Finish();
+	uint8 *zero = Composite();
+	BloomFrame(black, 300, 220, 340, 260, 1.0f, 0.5f);
+	Finish();
+	uint8 *some = Composite();
+	EnhancedOff();
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	bool same = classic && zero && WithinOneStep(classic, zero);
+	bool differs = zero && some && memcmp(zero, some, w*h*4) != 0;
+	if(!same || !differs)
+		Detail("  weight 0 within one step of classic: %d; weight 0.5 differs: %d\n", same, differs);
+	delete[] classic;
+	delete[] zero;
+	delete[] some;
+	return Report(same && differs, name);
+}
+
+static float
+BloomAt(float softness, int x, int y)
+{
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.softness = softness;
+	metal::setRenderSettings(&s);
+	RGBA black = { 0, 0, 0, 255 };
+	BloomFrame(black, 312, 232, 328, 248, 8.0f, 1.0f);
+	float o[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	metal::readFrameOutput(x, y, o);
+	Finish();
+	return o[1];
+}
+
+static bool
+CheckBloomSpread(void)
+{
+	const char *name = "bloom spreads a bright block into its surroundings, wider with more softness";
+	float32 softness = metal::getRenderSettings().softness;
+	EnhancedOn();
+	float near0 = BloomAt(0.0f, 340, 240);
+	float far0 = BloomAt(0.0f, 380, 240);
+	float far3 = BloomAt(3.0f, 380, 240);
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.softness = softness;
+	metal::setRenderSettings(&s);
+	EnhancedOff();
+	bool ok = near0 > far0 && far0 > 0.0f && far3 > far0*1.1f;
+	if(!ok)
+		Detail("  softness 0: %.5f at 12 px, %.5f at 52 px; softness 3: %.5f at 52 px\n", near0, far0, far3);
+	return Report(ok, name);
+}
+
+static bool
+CheckBloomFlat(void)
+{
+	const char *name = "bloom keeps a flat frame flat";
+	RGBA grey = { 102, 102, 102, 255 };
+	EnhancedOn();
+	BloomFrame(grey, 0, 0, 0, 0, 1.0f, 1.0f);
+	float a[4], b[4], c[4];
+	bool read = metal::readFrameOutput(0, 0, a) && metal::readFrameOutput(320, 240, b) &&
+		metal::readFrameOutput(cam->frameBuffer->width-1, cam->frameBuffer->height-1, c);
+	Finish();
+	EnhancedOff();
+	float v = 102/255.0f;
+	bool ok = read && NearF(a[0], v, 1.5f/255.0f) && NearF(b[0], v, 1.5f/255.0f) && NearF(c[0], v, 1.5f/255.0f) &&
+		NearF(b[2], v, 1.5f/255.0f);
+	if(read && !ok)
+		Detail("  corner %.4f centre %.4f far corner %.4f, expected %.4f\n", a[0], b[0], c[0], v);
+	return Report(ok, name);
+}
+
+static bool
+CheckBloomFirefly(void)
+{
+	const char *name = "the Karis average keeps a single bright pixel from flooding the bloom";
+	RGBA black = { 0, 0, 0, 255 };
+	float on[4], off[4];
+	EnhancedOn();
+	BloomFrame(black, 200, 200, 201, 201, 64.0f, 1.0f);
+	bool r1 = metal::readFrameOutput(206, 200, on);
+	Finish();
+	metal::setBloomKarisForTest(0);
+	BloomFrame(black, 200, 200, 201, 201, 64.0f, 1.0f);
+	bool r2 = metal::readFrameOutput(206, 200, off);
+	Finish();
+	metal::setBloomKarisForTest(1);
+	EnhancedOff();
+	bool ok = r1 && r2 && off[0] > 0.0f && on[0] < 0.25f*off[0];
+	if(!ok)
+		Detail("  6 px from the pixel: %.5f with the Karis average, %.5f without\n", on[0], off[0]);
+	return Report(ok, name);
+}
+
 static bool
 CheckGradeSourceCached(void)
 {
@@ -1101,6 +1220,10 @@ RunFrameChecks(Camera *camera)
 	CheckHostGrade();
 	CheckGradeAboveWhite();
 	CheckGradeCompileFailure();
+	CheckBloomWeight();
+	CheckBloomSpread();
+	CheckBloomFlat();
+	CheckBloomFirefly();
 	CheckGradeSourceCached();
 	CheckGradeConstantsPadded();
 	CheckEmissiveReset();

@@ -4,6 +4,7 @@
 #include "metalstate.h"
 #include "metalkeys.h"
 #include "rwmetalshader.h"
+#include "metalbloom.h"
 #include <string>
 
 namespace rw {
@@ -12,6 +13,8 @@ namespace metal {
 #include "shaders/frame_metal.inc"
 #include "shaders/grade_metal.inc"
 #include "shaders/output_metal.inc"
+#include "shaders/bloom_metal.inc"
+#include "shaders/bloomh_metal.inc"
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -65,6 +68,9 @@ struct FrameState
 	bool32 gradeResult = 0;
 	uint32 gradeBuilds = 0;
 	id<MTLRenderPipelineState> compositeBGRA = nil, copyScene = nil, copyPost = nil;
+	id<MTLTexture> bloomDown[BLOOM_LEVELS], bloomUp[BLOOM_LEVELS];
+	id<MTLComputePipelineState> bloomDownFirst = nil, bloomDownPipe = nil, bloomUpPipe = nil;
+	bool karis = true;
 	char tail[256] = "";
 };
 
@@ -312,6 +318,18 @@ frameInit(void)
 		frame.gradeResult = frame.grade != nil;
 		if(frame.grade == nil)
 			fprintf(stderr, "rw::metal: grade kernel failed to build: %s\n", err ? err.UTF8String : "");
+		const char *bloomParts[] = { frameHead, bloomh_metal_src, bloom_metal_src, nil };
+		id<MTLLibrary> bloomLib = frameLibrary(bloomParts, &err);
+		if(bloomLib){
+			NSError *perr = nil;
+			id<MTLDevice> dev = getContext()->device;
+			frame.bloomDownFirst = [dev newComputePipelineStateWithFunction:[bloomLib newFunctionWithName:@"bloomDownFirst"] error:&perr];
+			frame.bloomDownPipe = [dev newComputePipelineStateWithFunction:[bloomLib newFunctionWithName:@"bloomDown"] error:&perr];
+			frame.bloomUpPipe = [dev newComputePipelineStateWithFunction:[bloomLib newFunctionWithName:@"bloomUp"] error:&perr];
+		}else{
+			frame.bloomDownFirst = frame.bloomDownPipe = frame.bloomUpPipe = nil;
+			fprintf(stderr, "rw::metal: bloom shaders failed to compile: %s\n", err ? err.UTF8String : "");
+		}
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -337,6 +355,10 @@ dropSceneTargets(void)
 	}
 	frame.dropping = false;
 	frame.output = nil;
+	for(int i = 0; i < BLOOM_LEVELS; i++){
+		frame.bloomDown[i] = nil;
+		frame.bloomUp[i] = nil;
+	}
 	frame.mainColor = nil;
 	frame.mainDepth = nil;
 	frame.internalWidth = frame.internalHeight = 0;
@@ -378,19 +400,88 @@ ensureSceneTargets(Raster *main, Raster *depth)
 	return true;
 }
 
+void
+setBloomKarisForTest(bool32 on)
+{
+	frame.karis = on != 0;
+}
+
+static void
+dispatchOver(id<MTLComputeCommandEncoder> enc, id<MTLTexture> t)
+{
+	[enc dispatchThreads:MTLSizeMake(t.width, t.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+}
+
+static void
+encodeBloom(void)
+{
+	uint32 karis = frame.karis ? 1 : 0;
+	float32 radius = bloomRadius(frame.settings.softness);
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:frame.bloomDownFirst];
+	[enc setTexture:getRasterTexture(frame.sceneBase) atIndex:0];
+	[enc setTexture:frame.bloomDown[0] atIndex:2];
+	[enc setBytes:&karis length:sizeof(karis) atIndex:0];
+	dispatchOver(enc, frame.bloomDown[0]);
+	[enc setComputePipelineState:frame.bloomDownPipe];
+	for(int i = 1; i < BLOOM_LEVELS; i++){
+		[enc setTexture:frame.bloomDown[i-1] atIndex:0];
+		[enc setTexture:frame.bloomDown[i] atIndex:2];
+		dispatchOver(enc, frame.bloomDown[i]);
+	}
+	[enc setComputePipelineState:frame.bloomUpPipe];
+	[enc setBytes:&radius length:sizeof(radius) atIndex:0];
+	id<MTLTexture> lower = frame.bloomDown[BLOOM_LEVELS-1];
+	for(int i = BLOOM_LEVELS-2; i >= 0; i--){
+		[enc setTexture:lower atIndex:0];
+		[enc setTexture:frame.bloomDown[i] atIndex:1];
+		[enc setTexture:frame.bloomUp[i] atIndex:2];
+		dispatchOver(enc, frame.bloomUp[i]);
+		lower = frame.bloomUp[i];
+	}
+	[enc endEncoding];
+}
+
+static bool
+ensureBloomTargets(void)
+{
+	if(frame.bloomDown[0] && frame.bloomUp[0])
+		return true;
+	for(int i = 0; i < BLOOM_LEVELS; i++){
+		int32 bw = bloomLevelSpan(frame.internalWidth, i), bh = bloomLevelSpan(frame.internalHeight, i);
+		frame.bloomDown[i] = newTexture(MTLPixelFormatRGBA16Float, bw, bh, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1);
+		frame.bloomUp[i] = i < BLOOM_LEVELS-1 ?
+			newTexture(MTLPixelFormatRGBA16Float, bw, bh, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1) : nil;
+		if(frame.bloomDown[i] == nil || (i < BLOOM_LEVELS-1 && frame.bloomUp[i] == nil)){
+			for(int j = 0; j < BLOOM_LEVELS; j++){
+				frame.bloomDown[j] = nil;
+				frame.bloomUp[j] = nil;
+			}
+			return false;
+		}
+	}
+	return true;
+}
+
 static void
 encodeGrade(const GradeParams *p)
 {
-	GradeFrame g = { 0.0f, p && p->grade ? 1u : 0u, 0.0f, 0.0f };
+	float32 weight = p ? clampRange(p->bloomWeight, 0.0f, 1.0f, 0.0f) : 0.0f;
 	float32 constants[MAXGRADECONSTANTS*4] = {};
 
+	if(frame.bloomDownFirst == nil || frame.bloomDownPipe == nil || frame.bloomUpPipe == nil ||
+	   (weight > 0.0f && !ensureBloomTargets()))
+		weight = 0.0f;
 	if(p && p->constants && p->numConstants > 0)
 		memcpy(constants, p->constants, (p->numConstants > MAXGRADECONSTANTS ? MAXGRADECONSTANTS : p->numConstants)*4*sizeof(float32));
-	frame.bloomWeight = 0.0f;
+	if(weight > 0.0f)
+		encodeBloom();
+	frame.bloomWeight = weight;
+	GradeFrame g = { weight, p && p->grade ? 1u : 0u, 1.0f/BLOOM_LEVELS, 0.0f };
 	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
 	[enc setComputePipelineState:frame.grade];
 	[enc setTexture:getRasterTexture(frame.sceneBase) atIndex:0];
-	[enc setTexture:frame.black atIndex:2];
+	[enc setTexture:weight > 0.0f ? frame.bloomUp[0] : frame.black atIndex:2];
 	[enc setTexture:frame.output atIndex:3];
 	[enc setBytes:&g length:sizeof(g) atIndex:0];
 	[enc setBytes:constants length:sizeof(constants) atIndex:1];

@@ -13,7 +13,7 @@
 
 The device owns no window. `EngineOpenParams::host` points to a `MetalHost` table (`rwmetal.h`) of thirteen functions that open the window system, describe the displays and create the surface the backend presents to. When `host` is `nil` the device uses `metal::glfwHost`, which exists only when `LIBRW_GLFW` is defined and writes the `GLFWwindow` it creates through `EngineOpenParams::window`. Without `LIBRW_GLFW`, a nil `host` selects `metal::cocoaHost` when `LIBRW_COCOA` is defined; without either, the device reports "no window host".
 
-A native macOS application, one that runs its own `NSApplication`, menus and input, uses the Cocoa host, and nothing in its build links GLFW. The GLFW host is for applications that already open their window with GLFW, and for the smoke test's default configuration. Both hosts run the same 302 checks; the Cocoa host adds seven of its own.
+A native macOS application, one that runs its own `NSApplication`, menus and input, uses the Cocoa host, and nothing in its build links GLFW. The GLFW host is for applications that already open their window with GLFW, and for the smoke test's default configuration. Both hosts run the same 306 checks; the Cocoa host adds seven of its own.
 
 The library and every host must be built with the same `LIBRW_GLFW` and `LIBRW_COCOA` settings. The `window` and `cocoaWindow` fields of `EngineOpenParams` exist only under them, so the layout of the struct depends on them.
 
@@ -236,6 +236,10 @@ The grade is a compute kernel. Its library is `#include <metal_stdlib>`, `using 
 
 The SDR composite leaves every pixel whose channels are all at or below 1.0 unchanged. A pixel above white moves every channel toward 1.0 by `(m - 1) / (m - 1 + 1)`, where `m` is its brightest channel, so a bright emitter turns white-hot instead of clipping one channel.
 
+### Bloom
+
+With a positive `GradeParams::bloomWeight`, `endScene` builds a six-level pyramid from the RGBA16F scene colour before the grade. The first level is a 13-tap downsample with Karis-weighted groups, so one very bright pixel cannot flood the glow. Each level is upsampled with a tent filter whose reach is `0.5 + 0.5 x softness` texels of the level below. The grade mixes the result into the scene by the weight (`mix(scene, bloom, weight)`), so the grade colours the glow. There is no threshold: everything blooms a little, emitters most. A weight of 0 skips the pyramid.
+
 ## Log lines
 
 The backend writes these lines to stderr, each starting with `rw::metal:`. Errors such as a pipeline that fails to build, an oversized custom block or a texture that cannot be created go through librw's error mechanism (`RWERROR`) instead.
@@ -302,8 +306,8 @@ METAL_SMOKE_ASAN=1 bash tests/metal/build.sh && METAL_SMOKE_ASAN=1 bash tests/me
 METAL_SMOKE_HOST=cocoa bash tests/metal/build.sh && METAL_SMOKE_HOST=cocoa bash tests/metal/run.sh
 ```
 
-- `tests/metal/pure/` holds eleven tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes, render settings, frame phases and scene routing, scene blend sources, the SDR shoulder). They need no GPU.
-- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU and a display. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. With the GLFW host it prints `PASS` or `FAIL` for each of its 302 checks; with `METAL_SMOKE_HOST=cocoa` it opens the Cocoa host instead, runs the same 302 checks and 7 more for the Cocoa window (309), and skips the pure tests. Both end with `all tests passed`, and both print the same 302 check names for the checks they share. The Cocoa window is never ordered in: nothing appears on screen.
+- `tests/metal/pure/` holds twelve tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes, render settings, frame phases and scene routing, scene blend sources, the SDR shoulder, the bloom pyramid). They need no GPU.
+- `tests/metal/smoke/` drives the whole backend on the GPU with a hidden window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU and a display. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. With the GLFW host it prints `PASS` or `FAIL` for each of its 306 checks; with `METAL_SMOKE_HOST=cocoa` it opens the Cocoa host instead, runs the same 306 checks and 7 more for the Cocoa window (313), and skips the pure tests. Both end with `all tests passed`, and both print the same 306 check names for the checks they share. The Cocoa window is never ordered in: nothing appears on screen.
 - The Cocoa run covers only the hidden window. Showing a window, entering and leaving fullscreen and activating the application need a run with a shown window, and a Retina display needs a run on a display with a backing scale above 1.
 - The ASan build instruments the test code, not the library. `METAL_SMOKE_ASAN=1` combines with either host.
 - A host can add its own checks to the same run: compile `tests/metal/smoke/*.cpp` and `*.mm` except `no_host_checks.cpp`, and define `RunHostChecks(camera)` and `RunRestartHostChecks(restart, camera)` (`host_checks.h`). The driver calls the first after its render-target checks and the second after its restart render-target checks, before the multisampling checks, with the engine running.
