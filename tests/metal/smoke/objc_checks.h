@@ -9,3 +9,4 @@ bool BeginTestEncoder(void);
 void EndTestEncoder(void);
 void RunInPool(void (*fn)(void *arg), void *arg);
 bool DefaultSamplePositions(int count, float *xy);
+bool LayerDrawableSize(int *width, int *height, double *scale);

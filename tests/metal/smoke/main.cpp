@@ -109,12 +109,18 @@ Clear(RGBA col, uint32 mode)
 }
 
 static void
-DrawFrame(RGBA col)
+DrawFrameFlags(RGBA col, uint32 flags)
 {
 	Clear(col, Camera::CLEARIMAGE | Camera::CLEARZ | Camera::CLEARSTENCIL);
 	ctx.camera->beginUpdate();
 	ctx.camera->endUpdate();
-	ctx.camera->showRaster(0);
+	ctx.camera->showRaster(flags);
+}
+
+static void
+DrawFrame(RGBA col)
+{
+	DrawFrameFlags(col, 0);
 }
 
 static bool
@@ -4311,6 +4317,158 @@ CheckIm2D(void)
 	CheckAutoMipmapInFrame();
 }
 
+static metal::MetalHost*
+Host(void)
+{
+	return metal::metalGlobals.host;
+}
+
+static bool
+CheckHostModes(void)
+{
+	metal::MetalHost *host = Host();
+	int32 num = 0;
+	const metal::MetalHostMode *modes = host ? host->getModes(0, &num) : nil;
+	bool ok = modes && num > 0 && modes[0].flags == 0;
+	if(!ok)
+		Detail("  %d modes, entry 0 flags %u\n", num, modes ? modes[0].flags : 0);
+	for(int32 i = 1; ok && i < num; i++)
+		if(modes[i].flags != VIDEOMODEEXCLUSIVE){
+			Detail("  mode %d flags %u, expected exclusive\n", i, modes[i].flags);
+			ok = false;
+		}
+	if(ok && Engine::getNumVideoModes() != num){
+		Detail("  engine lists %d modes, host %d\n", Engine::getNumVideoModes(), num);
+		ok = false;
+	}
+	for(int32 i = 0; ok && i < num; i++){
+		VideoMode vm;
+		Engine::getVideoModeInfo(&vm, i);
+		if(vm.width != modes[i].width || vm.height != modes[i].height ||
+		   vm.depth != modes[i].depth || vm.flags != modes[i].flags){
+			Detail("  mode %d engine %dx%dx%d flags %u, host %dx%dx%d flags %u\n", i,
+			       vm.width, vm.height, vm.depth, vm.flags,
+			       modes[i].width, modes[i].height, modes[i].depth, modes[i].flags);
+			ok = false;
+		}
+	}
+	if(ok && Engine::getNumSubSystems() != host->numDisplays()){
+		Detail("  engine lists %d subsystems, host %d displays\n", Engine::getNumSubSystems(), host->numDisplays());
+		ok = false;
+	}
+	if(ok && host->numDisplays() > 0){
+		SubSystemInfo info;
+		Engine::getSubSystemInfo(&info, 0);
+		if(strncmp(info.name, host->displayName(0), sizeof(info.name)-1) != 0){
+			Detail("  subsystem 0 \"%.*s\", display 0 \"%s\"\n", (int)sizeof(info.name)-1, info.name, host->displayName(0));
+			ok = false;
+		}
+	}
+	return Report(ok, "the default host lists modes with the windowed entry first, and the engine reports them");
+}
+
+static bool
+CheckHostDisplayMode(void)
+{
+	metal::MetalHost *host = Host();
+	int32 num = 0;
+	const metal::MetalHostMode *modes = host->getModes(0, &num);
+	metal::MetalHostMode cur;
+	bool ok;
+	if(host->numDisplays() == 0)
+		ok = !host->displayMode(0, &cur) && num == 1;
+	else
+		ok = host->displayMode(0, &cur) && cur.width == modes[0].width && cur.height == modes[0].height &&
+		     cur.depth == modes[0].depth && cur.refresh == modes[0].refresh;
+	if(!ok)
+		Detail("  display 0 mode %dx%dx%d at %d, windowed entry %dx%dx%d at %d\n",
+		       cur.width, cur.height, cur.depth, cur.refresh,
+		       modes[0].width, modes[0].height, modes[0].depth, modes[0].refresh);
+	return Report(ok, "the windowed entry is the display's current mode");
+}
+
+static bool
+CheckHostSurfaceSize(void)
+{
+	metal::MetalHost *host = Host();
+	int fw, fh, ww, wh, lw = 0, lh = 0;
+	double ls = 0.0;
+	int32 hw, hh;
+	glfwGetFramebufferSize(ctx.window, &fw, &fh);
+	glfwGetWindowSize(ctx.window, &ww, &wh);
+	host->drawableSize(&hw, &hh);
+	float32 scale = host->backingScale();
+	bool ok = ww == 640 && wh == 480 && hw == fw && hh == fh;
+	ok = ok && scale > 0.0f && fw == (int)(ww*scale) && fh == (int)(wh*scale);
+	ok = ok && LayerDrawableSize(&lw, &lh, &ls) && lw == fw && lh == fh && ls == scale;
+	if(!ok)
+		Detail("  window %dx%d, framebuffer %dx%d, host %dx%d scale %.2f, layer %dx%d scale %.2f\n",
+		       ww, wh, fw, fh, hw, hh, scale, lw, lh, ls);
+	return Report(ok, "the host's drawable size and backing scale match the window and the layer");
+}
+
+static bool
+CheckHostVisible(void)
+{
+	bool ok = Host()->visible() && !glfwGetWindowAttrib(ctx.window, GLFW_VISIBLE);
+	if(!ok)
+		Detail("  host visible %d, window visible %d\n", Host()->visible(), glfwGetWindowAttrib(ctx.window, GLFW_VISIBLE));
+	return Report(ok, "a window created hidden counts as visible for rendering");
+}
+
+static bool
+CheckHostSizeChangeOnce(void)
+{
+	metal::MetalHost *host = Host();
+	DrawFrame(GREY);
+	bool before = host->pollSizeChange();
+	glfwSetWindowSize(ctx.window, 700, 500);
+	bool first = host->pollSizeChange();
+	bool second = host->pollSizeChange();
+	glfwSetWindowSize(ctx.window, 640, 480);
+	DrawFrame(GREY);
+	bool ok = !before && first && !second;
+	if(!ok)
+		Detail("  before %d, after resize %d, again %d; expected 0, 1, 0\n", before, first, second);
+	return Report(ok, "the host reports a size change once");
+}
+
+static bool
+LayerMatchesWindow(void)
+{
+	int fw, fh, lw = 0, lh = 0;
+	double ls;
+	glfwGetFramebufferSize(ctx.window, &fw, &fh);
+	bool ok = LayerDrawableSize(&lw, &lh, &ls) && lw == fw && lh == fh;
+	if(!ok)
+		Detail("  layer %dx%d, framebuffer %dx%d\n", lw, lh, fw, fh);
+	return ok;
+}
+
+static bool
+CheckLayerFollowsResize(void)
+{
+	glfwSetWindowSize(ctx.window, 720, 540);
+	DrawFrame(GREY);
+	bool ok = LayerMatchesWindow();
+	glfwSetWindowSize(ctx.window, 640, 480);
+	DrawFrame(GREY);
+	ok &= LayerMatchesWindow();
+	ok &= CornersAndCentreAre(GREY);
+	return Report(ok, "the layer's drawable follows a window resize at the next frame");
+}
+
+static void
+CheckHostTable(void)
+{
+	CheckHostModes();
+	CheckHostDisplayMode();
+	CheckHostSurfaceSize();
+	CheckHostVisible();
+	CheckHostSizeChangeOnce();
+	CheckLayerFollowsResize();
+}
+
 static bool
 CheckResize(void)
 {
@@ -4416,6 +4574,7 @@ main(void)
 	failures += RunMatFXChecks(ctx.camera);
 	failures += RunTargetChecks(ctx.camera);
 	failures += RunHostChecks(ctx.camera);
+	CheckHostTable();
 	CheckResize();
 	metal::setCustomConstants(staleConstants, sizeof(staleConstants));
 	if(CheckRestart()){

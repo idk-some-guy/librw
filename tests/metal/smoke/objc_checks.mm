@@ -128,3 +128,15 @@ EndTestEncoder(void)
 		testCommandBuffer = nil;
 	}
 }
+
+bool
+LayerDrawableSize(int *width, int *height, double *scale)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil || ctx->layer == nil)
+		return false;
+	*width = (int)ctx->layer.drawableSize.width;
+	*height = (int)ctx->layer.drawableSize.height;
+	*scale = ctx->layer.contentsScale;
+	return true;
+}

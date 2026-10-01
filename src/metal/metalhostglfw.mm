@@ -32,7 +32,6 @@ struct GlfwGlobals
 };
 
 static GlfwGlobals glfwGlobals;
-static CAMetalLayer *surfaceLayer;
 
 static GLFWmonitor*
 monitorAt(int32 display)
@@ -131,6 +130,7 @@ makeWindowedModeList(int width, int height)
 	glfwGlobals.modes[0].flags = 0;
 	glfwGlobals.numModes = 1;
 	describeMode(&glfwGlobals.modes[0], &glfwGlobals.vidModes[0]);
+	glfwGlobals.modes[0].refresh = 0;
 }
 
 static bool32
@@ -168,6 +168,7 @@ openHost(EngineOpenParams *openparams)
 static void
 closeHost(void)
 {
+	freeModes();
 	glfwTerminate();
 }
 
@@ -258,7 +259,6 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 	view.layer = layer;
 	view.wantsLayer = YES;
 
-	surfaceLayer = layer;
 	glfwGlobals.window = win;
 	glfwGlobals.createdHidden = hidden;
 	glfwGlobals.lastWidth = w;
@@ -272,7 +272,6 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 static void
 destroySurface(void)
 {
-	surfaceLayer = nil;
 	glfwDestroyWindow(glfwGlobals.window);
 	glfwGlobals.window = nil;
 }
