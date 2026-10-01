@@ -226,8 +226,10 @@ createSurface(int32 display, int32 mode, bool32 windowed, bool32 hidden)
 	CAMetalLayer *layer;
 	int w, h;
 
-	if(glfwGlobals.vidModes == nil || mode < 0 || mode >= glfwGlobals.numModes)
+	if(glfwGlobals.vidModes == nil || mode < 0 || mode >= glfwGlobals.numModes){
+		RWERROR((ERR_GENERAL, "invalid video mode"));
 		return nil;
+	}
 	vm = &glfwGlobals.vidModes[mode];
 
 	glfwSetErrorCallback(glfwerr);

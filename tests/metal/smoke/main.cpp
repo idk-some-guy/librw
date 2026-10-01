@@ -4373,7 +4373,7 @@ CheckHostDisplayMode(void)
 	metal::MetalHost *host = Host();
 	int32 num = 0;
 	const metal::MetalHostMode *modes = host->getModes(0, &num);
-	metal::MetalHostMode cur;
+	metal::MetalHostMode cur = {};
 	bool ok;
 	if(host->numDisplays() == 0)
 		ok = !host->displayMode(0, &cur) && num == 1;
@@ -4448,9 +4448,16 @@ LayerMatchesWindow(void)
 static bool
 CheckLayerFollowsResize(void)
 {
+	int fw, fh;
+	float xs, ys;
 	glfwSetWindowSize(ctx.window, 720, 540);
 	DrawFrame(GREY);
-	bool ok = LayerMatchesWindow();
+	glfwGetFramebufferSize(ctx.window, &fw, &fh);
+	glfwGetWindowContentScale(ctx.window, &xs, &ys);
+	bool ok = fw == (int)(720*xs + 0.5f);
+	if(!ok)
+		Detail("  framebuffer %dx%d after the resize, scale %g\n", fw, fh, xs);
+	ok &= LayerMatchesWindow();
 	glfwSetWindowSize(ctx.window, 640, 480);
 	DrawFrame(GREY);
 	ok &= LayerMatchesWindow();

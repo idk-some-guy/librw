@@ -21,8 +21,8 @@ The device calls the table from the engine's device requests and from `showRaste
 
 | Entry | Called | Must |
 |---|---|---|
-| `open(params)` | `Engine::open`, before any other entry | Start the window system and read `width`, `height`, `windowtitle` and `hidden`. Report a failure with `RWERROR` and return 0. |
-| `close()` | `Engine::close`, and `Engine::open` when `getModes(0)` lists nothing | Shut the window system down. `Engine::close` calls it even after a failed `open`. |
+| `open(params)` | `Engine::open`, before any other entry except `close` | Start the window system and read `width`, `height`, `windowtitle` and `hidden`. Report a failure with `RWERROR` and return 0. |
+| `close()` | `Engine::close`, and `Engine::open` when `getModes(0)` lists nothing | Shut the window system down. `Engine::close` calls it even when `open` failed or never ran, so it must tolerate both. |
 | `numDisplays()` | `Engine::open`, `Engine::setSubSystem`, `Engine::getSubSystemInfo` | Return the number of displays, 0 when there are none. It must work before `open` succeeds and after `close`. |
 | `displayName(i)` | `Engine::getSubSystemInfo`, with `i` below the last `numDisplays()` | Return the display's name, never `nil`. Like `numDisplays`, it must work after `close`. |
 | `displayMode(i, &mode)` | not called by the device | Fill the display's current mode with `flags` 0; return 0 for an unknown display. |
@@ -41,7 +41,7 @@ Across the table, 0 means none or unknown: a count, a size, a scale or a rate of
 
 The host owns the mode arrays and the display names. A list stays valid until the next `getModes` or `close`, and a name until the next call; the device copies both at once. Entry 0 of a list is the windowed mode, the display's current mode with `flags` 0. Every other entry carries `VIDEOMODEEXCLUSIVE`.
 
-Displays are indexes, and display 0 is the main display. They are not stable: the GLFW host reads the display list again on every call, so connecting or removing a display can reorder them. The device takes its video modes from display 0 at `Engine::open`. The subsystem chosen with `Engine::setSubSystem` only picks the display a fullscreen surface goes to; `Engine::open` resets that choice to display 0.
+Displays are indexes, and display 0 is the main display. They are not stable: the GLFW host reads the display list again on every call, so connecting or removing a display can reorder them. The device takes its video modes from display 0 at `Engine::open`. The subsystem chosen with `Engine::setSubSystem` only picks the display a fullscreen surface goes to; `Engine::open` resets that fullscreen target to display 0, while the current subsystem that `Engine::getCurrentSubSystem` reports keeps its value.
 
 ### Surfaces
 
@@ -53,7 +53,7 @@ The host returns the layer without transferring ownership. It keeps the layer at
 
 `visible()` is false while the surface is minimised or hidden, for example with cmd-H. A surface created with `hidden` set counts as visible while it is not minimised: it renders and presents. The GLFW host does not consider occlusion, so a window behind others counts as visible.
 
-While the surface is not visible the device acquires no drawable and composites nothing. The camera still renders, and `showRaster` still finishes and counts the frame, which the statistics line reports under "frames without drawable". A frame shown with `FLIPWAITVSYNCH` then sleeps one refresh, and any other frame does not sleep. A visible surface that gets no drawable sleeps one refresh whatever the flags. While the application is hidden, macOS stretches these sleeps well past one refresh.
+While the surface is not visible the device acquires no drawable and composites nothing. The camera still renders, and `showRaster` still finishes and counts the frame, which the statistics line reports under "frames without drawable". A frame shown with `FLIPWAITVSYNCH` then sleeps one refresh, and any other frame does not sleep. A visible surface that gets no drawable sleeps one refresh whatever the flags. While the application is hidden, macOS can stretch these sleeps well past one refresh.
 
 ## Scope
 

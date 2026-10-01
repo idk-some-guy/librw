@@ -833,11 +833,11 @@ openDevice(EngineOpenParams *openparams)
 	if(host == nil)
 		host = &glfwHost;
 #endif
+	metalGlobals.host = host;
 	if(host == nil){
 		RWERROR((ERR_GENERAL, "no window host"));
 		return 0;
 	}
-	metalGlobals.host = host;
 	metalGlobals.winHidden = openparams->hidden;
 
 	@autoreleasepool {
@@ -871,6 +871,8 @@ openDevice(EngineOpenParams *openparams)
 static int
 closeDevice(void)
 {
+	if(metalGlobals.host == nil)
+		return 1;
 	@autoreleasepool {
 		metalGlobals.host->close();
 	}
@@ -884,7 +886,7 @@ startDevice(void)
 	MetalHostMode *mode;
 	CAMetalLayer *layer;
 
-	if(ctx == nil || metalGlobals.modes == nil)
+	if(ctx == nil || metalGlobals.host == nil || metalGlobals.modes == nil)
 		return 0;
 	mode = &metalGlobals.modes[metalGlobals.currentMode];
 
@@ -932,7 +934,8 @@ stopDevice(void)
 			ctx->layer = nil;
 		}
 		currentFrameBuffer = nil;
-		metalGlobals.host->destroySurface();
+		if(metalGlobals.host)
+			metalGlobals.host->destroySurface();
 	}
 	return 1;
 }
