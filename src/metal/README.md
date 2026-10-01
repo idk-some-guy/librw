@@ -59,7 +59,7 @@ While the surface is not visible the device acquires no drawable and composites 
 
 Define `LIBRW_COCOA` (the `macosx-arm64-metal-cocoa` platform does), link `AppKit`, `QuartzCore` and `Metal`, and pass `&metal::cocoaHost` as `host`, or leave `host` nil in a build without `LIBRW_GLFW`. The host writes the `NSWindow *` it creates, unretained, through `EngineOpenParams::cocoaWindow`, and writes `nil` there when it closes the window.
 
-- Application. If `NSApp` exists when `open` runs, the host uses it as it is. Otherwise it creates it and sets the activation policy: accessory for a hidden surface, regular for a shown one, which it also launches and activates when it shows the window. Create `NSApp` yourself before `Engine::open` to keep its policy, menu and delegate your own.
+- Application. If `NSApp` exists before the host's first `open`, the host uses it as it is. Otherwise it creates it and sets the activation policy: accessory for a hidden surface, regular for a shown one, which it also launches and activates when it shows the window. Create `NSApp` yourself before `Engine::open` to keep its policy, menu and delegate your own.
 - Events and input are the application's. The host runs no event loop and handles no keyboard, mouse or pad. Pump events once per frame on the main thread, for example with `nextEventMatchingMask:untilDate:inMode:dequeue:` and `sendEvent:` in an `@autoreleasepool`; without it, occlusion, backing-scale and fullscreen changes never arrive. The host observes the window through notifications and leaves its delegate to the application.
 - Autorelease pools. The device calls every host entry inside an `@autoreleasepool`. An application that calls AppKit itself without a run loop (no `[NSApp run]`) provides its own pools around those calls, or the objects AppKit autoreleases there, windows included, are never released.
 - Displays are `NSScreen.screens`, display 0 being the screen with the menu bar, named by `localizedName`. Modes come from `CGDisplayCopyAllDisplayModes`, in pixels: the current mode first, then one entry per usable size up to the display's native size, sorted by width then height, each at its highest refresh rate (0 when the display reports none), depth 32. The native size is always listed.
@@ -67,7 +67,7 @@ Define `LIBRW_COCOA` (the `macosx-arm64-metal-cocoa` platform does), link `AppKi
 - Fullscreen timing. `toggleFullScreen:` is asynchronous and `createSurface` does not wait for it; the drawable has the mode's size from the start. Activation is a request that macOS may decline. When the window leaves its fullscreen Space, the drawable returns to the view's size in pixels; a windowed surface that the user takes fullscreen keeps following the view.
 - Visibility. `visible()` is false while the window is miniaturised or fully occluded, which includes another Space, cmd-H and a sleeping display. A surface created hidden is never ordered in and counts as visible unless miniaturised.
 - Size changes. `pollSizeChange()` is true once after the view resized, its backing scale or screen changed, or the window entered or left fullscreen, and whenever the drawable size or scale differs from the last report.
-- Teardown. `destroySurface` orders the window out and closes it. AppKit releases the window-server window only at the next event pump after that.
+- Teardown. `destroySurface` orders the window out and closes it. AppKit releases the window-server window asynchronously once events are pumped after the close.
 
 ## Scope
 

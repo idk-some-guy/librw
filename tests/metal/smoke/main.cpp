@@ -4632,9 +4632,12 @@ CheckCocoaFullscreenLetterbox(void)
 		if(!ok)
 			Detail("  %dx%d on a %dx%d screen fits at %d,%d %dx%d\n", w, h, sw, sh, fit.x, fit.y, fit.width, fit.height);
 	}
-	ok = ok && CocoaLayerInfoOf(ctx.window, &li) && li.gravityAspect && li.backgroundBlack;
-	if(!ok)
-		Detail("  layer gravity aspect %d, black background %d\n", li.gravityAspect, li.backgroundBlack);
+	if(ok && CocoaLayerInfoOf(ctx.window, &li)){
+		ok = li.gravityAspect && li.backgroundBlack;
+		if(!ok)
+			Detail("  layer gravity aspect %d, black background %d\n", li.gravityAspect, li.backgroundBlack);
+	}else
+		ok = false;
 	return Report(ok, "a fullscreen mode renders at its own size up to native, and the layer letterboxes it on the screen");
 }
 
