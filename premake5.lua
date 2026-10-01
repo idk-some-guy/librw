@@ -408,7 +408,10 @@ if os.istarget("macosx") then
 			undefines { "NDEBUG" }
 			buildoptions { "-Wall", "-Wextra" }
 			includedirs { "src/metal" }
-			files { path.join("tests/metal/pure", name .. ".cpp"), path.join("src/metal", source) }
+			files { path.join("tests/metal/pure", name .. ".cpp") }
+			if source then
+				files { path.join("src/metal", source) }
+			end
 	end
 
 	metalpuretest("metal_fan_test", "metalfan.cpp")
@@ -416,6 +419,8 @@ if os.istarget("macosx") then
 	metalpuretest("metal_inst_test", "metalinst.cpp")
 	metalpuretest("metal_keys_test", "metalkeys.cpp")
 	metalpuretest("metal_pass_test", "metalpass.cpp")
+	metalpuretest("metal_modes_test", nil)
+	metalpuretest("metal_drawable_test", nil)
 
 	project "metal_smoke"
 		kind "ConsoleApp"

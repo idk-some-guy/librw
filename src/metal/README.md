@@ -259,7 +259,7 @@ bash tests/metal/run.sh
 METAL_SMOKE_ASAN=1 bash tests/metal/build.sh && METAL_SMOKE_ASAN=1 bash tests/metal/run.sh
 ```
 
-- `tests/metal/pure/` holds five tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking). They need no GPU.
+- `tests/metal/pure/` holds seven tests of the backend's pure rules (triangle fans, formats, instancing layouts, pipeline and state keys, sample counts, pass tracking, host mode lists, drawable sizes). They need no GPU.
 - `tests/metal/smoke/` drives the whole backend on the GPU with a hidden GLFW window and reads pixels back. It needs a logged-in GUI session on a Mac with a GPU. It runs under the Metal validation layer; `run.sh` fails if the layer does not load or reports an error. It prints `PASS` or `FAIL` for each of its 273 checks and ends with `all tests passed`.
 - The ASan build instruments the test code, not the library.
 - A host can add its own checks to the same run: compile `tests/metal/smoke/*.cpp` and `*.mm` except `no_host_checks.cpp`, and define `RunHostChecks(camera)` and `RunRestartHostChecks(restart, camera)` (`host_checks.h`). The driver calls the first after its render-target checks and the second after its restart render-target checks, before the multisampling checks, with the engine running.
