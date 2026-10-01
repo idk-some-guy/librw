@@ -405,7 +405,7 @@ SceneNear(const float *got, const float *want, float tol, const char *what)
 static bool
 CheckSceneEmission(void)
 {
-	const char *name = "an emissive blend rises above white in the scene and a plain blend over it saturates as in 8 bits";
+	const char *name = "an emissive blend rises above white in the scene and a plain blend over it blends against white and keeps the emitter's excess";
 	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, emitTestSrc, nil };
 	RGBA glow = { 90, 40, 160, 255 };
 	RGBA yellow = { 250, 250, 20, 200 };
@@ -434,12 +434,67 @@ CheckSceneEmission(void)
 		emit->destroy();
 	float a = 200/255.0f;
 	float wantE[3] = { 330/255.0f, 210/255.0f, 600/255.0f };
-	float wantOver[3] = { 250/255.0f*a + (1.0f - a), 250/255.0f*a + 210/255.0f*(1.0f - a), 20/255.0f*a + (1.0f - a) };
+	float wantOver[3] = { 250/255.0f*a + 330/255.0f*(1.0f - a), 250/255.0f*a + 210/255.0f*(1.0f - a), 20/255.0f*a + 600/255.0f*(1.0f - a) };
 	float wantPlain[3] = { 150/255.0f, 130/255.0f, 1.0f };
 	bool ok = warm && read && SceneNear(e, wantE, 0.004f, "the emitter");
 	ok = read && SceneNear(over, wantOver, 0.002f, "the translucent draw over the emitter") && ok;
 	ok = read && SceneNear(plain, wantPlain, 0.002f, "the plain additive draw") && ok;
-	ok = read && e[2] > 2.0f && std::max(over[0], std::max(over[1], over[2])) <= 1.0f && plain[2] <= 1.0f && ok;
+	ok = read && e[2] > 2.0f && plain[2] <= 1.0f && ok;
+	if(!warm || !read)
+		Detail("  shader %d warm %d read %d\n", emit != nil, warm, read);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
+static bool
+CheckSceneEmitterExcess(void)
+{
+	const char *name = "a plain alpha blend over an emitter keeps the emitter's excess by one minus its alpha";
+	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, emitTestSrc, nil };
+	RGBA glow = { 200, 60, 160, 255 };
+	RGBA black = { 0, 0, 0, 255 };
+	uint8 alphas[3] = { 0, 255, 128 };
+	float xs[3] = { 10, 70, 130 };
+	metal::Shader *emit = metal::Shader::create(src, "im2dVS", "emitTestFS", 0);
+	EnhancedOn();
+	bool warm = emit && metal::prewarmIm2DShader(emit, 0, 1, BLENDONE, BLENDONE, 1);
+	metal::StateStats before = metal::getStateStats();
+	uint32 func = GetRenderState(ALPHATESTFUNC);
+	metal::beginScene(cam);
+	Begin(black);
+	metal::im2dOverrideShader = emit;
+	metal::setDrawEmissiveScale(3.0f);
+	Quad(10, 10, 180, 60, glow, DRAW_ADD);
+	metal::setDrawEmissiveScale(1.0f);
+	metal::im2dOverrideShader = nil;
+	SetRenderState(ALPHATESTFUNC, ALPHAALWAYS);
+	for(int i = 0; i < 3; i++)
+		Quad(xs[i], 10, xs[i]+50, 60, RGBA{ 40, 220, 90, alphas[i] }, DRAW_ALPHA);
+	SetRenderState(ALPHATESTFUNC, func);
+	cam->endUpdate();
+	float got[3][4];
+	bool read = true;
+	for(int i = 0; i < 3; i++)
+		read = metal::readScenePixel(xs[i]+25, 35, got[i]) && read;
+	metal::endScene(nil);
+	cam->showRaster(0);
+	metal::StateStats after = metal::getStateStats();
+	EnhancedOff();
+	if(emit)
+		emit->destroy();
+	float e[3] = { 600/255.0f, 180/255.0f, 480/255.0f };
+	float q[3] = { 40/255.0f, 220/255.0f, 90/255.0f };
+	const char *what[3] = { "the alpha 0 quad", "the alpha 1 quad", "the alpha 0.5 quad" };
+	bool ok = warm && read;
+	for(int i = 0; i < 3; i++){
+		float a = alphas[i]/255.0f, want[3];
+		for(int c = 0; c < 3; c++)
+			want[c] = q[c]*a + e[c]*(1.0f - a);
+		ok = read && SceneNear(got[i], want, 0.004f, what[i]) && ok;
+	}
 	if(!warm || !read)
 		Detail("  shader %d warm %d read %d\n", emit != nil, warm, read);
 	if(after.pipelinesLate != before.pipelinesLate){
@@ -1211,6 +1266,7 @@ RunFrameChecks(Camera *camera)
 	Identity("enhanced frames are within 1/255 of classic frames at one sample");
 	CheckSceneBlendInShader();
 	CheckSceneEmission();
+	CheckSceneEmitterExcess();
 	CheckSceneOpaqueClamp();
 	CheckSceneSourceSaturates();
 	CheckSceneResize();
