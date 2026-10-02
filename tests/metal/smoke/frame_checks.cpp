@@ -11,6 +11,7 @@
 #include <src/metal/metaloutput.h>
 #include <src/metal/metalaa.h>
 #include "frame_checks.h"
+#include "late_pipelines.h"
 
 using namespace rw;
 
@@ -35,6 +36,7 @@ Detail(const char *fmt, ...)
 static bool
 Report(bool ok, const char *name)
 {
+	NoteLatePipelines(name);
 	printf("%s %s\n%s", ok ? "PASS" : "FAIL", name, details);
 	fflush(stdout);
 	details[0] = '\0';

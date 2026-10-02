@@ -277,6 +277,7 @@ static PrepassKeySet prepassKeys;
 static bool prepassFrame;
 static bool orphanReported;
 static uint32 prepassDrawsThisFrame;
+static uint32 prepassEqualThisFrame, prepassEqualLast;
 static float32 prepassView[16], prepassProj[16];
 static bool prepassViewSame;
 static bool forceEqualNext;
@@ -348,6 +349,7 @@ beginPrepassState(bool continuous)
 	prepassFrame = true;
 	prepassFrameBound = false;
 	prepassDrawsThisFrame = 0;
+	prepassEqualThisFrame = 0;
 	memcpy(prepassView, uniformScene.view, sizeof(prepassView));
 	memcpy(prepassProj, uniformScene.proj, sizeof(prepassProj));
 	prepassViewSame = true;
@@ -398,9 +400,16 @@ forgetObjectHistory(const void *object)
 	bonesCur.forget(object);
 }
 
+uint32
+prepassEqualLastFrame(void)
+{
+	return prepassEqualLast;
+}
+
 void
 finishPrepassFrame(bool countOrphans)
 {
+	prepassEqualLast = prepassFrame ? prepassEqualThisFrame : 0;
 	if(!prepassFrame)
 		return;
 	uint32 orphans = countOrphans ? prepassKeys.unused() : 0;
@@ -1973,8 +1982,10 @@ flushCache(void)
 		return 0;
 	}
 	bool depthEqual = keyed && prepassKeys.markUsed(drawKey);
-	if(depthEqual)
+	if(depthEqual){
 		stats.prepassEqual++;
+		prepassEqualThisFrame++;
+	}
 	if(forceEqualNext && ctx->encoderColorFormat == COLORFMT_SCENE){
 		forceEqualNext = false;
 		depthEqual = true;

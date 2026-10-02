@@ -15,6 +15,7 @@
 #define TM_JITTER_PHASES 8
 #define TM_HISTORY_ALPHA 0.1f
 #define TM_CUT_DISTANCE 10.0f
+#define TM_MAX_COMPRESSED_LUMA (63.0f/64.0f)
 
 struct TMColor { float r, g, b; };
 struct TMJitter { float x, y; };
@@ -71,7 +72,10 @@ tmCompress(TMColor c)
 static inline TMColor
 tmExpand(TMColor c)
 {
-	return tmScale(c, 1.0f/TM_MAX(1.0f - tmLuma(c), 1e-4f));
+	float l = tmLuma(c), k = l > TM_MAX_COMPRESSED_LUMA ? TM_MAX_COMPRESSED_LUMA/l : 1.0f;
+	TMColor r = tmScale(c, k/(1.0f - l*k));
+	TMColor z = { TM_MAX(r.r, 0.0f), TM_MAX(r.g, 0.0f), TM_MAX(r.b, 0.0f) };
+	return z;
 }
 
 static inline TMColor

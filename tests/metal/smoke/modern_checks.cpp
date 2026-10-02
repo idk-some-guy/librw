@@ -11,6 +11,7 @@
 #include <src/metal/metalprepass.h>
 #include "world_checks.h"
 #include "modern_checks.h"
+#include "late_pipelines.h"
 
 using namespace rw;
 
@@ -35,6 +36,7 @@ Detail(const char *fmt, ...)
 static bool
 Report(bool ok, const char *name)
 {
+	NoteLatePipelines(name);
 	printf("%s %s\n%s", ok ? "PASS" : "FAIL", name, details);
 	fflush(stdout);
 	details[0] = '\0';
@@ -534,9 +536,10 @@ CheckPrepassUnkeyed(void)
 	WorldEnd();
 	metal::StateStats after = metal::getStateStats();
 	metal::logStats();
-	const char *tail = strstr(metal::getStatsLine(), " unkeyed ");
-	unsigned shown = 0;
-	bool printed = tail && sscanf(tail, " unkeyed %u", &shown) == 1 && shown == after.prepassUnkeyed;
+	const char *tail = strstr(metal::getStatsLine(), " prepass ");
+	unsigned shown = 0, shownDraws = 0, shownEqual = 0;
+	bool printed = tail && sscanf(tail, " prepass %u equal %u unkeyed %u", &shownDraws, &shownEqual, &shown) == 3 &&
+		shown == after.prepassUnkeyed && shownDraws == CAPACITY + EXTRA && shownEqual == CAPACITY;
 	TiersOff();
 	DestroyAtomic(a);
 	g->destroy();
@@ -545,8 +548,8 @@ CheckPrepassUnkeyed(void)
 	uint32 equal = after.prepassEqual - before.prepassEqual, orphans = after.prepassOrphans - before.prepassOrphans;
 	bool ok = began && draws == CAPACITY + EXTRA && unkeyed == EXTRA && equal == CAPACITY && orphans == 0 && printed;
 	if(!ok)
-		Detail("  prepass %d draws %u unkeyed %u equal %u orphans %u; stats line shows %u\n", began, draws, unkeyed, equal,
-			orphans, shown);
+		Detail("  prepass %d draws %u unkeyed %u equal %u orphans %u; stats line shows prepass %u equal %u unkeyed %u\n", began,
+			draws, unkeyed, equal, orphans, shownDraws, shownEqual, shown);
 	return Report(ok, name);
 }
 
@@ -1926,10 +1929,57 @@ AreaEdge(const float *v, const float *plain, int first)
 	return first + sum;
 }
 
+enum { TENT_X0 = 40, TENT_Y = 420 };
+
+static void
+RampQuad(float x0, float x1, RGBA a, RGBA b)
+{
+	metal::Im2DVertex v[4];
+	Vertex2D(&v[0], x0, 400.0f, a);
+	Vertex2D(&v[1], x0, 440.0f, a);
+	Vertex2D(&v[2], x1, 440.0f, b);
+	Vertex2D(&v[3], x1, 400.0f, b);
+	BlendMode(false);
+	im2d::RenderIndexedPrimitive(PRIMTYPETRILIST, v, 4, quadIndex, 6);
+	OpaqueMode();
+}
+
+static void
+TentFrame(Scene3D *s)
+{
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawAll(s);
+		metal::endPrepass();
+	}
+	DrawAll(s);
+	metal::beginReactive();
+	RampQuad(TENT_X0, TENT_X0 + 16, SKY, white);
+	RampQuad(TENT_X0 + 16, TENT_X0 + 32, white, SKY);
+	metal::endReactive();
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static float
+TentCentre(void)
+{
+	float sum = 0.0f, moment = 0.0f, sky = SKY.red/255.0f;
+	for(int x = TENT_X0 - 4; x < TENT_X0 + 36; x++){
+		float px[4] = {};
+		metal::readFrameOutput(x, TENT_Y, px);
+		sum += px[0] - sky;
+		moment += (px[0] - sky)*(x + 0.5f);
+	}
+	return sum > 0.0f ? moment/sum : -100.0f;
+}
+
 static bool
 CheckTaaStill(void)
 {
-	const char *name = "TAA at native converges a still edge on its true sub-pixel position, holds it, leaves flat colour alone and drops its history on a cut";
+	const char *name = "TAA at native converges a still edge on its true sub-pixel position, holds it, keeps a reactive ramp in place, leaves flat colour alone and drops its history on a cut";
 	Scene3D s;
 	MakeScene(&s);
 	float cx = 0.0125f, cy = 0.04f;
@@ -1939,16 +1989,24 @@ CheckTaaStill(void)
 	PlaceCamera(0.0f, cx, cy, 0.0f);
 	metal::cameraCut();
 	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
-	Frames(&s, 2);
+	TentFrame(&s);
+	TentFrame(&s);
 	ProbeEdges(&plain, rowY, rowX0, colX, colY0);
+	float tentPlain = TentCentre(), tentLast = 0.0f, tentDrift = 0.0f, tentErr = 0.0f;
 	SetSettings(metal::TIER_MODERN, metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
 	metal::setJitterIndexForTest(0);
 	float drift = 0.0f, meanX = 0.0f, meanY = 0.0f;
 	plain.x = AreaEdge(plain.row, plain.row, rowX0);
 	plain.y = AreaEdge(plain.col, plain.col, colY0);
 	for(int f = 0; f < 32; f++){
-		Frames(&s, 1);
+		TentFrame(&s);
 		ProbeEdges(&taa, rowY, rowX0, colX, colY0);
+		float tent = TentCentre();
+		if(f >= 24){
+			tentDrift = std::max(tentDrift, fabsf(tent - tentLast));
+			tentErr = std::max(tentErr, fabsf(tent - tentPlain));
+		}
+		tentLast = tent;
 		taa.x = AreaEdge(taa.row, plain.row, rowX0);
 		taa.y = AreaEdge(taa.col, plain.col, colY0);
 		if(f >= 24){
@@ -1962,7 +2020,7 @@ CheckTaaStill(void)
 	metal::logStats();
 	bool stats = strstr(metal::getStatsLine(), " aa taa ") != nil;
 	metal::cameraCut();
-	Frames(&s, 1);
+	TentFrame(&s);
 	ProbeEdges(&cut, rowY, rowX0, colX, colY0);
 	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
 	metal::cameraCut();
@@ -1972,9 +2030,12 @@ CheckTaaStill(void)
 	int partialX = PartialPixels(plain.row, taa.row), partialY = PartialPixels(plain.col, taa.col);
 	bool flat = SameRuns(taa, plain, 0.01f, true), cutPlain = SameRuns(cut, plain, 0.01f, false);
 	bool ok = fi.antiAliasing == metal::ANTIALIAS_TAA && stats && dx < 0.05f && dy < 0.05f && dx < px && dy < py &&
-		drift < 0.12f && flat && partialX >= 1 && partialX <= 3 && partialY >= 1 && partialY <= 3 && cutPlain;
+		drift < 0.12f && flat && partialX >= 1 && partialX <= 3 && partialY >= 1 && partialY <= 3 && cutPlain &&
+		tentDrift < 0.05f && tentErr < 0.05f;
 	Detail("  edges at x %.3f y %.3f: one native frame x %.3f y %.3f, TAA mean over the last 8 frames x %.3f y %.3f, drift %.3f, "
 		"partial pixels %d and %d\n", wantX, wantY, plain.x, plain.y, meanX, meanY, drift, partialX, partialY);
+	Detail("  reactive ramp centre %.3f in the native frame; over the last 8 TAA frames it moves up to %.3f per frame and "
+		"strays up to %.3f\n", tentPlain, tentDrift, tentErr);
 	if(!ok){
 		Detail("  aa %d stats %d flat %d cut frame equals the plain frame %d\n", fi.antiAliasing, stats, flat, cutPlain);
 		for(int i = 0; i < RUN; i++)
@@ -2022,6 +2083,62 @@ CheckTaaMoving(void)
 		for(int i = 0; i < 3; i++)
 			Detail("  %s pixel %d: taa %.3f,%.3f,%.3f plain %.3f,%.3f,%.3f\n", i == 0 ? "vacated" : i == 1 ? "entered" : "inside",
 				xs[i], taa[i][0], taa[i][1], taa[i][2], plain[i][0], plain[i][1], plain[i][2]);
+	return Report(ok, name);
+}
+
+struct EdgeSpill
+{
+	float near, far;
+};
+
+static void
+EdgeGhost(float edge, bool fgRight, int y, EdgeSpill *spill)
+{
+	int ep = (int)edge;
+	float fg[4], bg[4];
+	metal::readFrameOutput(ep + (fgRight ? 20 : -20), y, fg);
+	metal::readFrameOutput(ep + (fgRight ? -20 : 20), y, bg);
+	for(int k = 1; k <= 3; k++){
+		float in[4], out[4];
+		metal::readFrameOutput(ep + (fgRight ? k : -k), y, in);
+		metal::readFrameOutput(ep + (fgRight ? -k : k), y, out);
+		float range = fabsf(fg[0] - bg[0]);
+		float spillIn = fabsf(in[0] - fg[0])/range, spillOut = fabsf(out[0] - bg[0])/range;
+		if(k == 1)
+			spill->near = fmaxf(spill->near, fmaxf(spillIn, spillOut));
+		else
+			spill->far = fmaxf(spill->far, fmaxf(spillIn, spillOut));
+	}
+}
+
+static bool
+CheckTaaMovingEdge(void)
+{
+	const char *name = "TAA leaves no ghost beside the edges of a quad moving over a static background under jitter (motion of the nearest surface)";
+	enum { FRAMES = 24 };
+	const float step = 1.3f;
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
+	SteadyFrames(&s);
+	V3d move = { -step*10.0f/320.0f, 0.0f, 0.0f };
+	EdgeSpill trail = { 0.0f, 0.0f }, lead = { 0.0f, 0.0f };
+	int jittered = 0;
+	for(int f = 0; f < FRAMES; f++){
+		s.front->getFrame()->translate(&move, COMBINEPOSTCONCAT);
+		s.front->getFrame()->updateObjects();
+		Frames(&s, 1);
+		if(f < FRAMES - 8)
+			continue;
+		jittered += Jittered(metal::getFrameInfo());
+		EdgeGhost(256.0f + step*(f + 1), true, 200, &trail);
+		EdgeGhost(352.0f + step*(f + 1), false, 200, &lead);
+	}
+	TiersOff();
+	FreeScene(&s);
+	bool ok = jittered >= 6 && trail.near < 0.5f && lead.near < 0.5f && trail.far < 0.02f && lead.far < 0.02f;
+	Detail("  over the last 8 frames (%d jittered), the pixels beside the edge pixel take up to %.3f (trailing) and %.3f (leading) "
+		"of the other surface, the next two up to %.3f and %.3f\n", jittered, trail.near, lead.near, trail.far, lead.far);
 	return Report(ok, name);
 }
 
@@ -2279,7 +2396,7 @@ Luma(const float *c)
 }
 
 static bool
-NoFireflyNoHalo(const HighlightRun &taa, const HighlightRun &plain, int edge, const char *what)
+NoFireflyNoHalo(const HighlightRun &taa, const HighlightRun &plain, int edgeLo, int edgeHi, const char *what)
 {
 	float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
 	for(int i = 0; i < RUN; i++)
@@ -2299,7 +2416,7 @@ NoFireflyNoHalo(const HighlightRun &taa, const HighlightRun &plain, int edge, co
 			bad = i;
 			why = "luma rises away from the highlight";
 		}
-		if(bad < 0 && (i < edge - 2 || i > edge + 1))
+		if(bad < 0 && (i < edgeLo || i > edgeHi))
 			for(int c = 0; c < 3; c++)
 				if(fabsf(taa.v[i][c] - plain.v[i][c]) > 0.01f + 0.01f*plain.v[i][c]){
 					bad = i;
@@ -2311,8 +2428,8 @@ NoFireflyNoHalo(const HighlightRun &taa, const HighlightRun &plain, int edge, co
 		top = fmaxf(top, taa.v[i][0]);
 		bottom = fminf(bottom, Luma(taa.v[i]));
 	}
-	Detail("  %s: plain red %.3f to %.3f, resolved red up to %.3f, resolved luma down to %.3f (plain %.3f)\n", what, lo[0], hi[0], top,
-		bottom, Luma(plain.v[RUN-1]));
+	Detail("  %s: plain red %.3f to %.3f, resolved red up to %.3f, resolved luma down to %.3f (plain %.3f), beside the edge red %.3f "
+		"(plain %.3f)\n", what, lo[0], hi[0], top, bottom, Luma(plain.v[RUN-1]), taa.v[edgeHi+1][0], plain.v[edgeHi+1][0]);
 	if(bad >= 0)
 		for(int i = 0; i < RUN; i++)
 			Detail("  %s %d%s: taa %.3f,%.3f,%.3f plain %.3f,%.3f,%.3f%s%s\n", what, i, i == bad ? " (bad)" : "", taa.v[i][0],
@@ -2353,8 +2470,8 @@ CheckTaaHighlight(void)
 		HighlightFrame(back, front);
 		ReadRun(&plain, edge - RUN/2, 240);
 		ReadRun(&plainE, 160 - RUN/2, 330);
-		ok = NoFireflyNoHalo(taa, plain, RUN/2, pan ? "panning surface" : "still surface") && ok;
-		ok = NoFireflyNoHalo(taaE, plainE, RUN/2, pan ? "panning emitter" : "still emitter") && ok;
+		ok = NoFireflyNoHalo(taa, plain, RUN/2 - 1, RUN/2, pan ? "panning surface" : "still surface") && ok;
+		ok = NoFireflyNoHalo(taaE, plainE, RUN/2 - 1, RUN/2 - 1, pan ? "panning emitter" : "still emitter") && ok;
 	}
 	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
 	metal::cameraCut();
@@ -2364,6 +2481,82 @@ CheckTaaHighlight(void)
 	bg->destroy();
 	fg->destroy();
 	mat->destroy();
+	return Report(ok, name);
+}
+
+static float
+FringeEdgeSwing(Atomic *back, Atomic *front, bool fringe, int *jittered)
+{
+	enum { FRAMES = 24, SPAN = 2 };
+	RGBA faint = { 16, 16, 16, 16 }, night = { 8, 8, 12, 255 };
+	PlaceCamera(0.0f, 0.0125f, 0.0f, 0.0f);
+	metal::cameraCut();
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
+	int edge = (int)(320.0f*(1.0f + 1.0125f/10.0f));
+	float lo[2*SPAN + 1], hi[2*SPAN + 1];
+	for(int i = 0; i <= 2*SPAN; i++){
+		lo[i] = 1e9f;
+		hi[i] = -1e9f;
+	}
+	*jittered = 0;
+	for(int f = 0; f < FRAMES; f++){
+		metal::beginScene(cam);
+		WorldBegin(night);
+		SetRenderState(VERTEXALPHA, 0);
+		if(metal::beginPrepass()){
+			back->render();
+			front->render();
+			metal::endPrepass();
+		}
+		back->render();
+		front->render();
+		if(fringe){
+			metal::beginReactive();
+			Quad2D(edge - 40, 200, edge + 40, 280, faint, true);
+			metal::endReactive();
+		}
+		metal::endScene(nil);
+		WorldEnd();
+		if(f < FRAMES - 8)
+			continue;
+		*jittered += Jittered(metal::getFrameInfo());
+		for(int i = 0; i <= 2*SPAN; i++){
+			float px[4];
+			metal::readFrameOutput(edge - SPAN + i, 240, px);
+			lo[i] = fminf(lo[i], px[0]);
+			hi[i] = fmaxf(hi[i], px[0]);
+		}
+	}
+	TiersOff();
+	float swing = 0.0f;
+	for(int i = 0; i <= 2*SPAN; i++)
+		swing = fmaxf(swing, hi[i] - lo[i]);
+	return swing;
+}
+
+static bool
+CheckTaaFaintReactive(void)
+{
+	const char *name = "TAA keeps anti-aliasing a surface edge under a faint reactive fringe, as the soft edge of a glow lays down";
+	RGBA dark = { 12, 12, 16, 255 }, white = { 255, 255, 255, 255 };
+	RGBA dc[4] = { dark, dark, dark, dark }, wc[4] = { white, white, white, white };
+	Material *mat = Material::create();
+	Geometry *bg = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 8.0f, 6.0f, -8.0f, -6.0f, 20.0f, dc, nil, mat);
+	Geometry *fg = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 1.0f, 1.0f, -1.0f, -1.0f, 10.0f, wc, nil, mat);
+	Atomic *back = MakeAtomic(bg), *front = MakeAtomic(fg);
+	int jPlain, jFringe;
+	float plain = FringeEdgeSwing(back, front, false, &jPlain);
+	float fringe = FringeEdgeSwing(back, front, true, &jFringe);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	DestroyAtomic(back);
+	DestroyAtomic(front);
+	bg->destroy();
+	fg->destroy();
+	mat->destroy();
+	bool ok = jPlain >= 6 && jFringe >= 6 && fringe < 2.0f*plain + 0.02f;
+	Detail("  over the last 8 frames (%d and %d jittered) the edge pixels swing by up to %.3f in red without the fringe and %.3f under it\n",
+		jPlain, jFringe, plain, fringe);
 	return Report(ok, name);
 }
 
@@ -2415,6 +2608,7 @@ RunModernChecks(Camera *camera)
 	CheckJitterSubRaster();
 	CheckTemporalLogs();
 	CheckTaaStill();
+	CheckTaaMovingEdge();
 	CheckTaaMoving();
 	CheckTemporalMotion("a camera panning over a textured wall through TAA at native matches the native frame as a still one does (reprojection)",
 		metal::UPSCALE_NATIVE, 0.0f, 0.04f);
@@ -2428,6 +2622,7 @@ RunModernChecks(Camera *camera)
 		metal::UPSCALE_NATIVE);
 	CheckTaaOffscreen();
 	CheckTaaHighlight();
+	CheckTaaFaintReactive();
 	WorldClose();
 	return failures;
 }

@@ -39,6 +39,7 @@ taaResolve(texture2d<float, access::sample> cur [[texture(0)]],
            texture2d<float, access::read> reactive [[texture(3)]],
            texture2d<float, access::write> out [[texture(4)]],
            texture2d<float, access::write> histOut [[texture(5)]],
+           depth2d<float, access::read> depth [[texture(6)]],
            constant TaaParams &p [[buffer(0)]],
            uint2 gid [[thread_position_in_grid]])
 {
@@ -46,10 +47,19 @@ taaResolve(texture2d<float, access::sample> cur [[texture(0)]],
 		return;
 	constexpr sampler lin(filter::linear, address::clamp_to_edge, coord::normalized);
 	TMColor mn = { 1e9, 1e9, 1e9 }, mx = { -1e9, -1e9, -1e9 };
+	uint2 nearest = gid;
+	float nearestZ = depth.read(gid);
 	for(int dy = -1; dy <= 1; dy++)
 		for(int dx = -1; dx <= 1; dx++){
-			int2 q = clamp(int2(gid) + int2(dx, dy), int2(0), int2(p.size) - 1);
-			TMColor y = tmToYCoCg(tmCompress(tc(cur.read(uint2(q)).rgb)));
+			uint2 q = uint2(clamp(int2(gid) + int2(dx, dy), int2(0), int2(p.size) - 1));
+			float z = depth.read(q);
+			if(z < nearestZ){
+				nearestZ = z;
+				nearest = q;
+			}
+			if((dx != 0 || dy != 0) && reactive.read(q).r >= 0.5)
+				continue;
+			TMColor y = tmToYCoCg(tmCompress(tc(cur.read(q).rgb)));
 			mn = tmMinC(mn, y);
 			mx = tmMaxC(mx, y);
 		}
@@ -57,7 +67,7 @@ taaResolve(texture2d<float, access::sample> cur [[texture(0)]],
 	float4 c0 = cur.sample(lin, float2(cu.u, cu.v));
 	TMColor cc = tmCompress(tc(c0.rgb));
 	float2 uv = (float2(gid) + 0.5)/float2(p.size);
-	float2 huv = uv + motion.read(gid).xy;
+	float2 huv = uv + motion.read(nearest).xy;
 	bool valid = p.valid != 0 && tmHistoryValid(huv.x, huv.y);
 	float w = tmHistoryWeight(reactive.read(gid).r, valid);
 	TMColor h = cc;

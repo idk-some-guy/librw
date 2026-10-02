@@ -326,11 +326,11 @@ frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u unkeyed %u",
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
-		getStateStats().prepassUnkeyed);
+		prepassEqualLastFrame(), getStateStats().prepassUnkeyed);
 	return frame.tail;
 }
 
@@ -1120,6 +1120,7 @@ encodeTaa(void)
 	[enc setTexture:frame.reactive atIndex:3];
 	[enc setTexture:frame.output atIndex:4];
 	[enc setTexture:frame.taaHistory[frame.taaIndex ^ 1] atIndex:5];
+	[enc setTexture:getRasterTexture(frame.sceneDepth) atIndex:6];
 	[enc setBytes:&p length:sizeof(p) atIndex:0];
 	dispatchOver(enc, frame.output);
 	[enc endEncoding];

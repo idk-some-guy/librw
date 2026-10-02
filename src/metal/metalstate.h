@@ -126,6 +126,7 @@ struct PrepassMatrices
 const PrepassMatrices &prepassMatrices(void);
 uint32 endPrepassState(void);
 uint32 prepassDrawsSoFar(void);
+uint32 prepassEqualLastFrame(void);
 void setUnjitteredProjection(float32 *mat);
 void forgetObjectHistory(const void *object);
 void noteImmediateDraw(uint32 primitive, uint32 count, void *indexBuffer, uint32 indexOffset, uint32 indexType, bool indexed,

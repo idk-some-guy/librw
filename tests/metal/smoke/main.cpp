@@ -16,6 +16,7 @@
 #include "msaa_checks.h"
 #include "frame_checks.h"
 #include "modern_checks.h"
+#include "late_pipelines.h"
 #ifdef LIBRW_COCOA
 #include <src/metal/metaldrawable.h>
 #include "cocoa_checks.h"
@@ -42,6 +43,18 @@ static uint32 lateAtStop[MAXSTARTS], hostLateAtStop[MAXSTARTS];
 static int stops = 0;
 static bool inHost = false;
 static uint32 hostMark = 0, hostLate = 0;
+enum { MAXLATECHECKS = 64 };
+struct LateCheck
+{
+	int start;
+	uint32 late;
+	char check[256];
+};
+static LateCheck lateChecks[MAXLATECHECKS];
+static int numLateChecks = 0;
+static bool lateOverflow = false;
+static uint32 checkMark = 0, pendingLate = 0;
+static int pendingStart = 0;
 static int failures = 0;
 static char details[4096];
 static int detailsLen = 0;
@@ -85,6 +98,7 @@ Detail(const char *fmt, ...)
 static bool
 Report(bool ok, const char *name)
 {
+	NoteLatePipelines(name);
 	printf("%s %s\n%s", ok ? "PASS" : "FAIL", name, details);
 	fflush(stdout);
 	details[0] = '\0';
@@ -208,6 +222,7 @@ StartEngine(int w, int h)
 	}
 	framesAtStart = metal::getFrameStats().framesShown;
 	hostMark = metal::getStateStats().pipelinesLate;
+	checkMark = hostMark;
 	ctx.camera = Camera::create();
 	ctx.frame = rw::Frame::create();
 	ctx.camera->setFrame(ctx.frame);
@@ -215,9 +230,40 @@ StartEngine(int w, int h)
 }
 
 static void
+NoteLate(int start, uint32 late, const char *check)
+{
+	if(numLateChecks == MAXLATECHECKS){
+		lateOverflow = true;
+		return;
+	}
+	LateCheck *c = &lateChecks[numLateChecks++];
+	c->start = start;
+	c->late = late;
+	snprintf(c->check, sizeof(c->check), "%s", check);
+}
+
+void
+NoteLatePipelines(const char *check)
+{
+	if(inHost)
+		return;
+	uint32 late = metal::getStateStats().pipelinesLate;
+	if(pendingLate > 0)
+		NoteLate(pendingStart, pendingLate, check);
+	pendingLate = 0;
+	if(late > checkMark)
+		NoteLate(stops, late - checkMark, check);
+	checkMark = late;
+}
+
+static void
 StopEngine(void)
 {
 	uint32 late = metal::getStateStats().pipelinesLate;
+	if(!inHost && late > checkMark){
+		pendingLate += late - checkMark;
+		pendingStart = stops;
+	}
 	if(inHost)
 		hostLate += late - hostMark;
 	if(stops < MAXSTARTS){
@@ -257,6 +303,7 @@ CurrentCamera(void)
 static void
 HostChecksBegin(void)
 {
+	NoteLatePipelines("before the host checks");
 	inHost = true;
 	hostMark = metal::getStateStats().pipelinesLate;
 }
@@ -265,21 +312,62 @@ static void
 HostChecksEnd(void)
 {
 	hostLate += metal::getStateStats().pipelinesLate - hostMark;
+	checkMark = metal::getStateStats().pipelinesLate;
 	inHost = false;
 }
 
-// Custom shaders, uncommon states and depthless cameras build late on purpose; restarts rebuild a few.
+static const struct { const char *check; uint32 bound; } lateAllowed[] = {
+	{ "flushCache reports a pipeline that failed to build", 1 },
+	{ "flushCache builds the pipeline for the variant chosen per draw", 3 },
+	{ "a draw uploads and binds only the uniform blocks its shader reads", 2 },
+	{ "a draw binds a texture and sampler only when its shader samples them", 1 },
+	{ "world matrix, lights and material upload only when they change", 1 },
+	{ "missing float and integer attributes read (0,0,0,1) in an im2d draw", 1 },
+	{ "custom constants reach an im2d override shader", 1 },
+	{ "the stats line counts custom and material block uploads per frame", 1 },
+	{ "an im2d draw with a failed pipeline is dropped, the next one draws", 1 },
+	{ "a two-uv im2d draw hands both coordinate sets to the override shader", 1 },
+	{ "taa resolving to the spatial scaler logs one line: once without a depth raster, once without prepass targets", 3 },
+	{ "prelight colours keep their byte order and interpolate, and a missing colour is black", 1 },
+	{ "world lights drawn through the render callback match gl3's formula computed on the CPU", 3 },
+	{ "an im3d transform with LIGHTING lights its vertices from the world, and without a world from nothing", 1 },
+	{ "a lit atomic rendered by a camera outside any world gets no lights", 1 },
+	{ "host shaders built from the exported default and skin sources draw like the engine's pipelines", 1 },
+	{ "a second pass with another vertex shader lands on the first pass's depth", 2 },
+	{ "a skinned atomic without a hierarchy draws with identity bones and uploads the skin block once", 1 },
+	{ "a skinned draw picks the skin shader and its light and alpha test variant per draw", 2 },
+	{ "the skin block is uploaded once per atomic and pose, and bound for every pass", 1 },
+	{ "GSALPHATEST on a skinned mesh draws texels below its reference without depth, and restores the states", 1 },
+	{ "a depth raster of another size is detached, counted and reported, and the draw still lands", 1 },
+	{ "after a restart a shader reading custom constants sees zeros, not the old constants", 1 },
+	{ "custom constants shorter than the shader's block read zero past their end", 4 },
+	{ "a custom block larger than 1 KB is reported once and its draws are dropped", 1 },
+	{ "matfx and skinned atomics keep a live Metal pipeline across a restart, and both draw again with their env pass", 2 },
+};
+
 static bool
 CheckLatePipelines(void)
 {
-	static const uint32 expected[] = { 31, 6, 2, 2 };
-	bool ok = stops > 0;
+	bool ok = stops > 0 && !lateOverflow;
+	uint32 noted[MAXSTARTS] = {};
+	for(int i = 0; i < numLateChecks; i++){
+		const LateCheck &c = lateChecks[i];
+		uint32 bound = 0;
+		for(size_t k = 0; k < sizeof(lateAllowed)/sizeof(lateAllowed[0]); k++)
+			if(strcmp(lateAllowed[k].check, c.check) == 0)
+				bound = lateAllowed[k].bound;
+		if(c.start < MAXSTARTS)
+			noted[c.start] += c.late;
+		if(c.late > bound){
+			Detail("  engine start %d: %u late in \"%s\", at most %u allowed\n", c.start + 1, c.late, c.check, bound);
+			ok = false;
+		}
+	}
 	for(int i = 0; i < stops && i < MAXSTARTS; i++){
-		uint32 want = i < (int)(sizeof(expected)/sizeof(expected[0])) ? expected[i] : 0;
 		uint32 own = lateAtStop[i] - hostLateAtStop[i];
-		Detail("  engine start %d: %u pipelines built late, %u of them in host checks; %u expected outside them\n", i + 1,
-		       lateAtStop[i], hostLateAtStop[i], want);
-		ok = ok && own == want;
+		Detail("  engine start %d: %u pipelines built late, %u of them in host checks, %u in checks that build them on purpose\n",
+		       i + 1, lateAtStop[i], hostLateAtStop[i], noted[i]);
+		ok = ok && own == noted[i];
 	}
 	return Report(ok, "each engine start builds only the late pipelines its checks expect");
 }

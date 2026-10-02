@@ -16,6 +16,7 @@ const char *temporalh_metal_src =
 "#define TM_JITTER_PHASES 8\n"
 "#define TM_HISTORY_ALPHA 0.1f\n"
 "#define TM_CUT_DISTANCE 10.0f\n"
+"#define TM_MAX_COMPRESSED_LUMA (63.0f/64.0f)\n"
 
 "struct TMColor { float r, g, b; };\n"
 "struct TMJitter { float x, y; };\n"
@@ -72,7 +73,10 @@ const char *temporalh_metal_src =
 "static inline TMColor\n"
 "tmExpand(TMColor c)\n"
 "{\n"
-"	return tmScale(c, 1.0f/TM_MAX(1.0f - tmLuma(c), 1e-4f));\n"
+"	float l = tmLuma(c), k = l > TM_MAX_COMPRESSED_LUMA ? TM_MAX_COMPRESSED_LUMA/l : 1.0f;\n"
+"	TMColor r = tmScale(c, k/(1.0f - l*k));\n"
+"	TMColor z = { TM_MAX(r.r, 0.0f), TM_MAX(r.g, 0.0f), TM_MAX(r.b, 0.0f) };\n"
+"	return z;\n"
 "}\n"
 
 "static inline TMColor\n"

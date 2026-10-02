@@ -8,6 +8,7 @@
 #include <src/metal/metalinst.h>
 #include "state_checks.h"
 #include "objc_checks.h"
+#include "late_pipelines.h"
 
 using namespace rw;
 
@@ -30,6 +31,7 @@ Detail(const char *fmt, ...)
 static bool
 Report(bool ok, const char *name)
 {
+	NoteLatePipelines(name);
 	printf("%s %s\n%s", ok ? "PASS" : "FAIL", name, details);
 	details[0] = '\0';
 	detailsLen = 0;

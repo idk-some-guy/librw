@@ -116,6 +116,27 @@ TestColour(void)
 }
 
 static void
+TestSaturatedHues(void)
+{
+	TMColor red = { 100.0f, 0.0f, 0.0f }, blue = { 0.0f, 0.0f, 100.0f };
+	TMColor a = tmToYCoCg(tmCompress(red)), b = tmToYCoCg(tmCompress(blue));
+	TMColor mn = tmMinC(a, b), mx = tmMaxC(a, b);
+	TMColor corners[2] = { { mx.r, mx.g, mn.b }, { mn.r, mn.g, mn.b } };
+	for(int i = 0; i < 2; i++){
+		TMColor h = tmFromYCoCg(tmClipAabb(corners[i], mn, mx));
+		TMColor cur = tmCompress(red);
+		for(int k = 0; k < 3; k++){
+			TMColor r = tmExpand(tmMix(cur, h, k*0.45f));
+			CHECK(r.r >= 0.0f && r.g >= 0.0f && r.b >= 0.0f);
+			CHECK(tmLuma(r) <= 64.0f);
+		}
+	}
+	TMColor over = { 5.0f, 0.0f, 2.0f };
+	TMColor e = tmExpand(over);
+	CHECK(tmLuma(e) <= 64.0f && e.r > 0.0f);
+}
+
+static void
 TestHistory(void)
 {
 	CHECK(tmHistoryValid(0.0f, 1.0f) && tmHistoryValid(0.5f, 0.5f));
@@ -136,6 +157,7 @@ main(void)
 	TestJitterProjection();
 	TestUnjitter();
 	TestColour();
+	TestSaturatedHues();
 	TestHistory();
 	if(failures == 0)
 		printf("all temporal tests passed\n");
