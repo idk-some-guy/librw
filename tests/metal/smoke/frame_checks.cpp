@@ -9,6 +9,7 @@
 #include <src/metal/metalstate.h>
 #include <src/metal/metalkeys.h>
 #include <src/metal/metaloutput.h>
+#include <src/metal/metalaa.h>
 #include "frame_checks.h"
 
 using namespace rw;
@@ -1260,10 +1261,11 @@ CheckSettingsDefaults(void)
 	const char *name = "render settings default to the classic tier and clamp their ranges";
 	metal::RenderSettings s = metal::getRenderSettings();
 	bool ok = s.tier == metal::TIER_CLASSIC && s.upscale == metal::UPSCALE_NATIVE && !s.dynamicResolution &&
-		s.hdrOutput == metal::HDROUTPUT_AUTO && s.emitterPeakNits == 1000.0f && s.softness == 1.0f;
+		s.hdrOutput == metal::HDROUTPUT_AUTO && s.emitterPeakNits == 1000.0f && s.softness == 1.0f &&
+		s.antiAliasing == metal::ANTIALIAS_OFF;
 	if(!ok)
-		Detail("  defaults tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f\n", s.tier, s.upscale,
-			s.dynamicResolution, s.hdrOutput, s.emitterPeakNits, s.softness);
+		Detail("  defaults tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d\n", s.tier, s.upscale,
+			s.dynamicResolution, s.hdrOutput, s.emitterPeakNits, s.softness, s.antiAliasing);
 	metal::RenderSettings bad = s;
 	bad.tier = 7;
 	bad.upscale = -2;
@@ -1271,14 +1273,15 @@ CheckSettingsDefaults(void)
 	bad.hdrOutput = 5;
 	bad.emitterPeakNits = 99999.0f;
 	bad.softness = -1.0f;
+	bad.antiAliasing = 9;
 	metal::setRenderSettings(&bad);
 	metal::RenderSettings got = metal::getRenderSettings();
 	bool clamped = got.tier == metal::TIER_CLASSIC && got.upscale == metal::UPSCALE_NATIVE && !got.dynamicResolution &&
 		got.hdrOutput == metal::HDROUTPUT_AUTO && got.emitterPeakNits == 4000.0f && got.softness == 0.0f &&
-		metal::getFrameInfo().tier == metal::TIER_CLASSIC;
+		metal::getFrameInfo().tier == metal::TIER_CLASSIC && got.antiAliasing == metal::ANTIALIAS_OFF;
 	if(!clamped)
-		Detail("  clamped tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f\n", got.tier, got.upscale,
-			got.dynamicResolution, got.hdrOutput, got.emitterPeakNits, got.softness);
+		Detail("  clamped tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d\n", got.tier, got.upscale,
+			got.dynamicResolution, got.hdrOutput, got.emitterPeakNits, got.softness, got.antiAliasing);
 	metal::setRenderSettings(&s);
 	return Report(ok && clamped, name);
 }
@@ -1434,17 +1437,17 @@ CheckTierLatchedMidFrame(void)
 static bool
 CheckStatsTail(void)
 {
-	const char *name = "the stats line ends with the tier, frame sizes, upscaler, EDR state and bloom weight";
+	const char *name = "the stats line ends with the tier, frame sizes, upscaler, EDR state, bloom weight and anti-aliasing";
 	metal::logStats();
 	const char *line = metal::getStatsLine();
 	const char *tail = strstr(line, " samples ");
-	char tier[16], ups[16], edr[8];
+	char tier[16], ups[16], edr[8], aa[8];
 	int iw, ih, ow, oh;
 	unsigned samples;
 	float hr, ph, peak, bloom;
-	int n = tail ? sscanf(tail, " samples %u tier %15s internal %dx%d output %dx%d upscaler %15s edr %7s headroom %f/%f peak %f bloom %f",
-		&samples, tier, &iw, &ih, &ow, &oh, ups, edr, &hr, &ph, &peak, &bloom) : 0;
-	bool ok = n == 12 && strcmp(tier, "classic") == 0 && strcmp(ups, "none") == 0 && strcmp(edr, "off") == 0 &&
+	int n = tail ? sscanf(tail, " samples %u tier %15s internal %dx%d output %dx%d upscaler %15s edr %7s headroom %f/%f peak %f bloom %f aa %7s",
+		&samples, tier, &iw, &ih, &ow, &oh, ups, edr, &hr, &ph, &peak, &bloom, aa) : 0;
+	bool ok = n == 13 && strcmp(aa, "off") == 0 && strcmp(tier, "classic") == 0 && strcmp(ups, "none") == 0 && strcmp(edr, "off") == 0 &&
 		hr == 1.0f && ph == 1.0f && peak == 1.0f && bloom == 0.0f && line[strlen(line)-1] == '\n';
 	if(!ok)
 		Detail("  parsed %d fields from \"%s\"\n", n, line);
@@ -1629,6 +1632,190 @@ CheckUpscaledCopy(void)
 	return Report(ok, name);
 }
 
+static void
+SetAntiAlias(int32 aa)
+{
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.antiAliasing = aa;
+	metal::setRenderSettings(&s);
+}
+
+static const RGBA EDGE_DARK = { 64, 64, 64, 255 };
+static const RGBA EDGE_LIGHT = { 192, 192, 192, 255 };
+
+static bool
+EdgeFrame(float red[4])
+{
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	float px[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	bool read = true;
+	metal::beginScene(cam);
+	Begin(EDGE_DARK);
+	Quad((float)(w/2), 0.0f, (float)w, (float)h, EDGE_LIGHT, DRAW_OPAQUE);
+	metal::endScene(nil);
+	for(int i = 0; i < 4; i++){
+		read = metal::readFrameOutput(w/2 - 2 + i, h/2, px) && read;
+		red[i] = px[0];
+	}
+	Finish();
+	return read;
+}
+
+static bool
+StepsFrame(float edges[16])
+{
+	int h = cam->frameBuffer->height;
+	float px[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	bool read = true;
+	RGBA rest = { 58, 58, 58, 255 };
+	metal::beginScene(cam);
+	Begin(rest);
+	for(int i = 0; i < 8; i++){
+		uint8 g = (uint8)(10 + 6*i);
+		RGBA c = { g, g, g, 255 };
+		Quad(40.0f*i, 0.0f, 40.0f*(i + 1), (float)h, c, DRAW_OPAQUE);
+	}
+	metal::endScene(nil);
+	for(int i = 0; i < 16; i++){
+		read = metal::readFrameOutput(40*(i/2 + 1) - 1 + i%2, h/2, px) && read;
+		edges[i] = px[0];
+	}
+	Finish();
+	return read;
+}
+
+static bool
+CheckFxaaEdge(void)
+{
+	const char *name = "FXAA blends a hard vertical edge into the two pixels beside it; with FXAA off the edge stays hard";
+	float off[4], on[4];
+	EnhancedOn();
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	bool a = EdgeFrame(off);
+	SetAntiAlias(metal::ANTIALIAS_FXAA);
+	bool b = EdgeFrame(on);
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	EnhancedOff();
+	float d = 64/255.0f, l = 192/255.0f;
+	float want = aaSubpixBlend((2.0f*d + l)/3.0f, d, l - d)*(l - d);
+	bool hard = NearF(off[0], d, 1e-3f) && NearF(off[1], d, 1e-3f) && NearF(off[2], l, 1e-3f) && NearF(off[3], l, 1e-3f);
+	bool blended = NearF(on[1] - off[1], want, 2/255.0f) && NearF(off[2] - on[2], want, 2/255.0f);
+	bool outside = on[0] == off[0] && on[3] == off[3];
+	bool ok = a && b && hard && blended && outside;
+	if(a && b && !ok)
+		Detail("  off %.4f %.4f | %.4f %.4f, FXAA %.4f %.4f | %.4f %.4f; expected a blend of %.4f on each side of the edge\n",
+			off[0], off[1], off[2], off[3], on[0], on[1], on[2], on[3], want);
+	return Report(ok, name);
+}
+
+static bool
+CheckFxaaFlat(void)
+{
+	const char *name = "FXAA leaves a flat frame and steps below its contrast threshold unchanged, and feeds the scaler";
+	RGBA flat = { 90, 140, 200, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint8 *px[4];
+	float edges[2][16];
+	bool read = true;
+	EnhancedOn();
+	for(int aa = 0; aa < 2; aa++){
+		SetAntiAlias(aa ? metal::ANTIALIAS_FXAA : metal::ANTIALIAS_OFF);
+		PlainFrame(flat);
+		px[aa] = Composite();
+		cam->showRaster(0);
+		read = StepsFrame(edges[aa]) && read;
+		px[2 + aa] = Composite();
+		cam->showRaster(0);
+	}
+	SetUpscale(metal::UPSCALE_QUALITY);
+	PlainFrame(flat);
+	uint8 *up = Composite();
+	cam->showRaster(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	EnhancedOff();
+	bool flatSame = px[0] && px[1] && memcmp(px[0], px[1], w*h*4) == 0;
+	bool stepsSame = read && px[2] && px[3] && memcmp(px[2], px[3], w*h*4) == 0 &&
+		memcmp(edges[0], edges[1], sizeof(edges[0])) == 0;
+	bool scaled = CompositeNear(up, w/2, h/2, 90, 140, 200, 1) && CompositeNear(up, 0, 0, 90, 140, 200, 1);
+	if(!flatSame || !stepsSame)
+		Detail("  with FXAA the flat frame is unchanged: %d; the steps are unchanged: %d\n", flatSame, stepsSame);
+	for(int i = 0; i < 4; i++)
+		delete[] px[i];
+	delete[] up;
+	return Report(flatSame && stepsSame && scaled, name);
+}
+
+static bool
+CheckTaaFallback(void)
+{
+	const char *name = "a TAA request keeps its setting, runs FXAA in the enhanced tier and the stats line names fxaa";
+	float fxaa[4], taa[4];
+	EnhancedOn();
+	SetAntiAlias(metal::ANTIALIAS_FXAA);
+	bool a = EdgeFrame(fxaa);
+	SetAntiAlias(metal::ANTIALIAS_TAA);
+	bool b = EdgeFrame(taa);
+	int32 stored = metal::getRenderSettings().antiAliasing;
+	int32 active = metal::getFrameInfo().antiAliasing;
+	metal::logStats();
+	bool stats = strstr(metal::getStatsLine(), " aa fxaa\n") != nil;
+	SetTier(metal::TIER_CLASSIC);
+	int32 classic = metal::getFrameInfo().antiAliasing;
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	EnhancedOff();
+	bool same = a && b && fxaa[1] == taa[1] && fxaa[2] == taa[2];
+	bool ok = same && stored == metal::ANTIALIAS_TAA && active == metal::ANTIALIAS_FXAA && stats &&
+		classic == metal::ANTIALIAS_OFF;
+	if(!ok)
+		Detail("  TAA frame equals FXAA frame %d; stored %d active %d classic %d; stats names fxaa %d\n", same, stored,
+			active, classic, stats);
+	return Report(ok, name);
+}
+
+static bool
+CheckFxaaTexture(void)
+{
+	const char *name = "the FXAA texture is made only when FXAA runs; one that cannot be made logs once, reports aa off and the frame stays enhanced";
+	RGBA col = { 90, 140, 200, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint32 allocs0, logs0, allocs1, logs1, allocs2, logs2;
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	PlainFrame(col);
+	bool offNone = !metal::antiAliasTextureForTest();
+	metal::antiAliasCountsForTest(&allocs0, &logs0);
+	metal::setAntiAliasFailForTest(1);
+	SetAntiAlias(metal::ANTIALIAS_FXAA);
+	PlainFrame(col);
+	PlainFrame(col);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	metal::logStats();
+	bool stats = strstr(metal::getStatsLine(), " aa off\n") != nil;
+	uint8 *px = Composite();
+	cam->showRaster(0);
+	metal::setAntiAliasFailForTest(0);
+	PlainFrame(col);
+	bool stillOff = metal::getFrameInfo().antiAliasing == metal::ANTIALIAS_OFF;
+	metal::antiAliasCountsForTest(&allocs1, &logs1);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	PlainFrame(col);
+	metal::antiAliasCountsForTest(&allocs2, &logs2);
+	bool rebuilt = metal::antiAliasTextureForTest() && metal::getFrameInfo().antiAliasing == metal::ANTIALIAS_FXAA;
+	SetAntiAlias(metal::ANTIALIAS_OFF);
+	EnhancedOff();
+	bool counts = allocs1 - allocs0 == 1 && logs1 - logs0 == 1 && allocs2 - allocs1 == 1 && logs2 == logs1;
+	bool failed = fi.tier == metal::TIER_ENHANCED && fi.antiAliasing == metal::ANTIALIAS_OFF && stats && stillOff;
+	bool ok = offNone && failed && rebuilt && counts && CompositeNear(px, w/2, h/2, 90, 140, 200, 1);
+	if(!offNone || !failed || !rebuilt || !counts)
+		Detail("  made with FXAA off %d; after a failure tier %d aa %d, stats off %d, still off %d; rebuilt %d; allocations +%u +%u, logs +%u +%u\n",
+			!offNone, fi.tier, fi.antiAliasing, stats, stillOff, rebuilt, allocs1 - allocs0, allocs2 - allocs1,
+			logs1 - logs0, logs2 - logs1);
+	delete[] px;
+	return Report(ok, name);
+}
+
 static bool
 CheckScalerFallback(void)
 {
@@ -1789,6 +1976,72 @@ CheckDeringCopy(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckDeringNan(void)
+{
+	const char *name = "the dering pass turns a NaN from the scaler into the neighbourhood minimum, in place and through a copy";
+	RGBA flat = { 90, 140, 200, 255 };
+	float nan[2][4], side[2][4];
+	bool read = true;
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	metal::setDeringNanForTest(320, 240);
+	for(int copy = 0; copy < 2; copy++){
+		metal::setDeringCopyForTest(copy);
+		metal::beginScene(cam);
+		Begin(flat);
+		metal::endScene(nil);
+		read = metal::readFrameOutput(320, 240, nan[copy]) && metal::readFrameOutput(321, 240, side[copy]) && read;
+		Finish();
+	}
+	metal::setDeringNanForTest(-1, -1);
+	metal::setDeringCopyForTest(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool ok = read;
+	for(int copy = 0; copy < 2; copy++)
+		for(int i = 0; i < 3; i++)
+			ok = ok && nan[copy][i] == side[copy][i] && side[copy][i] > 0.0f;
+	if(read && !ok)
+		Detail("  in place %.4f %.4f %.4f beside %.4f %.4f %.4f; copy %.4f %.4f %.4f beside %.4f %.4f %.4f\n",
+			nan[0][0], nan[0][1], nan[0][2], side[0][0], side[0][1], side[0][2],
+			nan[1][0], nan[1][1], nan[1][2], side[1][0], side[1][1], side[1][2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDeringCopyFailure(void)
+{
+	const char *name = "a dering copy texture that cannot be made logs once and is not retried until the targets are rebuilt";
+	RGBA col = { 90, 140, 200, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint32 attempts0, logs0, attempts1, logs1, attempts2, logs2;
+	metal::upscaledCountsForTest(&attempts0, &logs0);
+	metal::setUpscaledFailForTest(1);
+	metal::setDeringCopyForTest(1);
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	PlainFrame(col);
+	PlainFrame(col);
+	uint8 *px = Composite();
+	cam->showRaster(0);
+	metal::upscaledCountsForTest(&attempts1, &logs1);
+	SetUpscale(metal::UPSCALE_PERFORMANCE);
+	PlainFrame(col);
+	PlainFrame(col);
+	metal::upscaledCountsForTest(&attempts2, &logs2);
+	metal::setUpscaledFailForTest(0);
+	metal::setDeringCopyForTest(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool counts = attempts1 - attempts0 == 1 && logs1 - logs0 == 1 && attempts2 - attempts1 == 1 && logs2 == logs1;
+	bool ok = counts && CompositeNear(px, w/2, h/2, 90, 140, 200, 1) && CompositeNear(px, 0, 0, 90, 140, 200, 1);
+	if(!counts)
+		Detail("  attempts +%u +%u, logs +%u +%u\n", attempts1 - attempts0, attempts2 - attempts1, logs1 - logs0, logs2 - logs1);
+	delete[] px;
+	return Report(ok, name);
+}
+
 int
 RunFrameChecks(Camera *camera)
 {
@@ -1836,9 +2089,15 @@ RunFrameChecks(Camera *camera)
 	CheckUpscaleChange();
 	CheckSubRasterScaled();
 	CheckUpscaledCopy();
+	CheckFxaaEdge();
+	CheckFxaaFlat();
+	CheckTaaFallback();
+	CheckFxaaTexture();
 	CheckScalerFallback();
 	CheckScalerRinging();
 	CheckDeringCopy();
+	CheckDeringNan();
+	CheckDeringCopyFailure();
 	CheckGradeSourceCached();
 	CheckGradeConstantsPadded();
 	CheckEmissiveReset();

@@ -32,6 +32,13 @@ enum
 
 enum
 {
+	ANTIALIAS_OFF = 0,
+	ANTIALIAS_FXAA,
+	ANTIALIAS_TAA
+};
+
+enum
+{
 	TIERREASON_NONE = 0,
 	TIERREASON_NOAPPLEGPU,
 	TIERREASON_NORAYTRACING
@@ -97,6 +104,16 @@ tierReasonText(int32_t reason)
 	case TIERREASON_NORAYTRACING: return "needs hardware ray tracing (GPU family Apple 9)";
 	}
 	return "";
+}
+
+inline const char*
+antiAliasName(int32_t aa)
+{
+	switch(aa){
+	case ANTIALIAS_FXAA: return "fxaa";
+	case ANTIALIAS_TAA: return "taa";
+	}
+	return "off";
 }
 
 inline float

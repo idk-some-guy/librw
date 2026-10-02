@@ -7,6 +7,7 @@
 #include "metalbloom.h"
 #include "metaloutput.h"
 #include "metaldering.h"
+#include "metalaa.h"
 #include <string>
 #import <AppKit/AppKit.h>
 #import <MetalFX/MetalFX.h>
@@ -21,6 +22,8 @@ namespace metal {
 #include "shaders/bloomh_metal.inc"
 #include "shaders/dering_metal.inc"
 #include "shaders/deringh_metal.inc"
+#include "shaders/fxaa_metal.inc"
+#include "shaders/aah_metal.inc"
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -43,7 +46,7 @@ struct GradeFrame
 
 struct FrameState
 {
-	RenderSettings settings = { TIER_CLASSIC, UPSCALE_NATIVE, 0, HDROUTPUT_AUTO, EMITTERPEAK_DEFAULT, SOFTNESS_DEFAULT };
+	RenderSettings settings = { TIER_CLASSIC, UPSCALE_NATIVE, 0, HDROUTPUT_AUTO, EMITTERPEAK_DEFAULT, SOFTNESS_DEFAULT, ANTIALIAS_OFF };
 	int32 activeTier = TIER_CLASSIC;
 	int32 tierReason = TIERREASON_NONE;
 	bool capsOverride = false;
@@ -64,6 +67,13 @@ struct FrameState
 	uint32 scalerAttempts = 0, scalerLogs = 0;
 	id<MTLComputePipelineState> deringInPlace = nil, deringCopy = nil;
 	bool deringCopyForced = false;
+	int32 deringNanX = -1, deringNanY = -1;
+	bool upscaledFail = false, upscaledGaveUp = false, upscaledReported = false;
+	uint32 upscaledAttempts = 0, upscaledLogs = 0;
+	id<MTLTexture> aaSource = nil;
+	bool aaFail = false, aaGaveUp = false, aaReported = false;
+	uint32 aaAllocs = 0, aaLogs = 0;
+	id<MTLComputePipelineState> fxaa = nil;
 	uint32 samples = 0;
 	bool dropping = false;
 	bool unendedReported = false;
@@ -133,6 +143,8 @@ clampSettings(const RenderSettings *s)
 	n.hdrOutput = n.hdrOutput == HDROUTPUT_OFF ? HDROUTPUT_OFF : HDROUTPUT_AUTO;
 	n.emitterPeakNits = clampRange(n.emitterPeakNits, EMITTERPEAK_MIN, EMITTERPEAK_MAX, EMITTERPEAK_DEFAULT);
 	n.softness = clampRange(n.softness, SOFTNESS_MIN, SOFTNESS_MAX, SOFTNESS_DEFAULT);
+	if(n.antiAliasing != ANTIALIAS_FXAA && n.antiAliasing != ANTIALIAS_TAA)
+		n.antiAliasing = ANTIALIAS_OFF;
 	return n;
 }
 
@@ -146,6 +158,8 @@ applySettings(const RenderSettings *s)
 	if(reason != TIERREASON_NONE && (n.tier != frame.settings.tier || reason != frame.tierReason))
 		fprintf(stderr, "rw::metal: tier %s requested, using %s; %s %s\n", tierName(n.tier), tierName(active),
 			tierName(n.tier), tierReasonText(reason));
+	if(n.antiAliasing == ANTIALIAS_TAA && frame.settings.antiAliasing != ANTIALIAS_TAA)
+		fprintf(stderr, "rw::metal: anti-aliasing taa requested, using fxaa; taa needs depth and motion vectors\n");
 	bool changed = active != frame.activeTier;
 	frame.settings = n;
 	frame.activeTier = active;
@@ -184,6 +198,14 @@ getRenderSettings(void)
 	return frame.havePending ? clampSettings(&frame.pending) : frame.settings;
 }
 
+static int32
+activeAntiAlias(void)
+{
+	if(frame.activeTier == TIER_CLASSIC || frame.fxaa == nil || frame.aaGaveUp || frame.settings.antiAliasing == ANTIALIAS_OFF)
+		return ANTIALIAS_OFF;
+	return ANTIALIAS_FXAA;
+}
+
 FrameInfo
 getFrameInfo(void)
 {
@@ -200,6 +222,7 @@ getFrameInfo(void)
 	f.potentialHeadroom = frame.potentialHeadroom;
 	f.peak = frame.peak;
 	f.bloom = frame.bloomWeight;
+	f.antiAliasing = activeAntiAlias();
 	return f;
 }
 
@@ -208,10 +231,10 @@ frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f",
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		f.upscaler == UPSCALER_SPATIAL ? "spatial" : "none", f.edr ? "on" : "off",
-		f.headroom, f.potentialHeadroom, f.peak, f.bloom);
+		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing));
 	return frame.tail;
 }
 
@@ -238,13 +261,21 @@ newTexture(MTLPixelFormat format, int32 w, int32 h, MTLTextureUsage usage, uint3
 }
 
 static id<MTLLibrary>
-frameLibrary(const char **parts, NSString **error)
+frameLibrary(const char **parts, NSString **error, bool safeMath = false)
 {
 	NSMutableString *all = [NSMutableString string];
 	NSError *err = nil;
+	MTLCompileOptions *opts = nil;
 	for(int i = 0; parts[i]; i++)
 		[all appendString:[NSString stringWithUTF8String:parts[i]]];
-	id<MTLLibrary> lib = [getContext()->device newLibraryWithSource:all options:nil error:&err];
+	if(safeMath){
+		opts = [MTLCompileOptions new];
+		if(@available(macOS 15.0, *))
+			opts.mathMode = MTLMathModeSafe;
+		else
+			opts.fastMathEnabled = NO;
+	}
+	id<MTLLibrary> lib = [getContext()->device newLibraryWithSource:all options:opts error:&err];
 	if(lib == nil && error)
 		*error = err.localizedDescription;
 	return lib;
@@ -353,7 +384,7 @@ frameInit(void)
 			fprintf(stderr, "rw::metal: bloom shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		}
 		const char *deringParts[] = { frameHead, deringh_metal_src, dering_metal_src, nil };
-		id<MTLLibrary> deringLib = frameLibrary(deringParts, &err);
+		id<MTLLibrary> deringLib = frameLibrary(deringParts, &err, true);
 		if(deringLib){
 			NSError *perr = nil;
 			id<MTLDevice> dev = getContext()->device;
@@ -363,6 +394,14 @@ frameInit(void)
 			frame.deringInPlace = frame.deringCopy = nil;
 			fprintf(stderr, "rw::metal: dering shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		}
+		const char *aaParts[] = { frameHead, aah_metal_src, fxaa_metal_src, nil };
+		NSError *aerr = nil;
+		id<MTLLibrary> aaLib = frameLibrary(aaParts, &err);
+		id<MTLFunction> aaFn = aaLib ? [aaLib newFunctionWithName:@"fxaaKernel"] : nil;
+		frame.fxaa = aaFn ? [getContext()->device newComputePipelineStateWithFunction:aaFn error:&aerr] : nil;
+		if(frame.fxaa == nil)
+			fprintf(stderr, "rw::metal: FXAA kernel failed to build: %s\n",
+				aerr ? aerr.localizedDescription.UTF8String : aaLib ? "no fxaaKernel" : err ? err.UTF8String : "");
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -390,6 +429,9 @@ dropSceneTargets(void)
 	frame.output = nil;
 	frame.graded = nil;
 	frame.upscaled = nil;
+	frame.upscaledGaveUp = false;
+	frame.aaSource = nil;
+	frame.aaGaveUp = false;
 	frame.scaler = nil;
 	frame.factor = -1;
 	frame.upscaler = UPSCALER_NONE;
@@ -491,6 +533,45 @@ setDeringCopyForTest(bool32 copy)
 }
 
 void
+setDeringNanForTest(int32 x, int32 y)
+{
+	frame.deringNanX = x;
+	frame.deringNanY = y;
+}
+
+void
+setAntiAliasFailForTest(bool32 fail)
+{
+	frame.aaFail = fail != 0;
+}
+
+void
+antiAliasCountsForTest(uint32 *allocs, uint32 *logs)
+{
+	*allocs = frame.aaAllocs;
+	*logs = frame.aaLogs;
+}
+
+bool32
+antiAliasTextureForTest(void)
+{
+	return frame.aaSource != nil;
+}
+
+void
+setUpscaledFailForTest(bool32 fail)
+{
+	frame.upscaledFail = fail != 0;
+}
+
+void
+upscaledCountsForTest(uint32 *attempts, uint32 *logs)
+{
+	*attempts = frame.upscaledAttempts;
+	*logs = frame.upscaledLogs;
+}
+
+void
 setScalerFailForTest(bool32 fail)
 {
 	frame.scalerFail = fail != 0;
@@ -563,10 +644,33 @@ ensureBloomTargets(void)
 static bool
 ensureUpscaled(void)
 {
-	if(frame.upscaled == nil)
-		frame.upscaled = newTexture(MTLPixelFormatRGBA16Float, frame.outputWidth, frame.outputHeight,
-			MTLTextureUsageShaderRead | frame.scaler.outputTextureUsage, 1);
-	return frame.upscaled != nil;
+	if(frame.upscaled || frame.upscaledGaveUp)
+		return frame.upscaled != nil;
+	frame.upscaledAttempts++;
+	frame.upscaled = frame.upscaledFail ? nil : newTexture(MTLPixelFormatRGBA16Float, frame.outputWidth,
+		frame.outputHeight, MTLTextureUsageShaderRead | frame.scaler.outputTextureUsage, 1);
+	if(frame.upscaled)
+		return true;
+	frame.upscaledGaveUp = true;
+	if(!frame.upscaledReported){
+		frame.upscaledReported = true;
+		frame.upscaledLogs++;
+		fprintf(stderr, "rw::metal: dering copy texture for %dx%d could not be created; the upscaled frame goes out unclamped\n",
+			frame.outputWidth, frame.outputHeight);
+	}
+	return false;
+}
+
+static void
+injectNan(id<MTLTexture> t)
+{
+	uint16 px[4] = { 0x7e00, 0x7e00, 0x7e00, 0x3c00 };
+	id<MTLBuffer> buf = [getContext()->device newBufferWithBytes:px length:sizeof(px) options:MTLResourceStorageModeShared];
+	id<MTLBlitCommandEncoder> blit = [frameCommandBuffer() blitCommandEncoder];
+	[blit copyFromBuffer:buf sourceOffset:0 sourceBytesPerRow:sizeof(px) sourceBytesPerImage:sizeof(px)
+		sourceSize:MTLSizeMake(1, 1, 1) toTexture:t destinationSlice:0 destinationLevel:0
+		destinationOrigin:MTLOriginMake(frame.deringNanX, frame.deringNanY, 0)];
+	[blit endEncoding];
 }
 
 static void
@@ -580,6 +684,9 @@ encodeUpscale(void)
 	frame.scaler.inputContentWidth = frame.internalWidth;
 	frame.scaler.inputContentHeight = frame.internalHeight;
 	[frame.scaler encodeToCommandBuffer:frameCommandBuffer()];
+	if(frame.deringNanX >= 0 && frame.deringNanX < frame.outputWidth && frame.deringNanY >= 0 &&
+	   frame.deringNanY < frame.outputHeight)
+		injectNan(frame.scaler.outputTexture);
 	if(!inPlace && !copy)
 		return;
 	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
@@ -595,9 +702,42 @@ encodeUpscale(void)
 	[enc endEncoding];
 }
 
+static bool
+ensureAntiAlias(void)
+{
+	if(frame.aaSource)
+		return true;
+	frame.aaAllocs++;
+	frame.aaSource = frame.aaFail ? nil : newTexture(MTLPixelFormatRGBA16Float, frame.internalWidth, frame.internalHeight,
+		MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1);
+	if(frame.aaSource)
+		return true;
+	frame.aaGaveUp = true;
+	if(!frame.aaReported){
+		frame.aaReported = true;
+		frame.aaLogs++;
+		fprintf(stderr, "rw::metal: FXAA texture for %dx%d could not be created; rendering without anti-aliasing\n",
+			frame.internalWidth, frame.internalHeight);
+	}
+	return false;
+}
+
+static void
+encodeAntiAlias(id<MTLTexture> dst)
+{
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:frame.fxaa];
+	[enc setTexture:frame.aaSource atIndex:0];
+	[enc setTexture:dst atIndex:1];
+	[enc dispatchThreads:MTLSizeMake(frame.internalWidth, frame.internalHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[enc endEncoding];
+}
+
 static void
 encodeGrade(const GradeParams *p)
 {
+	id<MTLTexture> dest = frame.graded ? frame.graded : frame.output;
+	bool aa = activeAntiAlias() == ANTIALIAS_FXAA && ensureAntiAlias();
 	float32 weight = p ? clampRange(p->bloomWeight, 0.0f, 1.0f, 0.0f) : 0.0f;
 	float32 constants[MAXGRADECONSTANTS*4] = {};
 
@@ -614,11 +754,13 @@ encodeGrade(const GradeParams *p)
 	[enc setComputePipelineState:frame.grade];
 	[enc setTexture:getRasterTexture(frame.sceneBase) atIndex:0];
 	[enc setTexture:weight > 0.0f ? frame.bloomUp[0] : frame.black atIndex:2];
-	[enc setTexture:frame.graded ? frame.graded : frame.output atIndex:3];
+	[enc setTexture:aa ? frame.aaSource : dest atIndex:3];
 	[enc setBytes:&g length:sizeof(g) atIndex:0];
 	[enc setBytes:constants length:sizeof(constants) atIndex:1];
 	[enc dispatchThreads:MTLSizeMake(frame.internalWidth, frame.internalHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
+	if(aa)
+		encodeAntiAlias(dest);
 	if(frame.scaler)
 		encodeUpscale();
 }
@@ -983,6 +1125,8 @@ frameTerm(void)
 	frame.unendedReported = false;
 	frame.targetsReported = false;
 	frame.scalerReported = false;
+	frame.upscaledReported = false;
+	frame.aaReported = false;
 	frame.edr = 0;
 	frame.outputDirty = true;
 	if(frame.screenSpace)

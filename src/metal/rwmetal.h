@@ -331,6 +331,7 @@ struct RenderSettings
 	int32 hdrOutput;
 	float32 emitterPeakNits;
 	float32 softness;
+	int32 antiAliasing;
 };
 
 struct FrameInfo
@@ -343,6 +344,7 @@ struct FrameInfo
 	bool32 edr;
 	float32 headroom, potentialHeadroom, peak;
 	float32 bloom;
+	int32 antiAliasing;
 };
 
 void setRenderSettings(const RenderSettings *s);

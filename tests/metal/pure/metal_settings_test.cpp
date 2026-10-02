@@ -83,6 +83,16 @@ TestClamp(void)
 	CHECK(EMITTERPEAK_DEFAULT == 1000.0f && SOFTNESS_DEFAULT == 1.0f);
 }
 
+static void
+TestAntiAliasNames(void)
+{
+	CHECK(ANTIALIAS_OFF == 0 && ANTIALIAS_FXAA == 1 && ANTIALIAS_TAA == 2);
+	CHECK(strcmp(antiAliasName(ANTIALIAS_OFF), "off") == 0);
+	CHECK(strcmp(antiAliasName(ANTIALIAS_FXAA), "fxaa") == 0);
+	CHECK(strcmp(antiAliasName(ANTIALIAS_TAA), "taa") == 0);
+	CHECK(strcmp(antiAliasName(7), "off") == 0);
+}
+
 int
 main(void)
 {
@@ -91,6 +101,7 @@ main(void)
 	TestNames();
 	TestUpscale();
 	TestClamp();
+	TestAntiAliasNames();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;
