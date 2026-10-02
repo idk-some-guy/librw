@@ -67,7 +67,8 @@ const char *frame_metal_src =
 "                    constant float4 &out [[buffer(0)]])\n"
 "{\n"
 "	float3 c = frameColour(in.uv, scene, overlay);\n"
-"	return float4(edrChannel(c.r, out.x), edrChannel(c.g, out.x), edrChannel(c.b, out.x), 1.0);\n"
+"	float m = max(c.r, max(c.g, c.b));\n"
+"	return float4(edrBlend(c.r, m, out.x), edrBlend(c.g, m, out.x), edrBlend(c.b, m, out.x), 1.0);\n"
 "}\n"
 
 "fragment float4\n"

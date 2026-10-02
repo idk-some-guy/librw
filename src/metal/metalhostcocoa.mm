@@ -451,6 +451,12 @@ pollSizeChange(void)
 	return changed;
 }
 
+static void*
+surfaceScreen(void)
+{
+	return hostWindow ? (__bridge void*)hostWindow.screen : nil;
+}
+
 MetalHost cocoaHost = {
 	openHost,
 	closeHost,
@@ -464,7 +470,8 @@ MetalHost cocoaHost = {
 	backingScale,
 	refreshRate,
 	visible,
-	pollSizeChange
+	pollSizeChange,
+	surfaceScreen
 };
 
 }

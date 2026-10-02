@@ -34,6 +34,7 @@ bool frameSubViewport(Raster *fb, Raster *target, HostRect *r);
 void frameScaleClear(PassClear *c);
 void frameShow(void);
 bool frameEncodeComposite(Raster *raster, id<MTLTexture> target);
+void frameUpdateOutput(CAMetalLayer *layer, uint32 frameCount);
 int32 frameCopyRoute(Raster *src);
 bool frameReadsComposite(Raster *src);
 bool32 frameRenderCopy(Raster *src, id<MTLTexture> dst, int32 dx, int32 dy, int32 w, int32 h);

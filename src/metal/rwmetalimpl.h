@@ -104,11 +104,14 @@ bool32 cocoaFullscreenSizeForTest(int32 mode, int32 *width, int32 *height);
 bool32 passIsOpen(void);
 bool32 readDepthPixel(Raster *zbuffer, int32 x, int32 y, float32 *depth);
 bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
+bool32 compositeCameraPixelsHalf(Raster *raster, uint16 *dst);
 void setTierCapsForTest(const TierCaps *caps);
 uint32 gradeBuildsForTest(void);
 void setBloomKarisForTest(bool32 on);
 bool32 readFrameOutput(int32 x, int32 y, float32 rgba[4]);
 bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
+void setEdrForTest(float32 current, float32 potential, bool32 notify);
+bool32 layerIsEdrForTest(void);
 Raster *createSceneRaster(int32 width, int32 height);
 #endif
 

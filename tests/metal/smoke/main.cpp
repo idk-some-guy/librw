@@ -4813,6 +4813,7 @@ CheckRestart(void)
 int
 main(void)
 {
+	metal::setEdrForTest(1.0f, 1.0f, 1);
 	if(!CheckOpen()){
 		printf("%d failures\n", failures);
 		return 1;
@@ -4891,6 +4892,7 @@ main(void)
 		StopEngine();
 #endif
 	}
+	metal::setEdrForTest(0.0f, 0.0f, 1);
 
 	if(failures){
 		printf("%d failures\n", failures);

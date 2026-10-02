@@ -332,6 +332,13 @@ pollSizeChange(void)
 	return 1;
 }
 
+static void*
+surfaceScreen(void)
+{
+	NSWindow *nswin = glfwGlobals.window ? (NSWindow*)glfwGetCocoaWindow(glfwGlobals.window) : nil;
+	return nswin ? (__bridge void*)nswin.screen : nil;
+}
+
 MetalHost glfwHost = {
 	openHost,
 	closeHost,
@@ -345,7 +352,8 @@ MetalHost glfwHost = {
 	backingScale,
 	refreshRate,
 	visible,
-	pollSizeChange
+	pollSizeChange,
+	surfaceScreen
 };
 
 }

@@ -90,6 +90,7 @@ TestEdrChannel(void)
 	CHECK(edrChannel(0.5f, 1.0f) == srgbToLinear(0.5f));
 	CHECK(edrChannel(1.2f, 0.5f) == 1.0f);
 	CHECK(edrChannel(-0.5f, 4.0f) == 0.0f);
+	CHECK(edrChannel(INFINITY, 4.0f) == 4.0f);
 }
 
 static void
@@ -102,6 +103,33 @@ TestWanted(void)
 	CHECK(!edrWanted(1, 0, 1.0f));
 }
 
+static void
+TestEdrBlend(void)
+{
+	const float pairs[][2] = { { 2.0f, 2.0f }, { 0.0f, 2.0f }, { 0.5f, 2.0f }, { 8.0f, 8.0f }, { 1.0f, 8.0f }, { 0.3f, 0.5f } };
+	for(int i = 0; i < 6; i++){
+		float x = pairs[i][0], m = pairs[i][1];
+		float sdr = srgbToLinear(sdrShoulder(x, m));
+		CHECK(edrBlend(x, m, 1.0f) == sdr);
+		CHECK(edrBlend(x, m, 0.5f) == sdr);
+		CHECK(Near(edrBlend(x, m, 1.0001f), sdr, 1e-3f));
+		CHECK(edrBlend(x, m, 1.25f) == edrChannel(x, 1.25f));
+		CHECK(edrBlend(x, m, 2.0f) == edrChannel(x, 2.0f));
+		CHECK(edrBlend(x, m, 4.0f) == edrChannel(x, 4.0f));
+		bool up = false, down = false;
+		float prev = edrBlend(x, m, 1.0f);
+		for(int j = 1; j <= 100; j++){
+			float y = edrBlend(x, m, 1.0f + j*0.005f);
+			up = up || y > prev + 1e-6f;
+			down = down || y < prev - 1e-6f;
+			prev = y;
+		}
+		CHECK(!(up && down));
+	}
+	float mid = edrBlend(0.0f, 2.0f, 1.05f);
+	CHECK(mid > 0.0f && mid < srgbToLinear(sdrShoulder(0.0f, 2.0f)));
+}
+
 int
 main(void)
 {
@@ -111,6 +139,7 @@ main(void)
 	TestPeak();
 	TestEdrChannel();
 	TestWanted();
+	TestEdrBlend();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;

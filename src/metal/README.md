@@ -36,6 +36,7 @@ The device calls the table from the engine's device requests and from `showRaste
 | `refreshRate()` | `showRaster`, on a frame that sleeps without a drawable | The display's refresh rate in Hz, 0 when unknown (the device then uses 60). |
 | `visible()` | `showRaster`, every frame with a surface | See "Hidden surfaces". |
 | `pollSizeChange()` | `showRaster`, every frame with a surface | Return true once after the size or scale changed, counting from `createSurface`. The device then reads `drawableSize` and `backingScale` and updates the layer. |
+| `surfaceScreen()` | `showRaster`, when the backend re-reads the EDR headroom | Return the `NSScreen` of the surface's window as a `void *`, or `nil`. The device reads the screen's EDR headroom and colour space from it. A table without the entry (`nil`) means no screen. |
 
 Across the table, 0 means none or unknown: a count, a size, a scale or a rate of 0, and a mode `refresh` of 0.
 
@@ -240,6 +241,12 @@ The SDR composite leaves every pixel whose channels are all at or below 1.0 unch
 
 With a positive `GradeParams::bloomWeight`, `endScene` builds a six-level pyramid from the RGBA16F scene colour before the grade. The first level is a 13-tap downsample with Karis-weighted groups, so one very bright pixel cannot flood the glow. Each level is upsampled with a tent filter whose reach is `0.5 + 0.5 x softness` texels of the level below. The grade mixes the result into the scene by the weight (`mix(scene, bloom, weight)`), so the grade colours the glow. There is no threshold: everything blooms a little, emitters most. A weight of 0 skips the pyramid.
 
+### Output
+
+With `hdrOutput` auto, the enhanced or modern tier, and a screen whose potential EDR headroom (`maximumPotentialExtendedDynamicRangeColorComponentValue`) is above 1.0, the layer becomes `rgba16Float` with `wantsExtendedDynamicRangeContent` and the screen's own colour space, extended and linearised (extended linear sRGB when the screen has none). The composite then writes the sRGB curve below white, so the frame matches the SDR frame there. Above white it writes `1 + (peak - 1) * e * s / ((peak - 1) + e * s)` for an excess `e`, with `s` the slope of the sRGB curve at 1.0. `peak` is `emitterPeakNits / 100`, clamped to the screen's current headroom (`maximumExtendedDynamicRangeColorComponentValue`). The backend re-reads the headroom when the host calls `displayChanged()`, when the window changes screen or size, and every 64 presents, and logs `rw::metal: EDR output on|off ...` when the layer changes. Otherwise the layer stays `BGRA8Unorm`, untagged, and the composite applies the SDR shoulder.
+
+macOS reports a current headroom of 1.0 until a layer on the screen asks for EDR, so the first EDR frames have a peak of 1.0. At that peak the composite applies the SDR shoulder and linearises the result, so emitters look as they do in SDR until the next re-read finds the raised headroom. Between a peak of 1.0 and 1.25 the composite mixes the two results by `smoothstep(1.0, 1.25, peak)`, so a saturated emitter does not jump from near white to its full colour when the headroom crosses 1.0. The inverse transfer is always the sRGB curve. That is right for sRGB and Display P3 screens; on a screen profiled with another curve the shadows shift against the untagged SDR layer. A classic frame on an EDR layer, such as a menu, is linearised with the sRGB curve. The layer changes format only in `showRaster`, before the next drawable is taken.
+
 ## Log lines
 
 The backend writes these lines to stderr, each starting with `rw::metal:`. Errors such as a pipeline that fails to build, an oversized custom block or a texture that cannot be created go through librw's error mechanism (`RWERROR`) instead.
@@ -248,6 +255,7 @@ The backend writes these lines to stderr, each starting with `rw::metal:`. Error
 - `pipeline <key> created after init` for each state built during drawing.
 - `draw dropped, <cause> (shader <vs>/<fs>)` once per cause and shader, or `draw dropped, <cause> (shader none)` when no shader is set. Causes: no render encoder is open; no shader is set; its pipeline failed to build; no ring space for its uniform blocks; no render target is set; it samples the raster it renders into; a two-uv im2d draw has no override shader or layout.
 - `uniform block <n> is <a> bytes, shader expects <b>`, `shader <vs>/<fs>: <compiler warnings>`, `command buffer error: <text>`, `clear pipelines at <n> samples failed; using at most <m> samples`.
+- `EDR output on|off, headroom <current> of <potential>, emitter peak <peak>` when the layer switches between EDR and SDR or the screen's colour space changes. See "Output".
 
 ### Statistics line
 

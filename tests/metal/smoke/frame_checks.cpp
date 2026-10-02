@@ -923,6 +923,212 @@ CheckBloomFirefly(void)
 	return Report(ok, name);
 }
 
+static void
+PlainFrame(RGBA clear)
+{
+	metal::beginScene(cam);
+	Begin(clear);
+	metal::endScene(nil);
+	Finish();
+}
+
+static void
+SetOutput(int32 hdr, float nits)
+{
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.hdrOutput = hdr;
+	s.emitterPeakNits = nits;
+	metal::setRenderSettings(&s);
+}
+
+static float
+Half(const uint16 *px, int x, int y, int c)
+{
+	return (float)((const __fp16*)px)[(y*cam->frameBuffer->width + x)*4 + c];
+}
+
+static bool
+CheckEdrLayer(void)
+{
+	const char *name = "with headroom, HDR output auto makes the layer an rgba16Float EDR layer; off, no headroom and classic keep BGRA8";
+	RGBA grey = { 128, 128, 128, 255 };
+	EnhancedOn();
+	metal::setEdrForTest(4.0f, 4.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	PlainFrame(grey);
+	bool on = metal::layerIsEdrForTest() && metal::getFrameInfo().edr;
+	SetOutput(metal::HDROUTPUT_OFF, 1000.0f);
+	PlainFrame(grey);
+	bool off = !metal::layerIsEdrForTest() && !metal::getFrameInfo().edr;
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	PlainFrame(grey);
+	SetTier(metal::TIER_CLASSIC);
+	Begin(grey);
+	Finish();
+	bool classic = !metal::layerIsEdrForTest() && !metal::getFrameInfo().edr;
+	EnhancedOn();
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	PlainFrame(grey);
+	bool flat = !metal::layerIsEdrForTest();
+	EnhancedOff();
+	if(!(on && off && classic && flat))
+		Detail("  EDR with headroom %d, with HDR output off %d, classic %d, without headroom %d\n", on, !off, !classic, !flat);
+	return Report(on && off && classic && flat, name);
+}
+
+static bool
+CheckEdrComposite(void)
+{
+	const char *name = "the EDR composite keeps the sRGB curve below white and maps an emitter through the peak";
+	RGBA black = { 0, 0, 0, 255 };
+	RGBA grey = { 128, 128, 128, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint16 *px = new uint16[w*h*4];
+	EnhancedOn();
+	metal::setEdrForTest(4.0f, 4.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	metal::beginScene(cam);
+	Begin(black);
+	Quad(0, 0, 100, 100, grey, DRAW_OPAQUE);
+	Quad(100, 0, 200, 100, white, DRAW_OPAQUE);
+	metal::setEmissiveScale(8.0f);
+	Quad(200, 0, 300, 100, white, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	Finish();
+	bool read = metal::compositeCameraPixelsHalf(cam->frameBuffer, px) != 0;
+	cam->showRaster(0);
+	float peak = metal::getFrameInfo().peak;
+	EnhancedOff();
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	float emitter = edrChannel(8.0f, 4.0f);
+	bool ok = read && NearF(peak, 4.0f, 1e-3f);
+	ok = ok && NearF(Half(px, 50, 50, 0), srgbToLinear(128/255.0f), 0.002f);
+	ok = ok && NearF(Half(px, 150, 50, 1), 1.0f, 0.002f);
+	ok = ok && NearF(Half(px, 250, 50, 2), emitter, 0.02f);
+	if(read && !ok)
+		Detail("  peak %.3f; grey %.4f white %.4f emitter %.4f (expected %.4f, 1, %.4f)\n", peak, Half(px, 50, 50, 0),
+			Half(px, 150, 50, 1), Half(px, 250, 50, 2), srgbToLinear(128/255.0f), emitter);
+	delete[] px;
+	return Report(ok, name);
+}
+
+static bool
+EdrRedEmitter(float current, float rg[2], float *peak, bool *edr)
+{
+	RGBA black = { 0, 0, 0, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint16 *px = new uint16[w*h*4];
+	EnhancedOn();
+	metal::setEdrForTest(current, 4.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	metal::beginScene(cam);
+	Begin(black);
+	metal::setEmissiveScale(2.0f);
+	Quad(0, 0, 100, 100, RED, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	Finish();
+	bool read = metal::compositeCameraPixelsHalf(cam->frameBuffer, px) != 0;
+	cam->showRaster(0);
+	*edr = metal::layerIsEdrForTest() && metal::getFrameInfo().edr;
+	*peak = metal::getFrameInfo().peak;
+	EnhancedOff();
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	rg[0] = read ? Half(px, 50, 50, 0) : 0.0f;
+	rg[1] = read ? Half(px, 50, 50, 1) : 0.0f;
+	delete[] px;
+	if(!read)
+		Detail("  compositeCameraPixelsHalf failed\n");
+	return read;
+}
+
+static bool
+CheckEdrShoulder(void)
+{
+	const char *name = "an EDR layer whose current headroom is still 1.0 keeps the SDR shoulder, linearised";
+	float rg[2], peak;
+	bool edr;
+	bool read = EdrRedEmitter(1.0f, rg, &peak, &edr);
+	float g = srgbToLinear(sdrShoulder(0.0f, 2.0f));
+	bool ok = read && edr && peak == 1.0f && NearF(rg[0], 1.0f, 0.002f) && NearF(rg[1], g, 0.002f);
+	if(read && !ok)
+		Detail("  EDR layer %d, peak %.3f; red %.4f green %.4f (expected 1, %.4f)\n", edr, peak, rg[0], rg[1], g);
+	return Report(ok, name);
+}
+
+static bool
+CheckEdrBlend(void)
+{
+	const char *name = "just above a headroom of 1.0 the EDR composite lies between the SDR shoulder and the EDR mapping";
+	float rg[2], peak;
+	bool edr;
+	bool read = EdrRedEmitter(1.05f, rg, &peak, &edr);
+	float sdr = srgbToLinear(sdrShoulder(0.0f, 2.0f)), mapped = edrChannel(0.0f, 1.05f);
+	float want = edrBlend(0.0f, 2.0f, 1.05f);
+	bool ok = read && edr && NearF(peak, 1.05f, 1e-3f) && rg[1] > mapped + 0.01f && rg[1] < sdr - 0.01f &&
+		NearF(rg[1], want, 0.002f) && NearF(rg[0], edrBlend(2.0f, 2.0f, 1.05f), 0.002f);
+	if(read && !ok)
+		Detail("  EDR layer %d, peak %.3f; red %.4f green %.4f (expected %.4f, %.4f between %.4f and %.4f)\n", edr, peak,
+			rg[0], rg[1], edrBlend(2.0f, 2.0f, 1.05f), want, mapped, sdr);
+	return Report(ok, name);
+}
+
+static bool
+CheckEdrPeak(void)
+{
+	const char *name = "the emitter peak follows EmitterPeakNits and is clamped to the current headroom";
+	RGBA grey = { 128, 128, 128, 255 };
+	EnhancedOn();
+	metal::setEdrForTest(16.0f, 16.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 400.0f);
+	PlainFrame(grey);
+	float a = metal::getFrameInfo().peak;
+	metal::setEdrForTest(2.5f, 16.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 4000.0f);
+	PlainFrame(grey);
+	float b = metal::getFrameInfo().peak;
+	metal::setEdrForTest(16.0f, 16.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	PlainFrame(grey);
+	float c = metal::getFrameInfo().peak;
+	SetOutput(metal::HDROUTPUT_OFF, 1000.0f);
+	PlainFrame(grey);
+	float d = metal::getFrameInfo().peak;
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	EnhancedOff();
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	bool ok = NearF(a, 4.0f, 1e-3f) && NearF(b, 2.5f, 1e-3f) && NearF(c, 10.0f, 1e-3f) && d == 1.0f;
+	if(!ok)
+		Detail("  peaks %.3f %.3f %.3f %.3f, expected 4, 2.5, 10, 1\n", a, b, c, d);
+	return Report(ok, name);
+}
+
+static bool
+CheckDisplayChange(void)
+{
+	const char *name = "a display change re-reads the headroom at the next present";
+	RGBA grey = { 128, 128, 128, 255 };
+	EnhancedOn();
+	metal::setEdrForTest(4.0f, 4.0f, 1);
+	PlainFrame(grey);
+	if((metal::getFrameStats().framesShown & 63) == 0)
+		PlainFrame(grey);
+	metal::setEdrForTest(2.0f, 4.0f, 0);
+	PlainFrame(grey);
+	float before = metal::getFrameInfo().headroom;
+	metal::displayChanged();
+	PlainFrame(grey);
+	float after = metal::getFrameInfo().headroom;
+	EnhancedOff();
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	bool ok = before == 4.0f && after == 2.0f;
+	if(!ok)
+		Detail("  headroom %.2f before the display change, %.2f after; expected 4 and 2\n", before, after);
+	return Report(ok, name);
+}
+
 static bool
 CheckGradeSourceCached(void)
 {
@@ -1312,6 +1518,12 @@ RunFrameChecks(Camera *camera)
 	CheckBloomSpread();
 	CheckBloomFlat();
 	CheckBloomFirefly();
+	CheckEdrLayer();
+	CheckEdrComposite();
+	CheckEdrShoulder();
+	CheckEdrBlend();
+	CheckEdrPeak();
+	CheckDisplayChange();
 	CheckGradeSourceCached();
 	CheckGradeConstantsPadded();
 	CheckEmissiveReset();

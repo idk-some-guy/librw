@@ -48,7 +48,20 @@ edrChannel(float x, float peak)
 	float room = peak - 1.0f;
 	if(!(room > 0.0f))
 		return base;
-	return base + room*e*EDR_SLOPE/(room + e*EDR_SLOPE);
+	return base + (room - room*room/(room + e*EDR_SLOPE));
+}
+
+#define EDR_BLEND_END 1.25f
+
+static inline float
+edrBlend(float x, float m, float peak)
+{
+	float sdr = srgbToLinear(sdrShoulder(x, m));
+	float t = OUTPUT_MIN(OUTPUT_MAX((peak - 1.0f)/(EDR_BLEND_END - 1.0f), 0.0f), 1.0f);
+	if(t >= 1.0f)
+		return edrChannel(x, peak);
+	t = t*t*(3.0f - 2.0f*t);
+	return sdr + (edrChannel(x, peak) - sdr)*t;
 }
 
 static inline bool

@@ -5,7 +5,9 @@
 #include "metalkeys.h"
 #include "rwmetalshader.h"
 #include "metalbloom.h"
+#include "metaloutput.h"
 #include <string>
+#import <AppKit/AppKit.h>
 
 namespace rw {
 namespace metal {
@@ -59,6 +61,10 @@ struct FrameState
 	int32 upscaler = UPSCALER_NONE;
 	bool32 edr = 0;
 	float32 headroom = 1.0f, potentialHeadroom = 1.0f, peak = 1.0f;
+	bool outputDirty = true;
+	bool edrOverride = false;
+	float32 testCurrent = 1.0f, testPotential = 1.0f;
+	CGColorSpaceRef screenSpace = nil;
 	float32 bloomWeight = 0.0f;
 	float32 emissiveScale = 1.0f;
 
@@ -132,6 +138,7 @@ applySettings(const RenderSettings *s)
 	frame.settings = n;
 	frame.activeTier = active;
 	frame.tierReason = reason;
+	frame.outputDirty = true;
 	if(changed)
 		frameTierChanged();
 }
@@ -620,27 +627,129 @@ frameShow(void)
 	frame.phase = phaseOnShow(frame.phase);
 }
 
+static void
+configureLayer(CAMetalLayer *layer, bool edr, CGColorSpaceRef screenSpace)
+{
+	if(edr){
+		CGColorSpaceRef lin = screenSpace ? CGColorSpaceCreateExtendedLinearized(screenSpace) : nil;
+		if(lin == nil)
+			lin = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
+		layer.pixelFormat = MTLPixelFormatRGBA16Float;
+		layer.wantsExtendedDynamicRangeContent = YES;
+		layer.colorspace = lin;
+		CGColorSpaceRelease(lin);
+	}else{
+		layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+		layer.wantsExtendedDynamicRangeContent = NO;
+		layer.colorspace = nil;
+	}
+}
+
+static bool
+sameSpace(CGColorSpaceRef a, CGColorSpaceRef b)
+{
+	return a == b || (a && b && CFEqual(a, b));
+}
+
+void
+frameUpdateOutput(CAMetalLayer *layer, uint32 frameCount)
+{
+	float32 current = 1.0f, potential = 1.0f;
+	CGColorSpaceRef space = nil;
+
+	if(!frame.outputDirty && (frameCount & 63) != 0)
+		return;
+	frame.outputDirty = false;
+	if(frame.edrOverride){
+		current = frame.testCurrent;
+		potential = frame.testPotential;
+	}else if(metalGlobals.host && metalGlobals.host->surfaceScreen){
+		NSScreen *screen = (__bridge NSScreen*)metalGlobals.host->surfaceScreen();
+		if(screen){
+			current = screen.maximumExtendedDynamicRangeColorComponentValue;
+			potential = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
+			space = CGColorSpaceRetain(screen.colorSpace.CGColorSpace);
+		}
+	}
+	bool want = edrWanted(frame.activeTier, frame.settings.hdrOutput, potential) &&
+		frame.compositeEdr != nil && frame.classicEdr != nil;
+	frame.headroom = current;
+	frame.potentialHeadroom = potential;
+	frame.peak = want ? edrPeak(frame.settings.emitterPeakNits, current) : 1.0f;
+	if(layer && (want != (frame.edr != 0) || (want && !sameSpace(space, frame.screenSpace)))){
+		configureLayer(layer, want, space);
+		fprintf(stderr, "rw::metal: EDR output %s, headroom %.2f of %.2f, emitter peak %.2f\n",
+			want ? "on" : "off", current, potential, frame.peak);
+	}
+	if(frame.screenSpace)
+		CGColorSpaceRelease(frame.screenSpace);
+	frame.screenSpace = space;
+	frame.edr = want;
+}
+
+void
+displayChanged(void)
+{
+	frame.outputDirty = true;
+}
+
+void
+setEdrForTest(float32 current, float32 potential, bool32 notify)
+{
+	frame.edrOverride = current > 0.0f;
+	frame.testCurrent = current;
+	frame.testPotential = potential;
+	if(notify)
+		frame.outputDirty = true;
+}
+
+bool32
+layerIsEdrForTest(void)
+{
+	MetalContext *ctx = getContext();
+	CAMetalLayer *layer = ctx ? ctx->layer : nil;
+	return layer && layer.pixelFormat == MTLPixelFormatRGBA16Float && layer.wantsExtendedDynamicRangeContent &&
+		layer.colorspace != nil;
+}
+
 bool
 frameEncodeComposite(Raster *raster, id<MTLTexture> target)
 {
 	float32 uv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+	float32 out[4] = { frame.peak, 0.0f, 0.0f, 0.0f };
+	bool enhanced = raster && raster->parent == frame.mainColor && frame.output &&
+		(frame.phase == PHASE_POST || frame.phase == PHASE_SHOWN);
+	bool half = target.pixelFormat == MTLPixelFormatRGBA16Float;
+	id<MTLRenderPipelineState> pipe = nil;
+	id<MTLTexture> classic = nil;
 
-	if(raster == nil || raster->parent != frame.mainColor || frame.output == nil ||
-	   (frame.phase != PHASE_POST && frame.phase != PHASE_SHOWN))
+	if(enhanced)
+		pipe = half ? frame.compositeEdr : target.pixelFormat == MTLPixelFormatBGRA8Unorm ? frame.compositeBGRA : nil;
+	else if(half){
+		pipe = frame.classicEdr;
+		if(raster && raster->parent->type == Raster::CAMERA)
+			classic = getRasterTexture(raster->parent);
+	}else
 		return false;
-	id<MTLRenderPipelineState> pipe = target.pixelFormat == MTLPixelFormatBGRA8Unorm ? frame.compositeBGRA : nil;
 	if(pipe == nil)
 		return false;
 	MTLRenderPassDescriptor *desc = [MTLRenderPassDescriptor renderPassDescriptor];
 	desc.colorAttachments[0].texture = target;
-	desc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+	desc.colorAttachments[0].loadAction = enhanced || classic ? MTLLoadActionDontCare : MTLLoadActionClear;
 	desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+	desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 	id<MTLRenderCommandEncoder> enc = [frameCommandBuffer() renderCommandEncoderWithDescriptor:desc];
-	[enc setRenderPipelineState:pipe];
-	[enc setVertexBytes:uv length:sizeof(uv) atIndex:0];
-	[enc setFragmentTexture:frame.output atIndex:0];
-	[enc setFragmentTexture:getRasterTexture(frame.mainColor) atIndex:1];
-	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	if(enhanced || classic){
+		[enc setRenderPipelineState:pipe];
+		[enc setVertexBytes:uv length:sizeof(uv) atIndex:0];
+		if(enhanced){
+			[enc setFragmentTexture:frame.output atIndex:0];
+			[enc setFragmentTexture:getRasterTexture(frame.mainColor) atIndex:1];
+			[enc setFragmentBytes:out length:sizeof(out) atIndex:0];
+		}else
+			[enc setFragmentTexture:classic atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	}
 	[enc endEncoding];
 	return true;
 }
@@ -749,6 +858,11 @@ frameTerm(void)
 	dropSceneTargets();
 	frame.unendedReported = false;
 	frame.targetsReported = false;
+	frame.edr = 0;
+	frame.outputDirty = true;
+	if(frame.screenSpace)
+		CGColorSpaceRelease(frame.screenSpace);
+	frame.screenSpace = nil;
 }
 
 void

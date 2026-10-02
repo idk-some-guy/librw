@@ -66,7 +66,8 @@ frameCompositeEdrFS(FrameVSOut in [[stage_in]],
                     constant float4 &out [[buffer(0)]])
 {
 	float3 c = frameColour(in.uv, scene, overlay);
-	return float4(edrChannel(c.r, out.x), edrChannel(c.g, out.x), edrChannel(c.b, out.x), 1.0);
+	float m = max(c.r, max(c.g, c.b));
+	return float4(edrBlend(c.r, m, out.x), edrBlend(c.g, m, out.x), edrBlend(c.b, m, out.x), 1.0);
 }
 
 fragment float4

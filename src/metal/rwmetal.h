@@ -48,6 +48,7 @@ struct MetalHost
 	int32 (*refreshRate)(void);
 	bool32 (*visible)(void);
 	bool32 (*pollSizeChange)(void);
+	void *(*surfaceScreen)(void);
 };
 
 #ifdef LIBRW_GLFW
@@ -365,6 +366,7 @@ bool32 enhancedFrame(void);
 void setEmissiveScale(float32 s);
 float32 getEmissiveScale(void);
 bool32 setGradeShader(const char *src);
+void displayChanged(void);
 
 }
 }

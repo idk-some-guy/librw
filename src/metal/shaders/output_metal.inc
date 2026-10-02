@@ -49,7 +49,20 @@ const char *output_metal_src =
 "	float room = peak - 1.0f;\n"
 "	if(!(room > 0.0f))\n"
 "		return base;\n"
-"	return base + room*e*EDR_SLOPE/(room + e*EDR_SLOPE);\n"
+"	return base + (room - room*room/(room + e*EDR_SLOPE));\n"
+"}\n"
+
+"#define EDR_BLEND_END 1.25f\n"
+
+"static inline float\n"
+"edrBlend(float x, float m, float peak)\n"
+"{\n"
+"	float sdr = srgbToLinear(sdrShoulder(x, m));\n"
+"	float t = OUTPUT_MIN(OUTPUT_MAX((peak - 1.0f)/(EDR_BLEND_END - 1.0f), 0.0f), 1.0f);\n"
+"	if(t >= 1.0f)\n"
+"		return edrChannel(x, peak);\n"
+"	t = t*t*(3.0f - 2.0f*t);\n"
+"	return sdr + (edrChannel(x, peak) - sdr)*t;\n"
 "}\n"
 
 "static inline bool\n"

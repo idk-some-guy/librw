@@ -1330,6 +1330,43 @@ compositeCameraPixels(Raster *raster, uint8 *dst)
 	}
 }
 
+bool32
+compositeCameraPixelsHalf(Raster *raster, uint16 *dst)
+{
+	MetalContext *ctx = getContext();
+	MTLTextureDescriptor *desc;
+	id<MTLTexture> tex;
+	int32 w, h;
+
+	if(ctx == nil || raster == nil || raster->parent->type != Raster::CAMERA)
+		return 0;
+	w = raster->parent->width;
+	h = raster->parent->height;
+	@autoreleasepool {
+		desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+			width:w height:h mipmapped:NO];
+		desc.usage = MTLTextureUsageRenderTarget;
+		desc.storageMode = MTLStorageModePrivate;
+		tex = [ctx->device newTextureWithDescriptor:desc];
+		if(tex == nil)
+			return 0;
+		passManager.flush();
+		runPassActions();
+		composite(ctx, raster, tex);
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:w*h*8 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = getCommandBuffer(ctx);
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:w*8 destinationBytesPerImage:w*h*8];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		memcpy(dst, buf.contents, w*h*8);
+	}
+	return 1;
+}
+
 static void
 waitWithoutDrawable(void)
 {
@@ -1354,8 +1391,11 @@ showRaster(Raster *raster, uint32 flags)
 		runPassActions();
 		hidden = ctx->layer && !surfaceVisible();
 		if(ctx->layer){
-			if(metalGlobals.host->pollSizeChange())
+			if(metalGlobals.host->pollSizeChange()){
 				syncLayer(ctx);
+				displayChanged();
+			}
+			frameUpdateOutput(ctx->layer, frameStats.framesShown);
 			ctx->layer.displaySyncEnabled = (flags & Raster::FLIPWAITVSYNCH) != 0;
 			if(!hidden && ctx->layer.drawableSize.width > 0 && ctx->layer.drawableSize.height > 0){
 				auto start = std::chrono::steady_clock::now();
