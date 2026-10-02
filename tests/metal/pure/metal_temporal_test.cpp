@@ -73,6 +73,27 @@ TestJitterProjection(void)
 }
 
 static void
+TestUnjitter(void)
+{
+	float n = 1.0f, f = 101.0f;
+	float base[16] = { 1.0f, 0, 0, 0, 0, 1.0f/0.75f, 0, 0, 0, 0, (f+n)/(f-n), 1.0f, 0, 0, -2.0f*n*f/(f-n), 0 };
+	float jit[16];
+	const float jx[2] = { 0.25f, -0.4375f }, jy[2] = { -0.375f, 0.3889f };
+	for(int k = 0; k < 2; k++){
+		for(int i = 0; i < 16; i++)
+			jit[i] = base[i];
+		tmJitterProjection(jit, jx[k], jy[k], 640, 480);
+		float x0, y0, x1, y1;
+		Project(base, 1.5f, -2.0f, 10.0f, 640, 480, &x0, &y0);
+		Project(jit, 1.5f, -2.0f, 10.0f, 640, 480, &x1, &y1);
+		TMUv uv = tmUnjitterUv(x0 - 0.5f, y0 - 0.5f, jx[k], jy[k], 640, 480);
+		CHECK(Near(uv.u*640.0f, x1, 1e-3f) && Near(uv.v*480.0f, y1, 1e-3f));
+	}
+	TMUv still = tmUnjitterUv(10.0f, 20.0f, 0.0f, 0.0f, 640, 480);
+	CHECK(Near(still.u, 10.5f/640.0f, 1e-7f) && Near(still.v, 20.5f/480.0f, 1e-7f));
+}
+
+static void
 TestColour(void)
 {
 	TMColor c = { 0.2f, 0.6f, 0.9f };
@@ -113,6 +134,7 @@ main(void)
 	TestHalton();
 	TestJitter();
 	TestJitterProjection();
+	TestUnjitter();
 	TestColour();
 	TestHistory();
 	if(failures == 0)

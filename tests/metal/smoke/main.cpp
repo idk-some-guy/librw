@@ -37,6 +37,11 @@ struct Context
 static Context ctx;
 static uint32 framesAtStart;
 static uint32 engineSamples = 1;
+enum { MAXSTARTS = 16 };
+static uint32 lateAtStop[MAXSTARTS], hostLateAtStop[MAXSTARTS];
+static int stops = 0;
+static bool inHost = false;
+static uint32 hostMark = 0, hostLate = 0;
 static int failures = 0;
 static char details[4096];
 static int detailsLen = 0;
@@ -202,6 +207,7 @@ StartEngine(int w, int h)
 		return false;
 	}
 	framesAtStart = metal::getFrameStats().framesShown;
+	hostMark = metal::getStateStats().pipelinesLate;
 	ctx.camera = Camera::create();
 	ctx.frame = rw::Frame::create();
 	ctx.camera->setFrame(ctx.frame);
@@ -211,6 +217,15 @@ StartEngine(int w, int h)
 static void
 StopEngine(void)
 {
+	uint32 late = metal::getStateStats().pipelinesLate;
+	if(inHost)
+		hostLate += late - hostMark;
+	if(stops < MAXSTARTS){
+		lateAtStop[stops] = late;
+		hostLateAtStop[stops] = hostLate;
+	}
+	stops++;
+	hostLate = 0;
 	DestroyRasters();
 	ctx.camera->destroy();
 	ctx.frame->destroy();
@@ -237,6 +252,36 @@ static Camera*
 CurrentCamera(void)
 {
 	return ctx.camera;
+}
+
+static void
+HostChecksBegin(void)
+{
+	inHost = true;
+	hostMark = metal::getStateStats().pipelinesLate;
+}
+
+static void
+HostChecksEnd(void)
+{
+	hostLate += metal::getStateStats().pipelinesLate - hostMark;
+	inHost = false;
+}
+
+// Custom shaders, uncommon states and depthless cameras build late on purpose; restarts rebuild a few.
+static bool
+CheckLatePipelines(void)
+{
+	static const uint32 expected[] = { 31, 6, 2, 2 };
+	bool ok = stops > 0;
+	for(int i = 0; i < stops && i < MAXSTARTS; i++){
+		uint32 want = i < (int)(sizeof(expected)/sizeof(expected[0])) ? expected[i] : 0;
+		uint32 own = lateAtStop[i] - hostLateAtStop[i];
+		Detail("  engine start %d: %u pipelines built late, %u of them in host checks; %u expected outside them\n", i + 1,
+		       lateAtStop[i], hostLateAtStop[i], want);
+		ok = ok && own == want;
+	}
+	return Report(ok, "each engine start builds only the late pipelines its checks expect");
 }
 
 static bool
@@ -4875,7 +4920,9 @@ main(void)
 	failures += RunSkinChecks(ctx.camera);
 	failures += RunMatFXChecks(ctx.camera);
 	failures += RunTargetChecks(ctx.camera);
+	HostChecksBegin();
 	failures += RunHostChecks(ctx.camera);
+	HostChecksEnd();
 	CheckHostTable();
 	CheckResize();
 	metal::setCustomConstants(staleConstants, sizeof(staleConstants));
@@ -4885,7 +4932,9 @@ main(void)
 		CheckOversizedCustomBlockDropped();
 		failures += RunRestartWorldChecks(RestartEngine, CurrentCamera);
 		failures += RunRestartTargetChecks(RestartEngine, CurrentCamera);
+		HostChecksBegin();
 		failures += RunRestartHostChecks(RestartEngine, CurrentCamera);
+		HostChecksEnd();
 		failures += RunMsaaChecks(RestartEngineSamples, CurrentCamera);
 		failures += RunRestartFrameChecks(RestartEngineSamples, CurrentCamera);
 		failures += RunRestartModernChecks(RestartEngineSamples, CurrentCamera);
@@ -4896,6 +4945,7 @@ main(void)
 #endif
 	}
 	metal::setEdrForTest(0.0f, 0.0f, 1);
+	CheckLatePipelines();
 
 	if(failures){
 		printf("%d failures\n", failures);

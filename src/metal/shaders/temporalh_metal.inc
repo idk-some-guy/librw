@@ -19,6 +19,7 @@ const char *temporalh_metal_src =
 
 "struct TMColor { float r, g, b; };\n"
 "struct TMJitter { float x, y; };\n"
+"struct TMUv { float u, v; };\n"
 
 "static inline float\n"
 "tmHalton(unsigned int index, unsigned int base)\n"
@@ -40,6 +41,13 @@ const char *temporalh_metal_src =
 "	j.x = tmHalton(i, 2) - 0.5f;\n"
 "	j.y = tmHalton(i, 3) - 0.5f;\n"
 "	return j;\n"
+"}\n"
+
+"static inline TMUv\n"
+"tmUnjitterUv(float px, float py, float jx, float jy, float width, float height)\n"
+"{\n"
+"	TMUv r = { (px + 0.5f + jx)/width, (py + 0.5f + jy)/height };\n"
+"	return r;\n"
 "}\n"
 
 "static inline float\n"

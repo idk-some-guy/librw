@@ -139,7 +139,7 @@ im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint
 	xform[1] = -2.0f/cam->frameBuffer->height;
 	xform[2] = -1.0f;
 	xform[3] = 1.0f;
-	if(getContext()->encoderColorFormat == COLORFMT_SCENE && frameJitterIm2D(cam, &nx, &ny)){
+	if(frameJitterIm2D(cam, &nx, &ny)){
 		xform[2] += nx;
 		xform[3] += ny;
 	}

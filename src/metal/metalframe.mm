@@ -32,6 +32,8 @@ namespace metal {
 #include "shaders/motion_metal.inc"
 #include "shaders/im3d_metal.inc"
 #include "shaders/reactive_metal.inc"
+#include "shaders/temporalh_metal.inc"
+#include "shaders/taa_metal.inc"
 extern const char *prepassh_metal_src;
 extern const char *header_metal_src;
 extern const char *im2d_metal_src;
@@ -56,6 +58,12 @@ struct GradeFrame
 	uint32 grade;
 	float32 bloomNorm;
 	float32 pad;
+};
+
+struct TaaFrame
+{
+	uint32 width, height, valid, pad;
+	float32 jitterX, jitterY, pad2[2];
 };
 
 struct FrameState
@@ -141,9 +149,15 @@ struct FrameState
 	uint32 temporalHistoryShow = 0;
 	id<MTLTexture> reactive = nil;
 	id<MTLRenderPipelineState> reactive2D = nil, reactive2DUV2 = nil, reactive3D = nil;
+	MTLRenderPassDescriptor *reactivePass = nil;
 	bool reactiveBuilt = false, reactiveReported = false;
 	std::vector<ReactiveDraw> reactiveDraws;
 	int32 reactiveDepth = 0;
+	id<MTLComputePipelineState> taa = nil;
+	id<MTLTexture> taaHistory[2] = { nil, nil };
+	uint32 taaIndex = 0;
+	bool taaFail = false, taaGaveUp = false, taaReported = false;
+	uint32 taaAllocs = 0, taaLogs = 0, taaRequests = 0;
 	char tail[512] = "";
 };
 
@@ -203,8 +217,11 @@ applySettings(const RenderSettings *s)
 		fprintf(stderr, "rw::metal: tier %s requested, using %s; %s %s\n", tierName(n.tier), tierName(active),
 			tierName(n.tier), tierReasonText(reason));
 	if(n.antiAliasing == ANTIALIAS_TAA && frame.settings.antiAliasing != ANTIALIAS_TAA &&
-	   (active != TIER_MODERN || n.upscale == UPSCALE_NATIVE))
+	   (active != TIER_MODERN || !prepassShadersReady() || frame.farMotion == nil || frame.prepassResolve == nil ||
+	    (n.upscale == UPSCALE_NATIVE && frame.taa == nil))){
+		frame.taaRequests++;
 		fprintf(stderr, "rw::metal: anti-aliasing taa requested, using fxaa; taa needs depth and motion vectors\n");
+	}
 	bool changed = active != frame.activeTier;
 	if(changed || memcmp(&n, &frame.settings, sizeof(n)) != 0)
 		frame.temporalReset = true;
@@ -245,6 +262,14 @@ getRenderSettings(void)
 	return frame.havePending ? clampSettings(&frame.pending) : frame.settings;
 }
 
+static bool
+taaRuns(void)
+{
+	return frame.activeTier == TIER_MODERN && frame.settings.antiAliasing == ANTIALIAS_TAA &&
+		frame.settings.upscale == UPSCALE_NATIVE && frame.upscaler == UPSCALER_NONE && frame.taa && !frame.taaGaveUp &&
+		frame.sceneDepth && prepassShadersReady() && frame.farMotion && frame.prepassResolve;
+}
+
 static int32
 activeAntiAlias(void)
 {
@@ -252,9 +277,17 @@ activeAntiAlias(void)
 		return ANTIALIAS_OFF;
 	if(frame.temporal)
 		return ANTIALIAS_TEMPORAL;
-	if(frame.fxaa == nil || frame.aaGaveUp || frame.settings.antiAliasing == ANTIALIAS_OFF)
+	if(frame.aaGaveUp || frame.settings.antiAliasing == ANTIALIAS_OFF)
 		return ANTIALIAS_OFF;
-	return ANTIALIAS_FXAA;
+	if(taaRuns())
+		return ANTIALIAS_TAA;
+	return frame.fxaa ? ANTIALIAS_FXAA : ANTIALIAS_OFF;
+}
+
+static bool
+temporalConsumer(void)
+{
+	return frame.temporal != nil || activeAntiAlias() == ANTIALIAS_TAA;
 }
 
 static TMJitter
@@ -480,6 +513,14 @@ frameInit(void)
 				frame.farMotion = frame.prepassResolve = nil;
 			if(frame.farMotion == nil || frame.prepassResolve == nil)
 				fprintf(stderr, "rw::metal: motion kernels failed to build; modern frames draw without the prepass\n");
+		const char *taaParts[] = { frameHead, temporalh_metal_src, taa_metal_src, nil };
+		NSError *terr = nil;
+		id<MTLLibrary> taaLib = frameLibrary(taaParts, &err);
+		id<MTLFunction> taaFn = taaLib ? [taaLib newFunctionWithName:@"taaResolve"] : nil;
+		frame.taa = taaFn ? [getContext()->device newComputePipelineStateWithFunction:taaFn error:&terr] : nil;
+		if(frame.taa == nil)
+			fprintf(stderr, "rw::metal: TAA kernel failed to build: %s\n",
+				terr ? terr.localizedDescription.UTF8String : taaLib ? "no taaResolve" : err ? err.UTF8String : "");
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -516,6 +557,8 @@ dropSceneTargets(void)
 	frame.upscaledGaveUp = false;
 	frame.aaSource = nil;
 	frame.aaGaveUp = false;
+	frame.taaHistory[0] = frame.taaHistory[1] = nil;
+	frame.taaGaveUp = false;
 	frame.scaler = nil;
 	frame.temporal = nil;
 	frame.reactive = nil;
@@ -614,6 +657,10 @@ buildReactive(void)
 		return;
 	frame.reactiveBuilt = true;
 	frame.reactiveDraws.reserve(REACTIVE_DRAWS);
+	frame.reactivePass = [MTLRenderPassDescriptor renderPassDescriptor];
+	frame.reactivePass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	frame.reactivePass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	frame.reactivePass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 	const char *parts[] = { header_metal_src, im2d_metal_src, im3d_metal_src, reactive_metal_src, nil };
 	NSString *err = nil;
 	id<MTLLibrary> lib = frameLibrary(parts, &err);
@@ -959,12 +1006,9 @@ encodeReactive(void)
 {
 	if(!ensureReactive())
 		return;
-	MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
-	d.colorAttachments[0].texture = frame.reactive;
-	d.colorAttachments[0].loadAction = MTLLoadActionClear;
-	d.colorAttachments[0].storeAction = MTLStoreActionStore;
-	d.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-	id<MTLRenderCommandEncoder> e = [frameCommandBuffer() renderCommandEncoderWithDescriptor:d];
+	frame.reactivePass.colorAttachments[0].texture = frame.reactive;
+	id<MTLRenderCommandEncoder> e = [frameCommandBuffer() renderCommandEncoderWithDescriptor:frame.reactivePass];
+	frame.reactivePass.colorAttachments[0].texture = nil;
 	for(const ReactiveDraw &r : frame.reactiveDraws){
 		id<MTLRenderPipelineState> pipe = reactivePipelineFor(r.layout);
 		if(pipe == nil || r.vertices == nil)
@@ -987,11 +1031,26 @@ encodeReactive(void)
 	frame.reactiveDraws.clear();
 }
 
+static bool
+temporalResetNow(void)
+{
+	return frame.temporalReset || !frame.prepassValid || !frame.prevPrepassValid;
+}
+
+static void
+temporalEncoded(bool reset)
+{
+	frame.temporalReset = false;
+	frame.temporalResetLast = reset;
+	frame.temporalHistory = !reset;
+	frame.temporalHistoryShow = frame.shows;
+}
+
 static void
 encodeTemporal(void)
 {
 	id<MTLFXTemporalScaler> t = frame.temporal;
-	bool reset = frame.temporalReset || !frame.prepassValid || !frame.prevPrepassValid;
+	bool reset = temporalResetNow();
 	t.colorTexture = frame.graded;
 	t.depthTexture = getRasterTexture(frame.sceneDepth);
 	t.motionTexture = frame.prepassMotion;
@@ -1008,17 +1067,79 @@ encodeTemporal(void)
 	t.depthReversed = NO;
 	t.reset = reset;
 	[t encodeToCommandBuffer:frameCommandBuffer()];
-	frame.temporalReset = false;
-	frame.temporalResetLast = reset;
-	frame.temporalHistory = !reset;
-	frame.temporalHistoryShow = frame.shows;
+	temporalEncoded(reset);
+}
+
+static void
+dropTaa(void)
+{
+	if(frame.taaHistory[0] == nil && frame.taaHistory[1] == nil)
+		return;
+	frame.taaHistory[0] = frame.taaHistory[1] = nil;
+	frame.temporalHistory = false;
+}
+
+static bool
+ensureTaa(void)
+{
+	if(frame.taaHistory[0] && frame.taaHistory[1])
+		return true;
+	frame.taaAllocs++;
+	bool inputs = !frame.taaFail && ensurePrepassTargets() && ensureReactive();
+	for(int i = 0; i < 2; i++)
+		frame.taaHistory[i] = inputs ? newTexture(MTLPixelFormatRGBA16Float, frame.outputWidth, frame.outputHeight,
+			MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1) : nil;
+	if(frame.taaHistory[0] && frame.taaHistory[1]){
+		buildReactive();
+		frame.taaIndex = 0;
+		frame.temporalReset = true;
+		return true;
+	}
+	frame.taaHistory[0] = frame.taaHistory[1] = nil;
+	frame.taaGaveUp = true;
+	if(!frame.taaReported){
+		frame.taaReported = true;
+		frame.taaLogs++;
+		fprintf(stderr, "rw::metal: TAA history for %dx%d could not be created; using FXAA\n", frame.outputWidth,
+			frame.outputHeight);
+	}
+	return false;
+}
+
+static void
+encodeTaa(void)
+{
+	bool reset = temporalResetNow();
+	TMJitter j = appliedJitter();
+	TaaFrame p = { (uint32)frame.outputWidth, (uint32)frame.outputHeight, reset ? 0u : 1u, 0u, j.x, j.y, { 0.0f, 0.0f } };
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:frame.taa];
+	[enc setTexture:frame.aaSource atIndex:0];
+	[enc setTexture:frame.taaHistory[frame.taaIndex] atIndex:1];
+	[enc setTexture:frame.prepassMotion atIndex:2];
+	[enc setTexture:frame.reactive atIndex:3];
+	[enc setTexture:frame.output atIndex:4];
+	[enc setTexture:frame.taaHistory[frame.taaIndex ^ 1] atIndex:5];
+	[enc setBytes:&p length:sizeof(p) atIndex:0];
+	dispatchOver(enc, frame.output);
+	[enc endEncoding];
+	frame.taaIndex ^= 1;
+	temporalEncoded(reset);
 }
 
 static void
 encodeGrade(const GradeParams *p)
 {
 	id<MTLTexture> dest = frame.graded ? frame.graded : frame.output;
-	bool aa = activeAntiAlias() == ANTIALIAS_FXAA && ensureAntiAlias();
+	int32 method = activeAntiAlias();
+	if(method == ANTIALIAS_TAA && !(ensureAntiAlias() && ensureTaa()))
+		method = activeAntiAlias();
+	if(method != ANTIALIAS_TAA)
+		dropTaa();
+	if(method != ANTIALIAS_FXAA && method != ANTIALIAS_TAA)
+		frame.aaSource = nil;
+	bool aa = method == ANTIALIAS_FXAA && ensureAntiAlias();
+	bool taa = method == ANTIALIAS_TAA;
 	float32 weight = p ? clampRange(p->bloomWeight, 0.0f, 1.0f, 0.0f) : 0.0f;
 	float32 constants[MAXGRADECONSTANTS*4] = {};
 
@@ -1035,14 +1156,17 @@ encodeGrade(const GradeParams *p)
 	[enc setComputePipelineState:frame.grade];
 	[enc setTexture:getRasterTexture(frame.sceneBase) atIndex:0];
 	[enc setTexture:weight > 0.0f ? frame.bloomUp[0] : frame.black atIndex:2];
-	[enc setTexture:aa ? frame.aaSource : dest atIndex:3];
+	[enc setTexture:aa || taa ? frame.aaSource : dest atIndex:3];
 	[enc setBytes:&g length:sizeof(g) atIndex:0];
 	[enc setBytes:constants length:sizeof(constants) atIndex:1];
 	[enc dispatchThreads:MTLSizeMake(frame.internalWidth, frame.internalHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
 	if(aa)
 		encodeAntiAlias(dest);
-	if(frame.temporal){
+	if(taa){
+		encodeReactive();
+		encodeTaa();
+	}else if(frame.temporal){
 		if(@available(macOS 14.4, *))
 			encodeReactive();
 		encodeTemporal();
@@ -1072,7 +1196,7 @@ beginScene(Camera *cam)
 		bool enhanced = frame.activeTier != TIER_CLASSIC && frame.available && main->type == Raster::CAMERA &&
 			ensureSceneTargets(main, depth);
 		bool history = frame.prevPrepassValid && frame.temporalHistory && frame.temporalHistoryShow + 1 == frame.shows;
-		frame.jitterOn = enhanced && frame.activeTier == TIER_MODERN && frame.temporal != nil && !frame.temporalReset && history;
+		frame.jitterOn = enhanced && frame.activeTier == TIER_MODERN && temporalConsumer() && !frame.temporalReset && history;
 		frame.jitter = frame.jitterOn ? tmJitter(frame.jitterIndex++) : TMJitter{ 0.0f, 0.0f };
 		frame.jitterApplied = false;
 		frame.phase = phaseOnBeginScene(frame.phase, enhanced);
@@ -1133,7 +1257,7 @@ bool
 frameJitterIm2D(Camera *cam, float32 *nx, float32 *ny)
 {
 	int32 w, h;
-	if(!frame.jitterApplied || frame.phase != PHASE_SCENE || !jitterSpan(cam, &w, &h))
+	if(!frame.jitterApplied || !jitterSpan(cam, &w, &h))
 		return false;
 	tmJitterNdc(frame.jitter.x, frame.jitter.y, w, h, nx, ny);
 	return true;
@@ -1148,7 +1272,7 @@ frameCameraCut(void)
 bool
 frameTemporalActive(void)
 {
-	return frame.temporal != nil && (frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS);
+	return (frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS) && temporalConsumer();
 }
 
 bool
@@ -1229,6 +1353,38 @@ uint32
 temporalLogsForTest(void)
 {
 	return frame.temporalLogs;
+}
+
+void
+setJitterIndexForTest(uint32 index)
+{
+	frame.jitterIndex = index;
+}
+
+void
+setTaaFailForTest(bool32 fail)
+{
+	frame.taaFail = fail != 0;
+}
+
+void
+taaCountsForTest(uint32 *allocs, uint32 *logs, uint32 *requests)
+{
+	*allocs = frame.taaAllocs;
+	*logs = frame.taaLogs;
+	*requests = frame.taaRequests;
+}
+
+bool32
+taaHistoryForTest(void)
+{
+	return frame.taaHistory[0] != nil && frame.taaHistory[1] != nil;
+}
+
+const void*
+reactivePassForTest(void)
+{
+	return (__bridge const void*)frame.reactivePass;
 }
 
 bool32
@@ -1790,10 +1946,12 @@ frameTerm(void)
 	frame.scalerReported = false;
 	frame.upscaledReported = false;
 	frame.aaReported = false;
+	frame.taaReported = false;
 	frame.temporalReported = false;
 	frame.temporalNoTargets = false;
 	frame.reactiveBuilt = false;
 	frame.reactive2D = frame.reactive2DUV2 = frame.reactive3D = nil;
+	frame.reactivePass = nil;
 	frame.reactiveDraws.clear();
 	frame.prepassValid = false;
 	frame.edr = 0;

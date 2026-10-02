@@ -1780,11 +1780,14 @@ CheckTaaFallback(void)
 {
 	const char *name = "a TAA request keeps its setting, runs FXAA in the enhanced tier and the stats line names fxaa";
 	float fxaa[4], taa[4];
+	uint32 allocs, logs, requests0, requests1;
 	EnhancedOn();
 	SetAntiAlias(metal::ANTIALIAS_FXAA);
 	bool a = EdgeFrame(fxaa);
+	metal::taaCountsForTest(&allocs, &logs, &requests0);
 	SetAntiAlias(metal::ANTIALIAS_TAA);
 	bool b = EdgeFrame(taa);
+	metal::taaCountsForTest(&allocs, &logs, &requests1);
 	int32 stored = metal::getRenderSettings().antiAliasing;
 	int32 active = metal::getFrameInfo().antiAliasing;
 	metal::logStats();
@@ -1795,10 +1798,10 @@ CheckTaaFallback(void)
 	EnhancedOff();
 	bool same = a && b && fxaa[1] == taa[1] && fxaa[2] == taa[2];
 	bool ok = same && stored == metal::ANTIALIAS_TAA && active == metal::ANTIALIAS_FXAA && stats &&
-		classic == metal::ANTIALIAS_OFF;
+		classic == metal::ANTIALIAS_OFF && requests1 - requests0 == 1;
 	if(!ok)
-		Detail("  TAA frame equals FXAA frame %d; stored %d active %d classic %d; stats names fxaa %d\n", same, stored,
-			active, classic, stats);
+		Detail("  TAA frame equals FXAA frame %d; stored %d active %d classic %d; stats names fxaa %d; fallback lines %u\n", same,
+			stored, active, classic, stats, requests1 - requests0);
 	return Report(ok, name);
 }
 

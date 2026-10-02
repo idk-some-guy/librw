@@ -18,6 +18,7 @@
 
 struct TMColor { float r, g, b; };
 struct TMJitter { float x, y; };
+struct TMUv { float u, v; };
 
 static inline float
 tmHalton(unsigned int index, unsigned int base)
@@ -39,6 +40,13 @@ tmJitter(unsigned int frame)
 	j.x = tmHalton(i, 2) - 0.5f;
 	j.y = tmHalton(i, 3) - 0.5f;
 	return j;
+}
+
+static inline TMUv
+tmUnjitterUv(float px, float py, float jx, float jy, float width, float height)
+{
+	TMUv r = { (px + 0.5f + jx)/width, (py + 0.5f + jy)/height };
+	return r;
 }
 
 static inline float
