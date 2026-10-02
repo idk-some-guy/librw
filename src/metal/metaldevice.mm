@@ -1,4 +1,5 @@
 #ifdef RW_METAL
+#include <atomic>
 #include <chrono>
 #include "metalobjc.h"
 #include "metalpass.h"
@@ -201,6 +202,14 @@ getCommandBuffer(MetalContext *ctx)
 	return ctx->commandBuffer;
 }
 
+static std::atomic<double> lastGpuMs;
+
+double
+lastFrameGpuMsForTest(void)
+{
+	return lastGpuMs.load();
+}
+
 static void
 finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 {
@@ -218,6 +227,7 @@ finishFrame(MetalContext *ctx, id<CAMetalDrawable> drawable)
 		[cb addCompletedHandler:^(id<MTLCommandBuffer> done){
 			if(done.error)
 				fprintf(stderr, "rw::metal: command buffer error: %s\n", done.error.localizedDescription.UTF8String);
+			lastGpuMs.store((done.GPUEndTime - done.GPUStartTime)*1000.0);
 			frameCompleted(frameId);
 			dispatch_semaphore_signal(sem);
 		}];

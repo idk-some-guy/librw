@@ -41,6 +41,8 @@ skinVS(SkinIn in [[stage_in]],
 	out.color.rgb += DoDynamicLight(V.xyz, N, lights)*surfDiffuse;
 	out.color = clamp(out.color, 0.0, 1.0);
 	out.color *= material.matColor;
+	if(relit)
+		out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
 	out.fog = DoFog(out.position.z, state);
 	out.pointSize = 1.0;
 	out.position = MetalDepth(out.position);

@@ -19,11 +19,19 @@ using namespace metal;
 #define BUFFER_LIGHTS	7
 #define BUFFER_MATFX	8
 #define BUFFER_EMISSIVE	9
+#define BUFFER_NORMALSTREAM 13
+#define BUFFER_FACEINDICES 14
+#define BUFFER_FACEVERTICES 15
+#define BUFFER_FACELAYOUT 16
+#define BUFFER_RELIT 17
+#define TEXTURE_SHADOW 8
 
 constant bool alphaTest [[function_constant(0)]];
 constant bool directionals [[function_constant(1)]];
 constant bool pointLights [[function_constant(2)]];
 constant bool spotLights [[function_constant(3)]];
+constant bool relit [[function_constant(6)]];
+constant bool relitPrelit [[function_constant(7)]];
 
 struct State
 {
@@ -70,12 +78,40 @@ struct Material
 #define surfSpecular (material.surfProps.y)
 #define surfDiffuse (material.surfProps.z)
 
+struct Relit
+{
+	float4 sunDir;
+	float4 sunColor;
+	float4 skyTop;
+	float4 skyBottom;
+	float4 eye;
+	float4 params;
+};
+
+struct FaceFetch
+{
+	float4 col0;
+	float4 col1;
+	float4 col2;
+	uint stride;
+	uint posOffset;
+	uint firstIndex;
+	uint strip;
+	uint numVertices;
+	uint twoSided;
+	uint pad[2];
+};
+
 struct VertexOut
 {
 	float4 position [[position, invariant]];
 	float4 color;
 	float2 tex0;
 	float fog;
+	float4 sun [[function_constant(relit)]];
+	float4 classic1 [[function_constant(relitPrelit)]];
+	float4 relitNormal [[function_constant(relitPrelit)]];
+	float3 relitPos [[function_constant(relitPrelit)]];
 	float pointSize [[point_size]];
 };
 
@@ -85,6 +121,10 @@ struct FragmentIn
 	float4 color;
 	float2 tex0;
 	float fog;
+	float4 sun [[function_constant(relit)]];
+	float4 classic1 [[function_constant(relitPrelit)]];
+	float4 relitNormal [[function_constant(relitPrelit)]];
+	float3 relitPos [[function_constant(relitPrelit)]];
 };
 
 static float3
@@ -119,6 +159,116 @@ DoDynamicLight(float3 V, float3 N, constant Lights &lights)
 		}
 	}
 	return color;
+}
+
+static float3
+DoSunLight(float3 N, constant Lights &lights)
+{
+	float3 c = float3(0.0);
+	for(int i = 0; i < MAX_LIGHTS; i++){
+		if(lights.lightParams[i].x == 0.0)
+			break;
+		if(directionals && lights.lightParams[i].x == 1.0){
+			if(lights.lightParams[i].w == 1.0)
+				c += max(0.0, dot(N, -lights.lightDirection[i].xyz))*lights.lightColor[i].rgb;
+		}else if(spotLights && lights.lightParams[i].x == 3.0)
+			return float3(0.0);
+	}
+	return c;
+}
+
+static float4
+RelitClassic(float4 prelit, float w, constant Lights &lights, constant Material &material)
+{
+	float4 c = float4(relitWeighted(prelit.r, w), relitWeighted(prelit.g, w), relitWeighted(prelit.b, w), prelit.a);
+	c.rgb += lights.ambLight.rgb*surfAmbient;
+	return clamp(c, 0.0, 1.0);
+}
+
+static float4
+RelitSunPart(float4 full, float4 prelit, float3 V, float3 N, float diffuse, constant Lights &lights,
+             constant Material &material)
+{
+	float3 c = prelit.rgb + lights.ambLight.rgb*surfAmbient + (DoDynamicLight(V, N, lights) - DoSunLight(N, lights))*diffuse;
+	return float4(full.rgb - clamp(c, 0.0, 1.0)*material.matColor.rgb, 0.0);
+}
+
+static float3
+faceFetchPos(const device uchar *v, constant FaceFetch &f, uint i)
+{
+	float3 p = float3(*(const device packed_float3*)(v + i*f.stride + f.posOffset));
+	return f.col0.xyz*p.x + f.col1.xyz*p.y + f.col2.xyz*p.z;
+}
+
+static bool
+faceFetchNormal(uint pid, const device ushort *idx, const device uchar *v, constant FaceFetch &f, thread float3 &g)
+{
+	if(f.numVertices == 0)
+		return false;
+	uint k = f.firstIndex + (f.strip ? pid : pid*3);
+	uint i0 = idx[k], i1 = idx[k+1], i2 = idx[k+2];
+	if(max(i0, max(i1, i2)) >= f.numVertices)
+		return false;
+	float3 a = faceFetchPos(v, f, i0);
+	g = cross(faceFetchPos(v, f, i1) - a, faceFetchPos(v, f, i2) - a);
+	return true;
+}
+
+static float3
+RelitSurfaceNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback)
+{
+	if(dot(g, toEye) < 0.0)
+		g = -g;
+	RLVec3 r = relitFillNormal(RLVec3{ n.x, n.y, n.z }, valid, RLVec3{ g.x, g.y, g.z }, RLVec3{ fallback.x, fallback.y, fallback.z });
+	float3 f = float3(r.x, r.y, r.z);
+	return dot(f, toEye) < 0.0 ? -f : f;
+}
+
+static float
+RelitShadowFactor(float4 position, texture2d<float> shadowTex)
+{
+	uint2 p = min(uint2(position.xy), uint2(shadowTex.get_width() - 1, shadowTex.get_height() - 1));
+	return shadowTex.read(p).r;
+}
+
+static float4
+RelitShadowSun(float4 color, float4 sun, float4 position, texture2d<float> shadowTex)
+{
+	float s = RelitShadowFactor(position, shadowTex);
+	return float4(relitShadowed(color.r, sun.r, s), relitShadowed(color.g, sun.g, s), relitShadowed(color.b, sun.b, s), color.a);
+}
+
+static float4
+RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, const device ushort *idx,
+              const device uchar *verts, constant FaceFetch &face, constant Relit &r, constant Material &material,
+              float4 position, texture2d<float> shadowTex)
+{
+	float3 toEye = r.eye.xyz - pos;
+	float3 g, n;
+	float v = 1.0;
+	if(faceFetchNormal(pid, idx, verts, face, g))
+		n = RelitSurfaceNormal(nrm.xyz, nrm.w, g, toEye, normalize(toEye));
+	else{
+		v = dot(nrm.xyz, nrm.xyz) > 1e-30 ? saturate(nrm.w) : 0.0;
+		n = v > 0.0 ? normalize(nrm.xyz) : float3(0.0, 0.0, 1.0);
+		if(dot(n, toEye) < 0.0)
+			n = -n;
+	}
+	float L = 1.0 - r.params.x;
+	RLColor top = { r.skyTop.r, r.skyTop.g, r.skyTop.b };
+	RLColor bottom = { r.skyBottom.r, r.skyBottom.g, r.skyBottom.b };
+	RLColor h = relitDesaturate(relitHemisphere(n.z, top, bottom), r.params.z);
+	float hs = L*r.params.y*surfAmbient;
+	float ss = relitSunCos(dot(n, -r.sunDir.xyz), face.twoSided != 0)*r.sunDir.w*L*r.params.w*surfDiffuse;
+	float3 m = material.matColor.rgb;
+	RLSplit sr = relitSplitAdd(color.r, h.r*hs, r.sunColor.r*ss, m.r);
+	RLSplit sg = relitSplitAdd(color.g, h.g*hs, r.sunColor.g*ss, m.g);
+	RLSplit sb = relitSplitAdd(color.b, h.b*hs, r.sunColor.b*ss, m.b);
+	float s = RelitShadowFactor(position, shadowTex);
+	float3 lit = float3(relitShadowed(sr.full, sr.sun, s), relitShadowed(sg.full, sg.sun, s), relitShadowed(sb.full, sb.sun, s));
+	if(v >= 1.0)
+		return float4(lit, color.a);
+	return float4(classic1.rgb + (lit - classic1.rgb)*v, color.a);
 }
 
 static float

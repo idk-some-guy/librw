@@ -37,7 +37,7 @@ openSkin(void)
 {
 #include "shaders/simple_metal.inc"
 	const char *src[] = { header_metal_src, skin_metal_src, simple_metal_src, nil };
-	skinShader = Shader::create(src, "skinVS", "simpleFS", VARIANT_ALL);
+	skinShader = Shader::create(src, "skinVS", "simpleFS", VARIANT_ALL | VARIANT_RELIT);
 	return skinShader != nil;
 }
 

@@ -61,6 +61,10 @@ specialise(id<MTLLibrary> lib, const char *name, uint32 variant, const uint32 *s
 		v = (variant >> i) & 1;
 		[values setConstantValue:&v type:MTLDataTypeBool atIndex:i];
 	}
+	v = (variant >> 4) & 1;
+	[values setConstantValue:&v type:MTLDataTypeBool atIndex:6];
+	v = (variant >> 5) & 1;
+	[values setConstantValue:&v type:MTLDataTypeBool atIndex:7];
 	if(sceneFactors){
 		[values setConstantValue:&sceneFactors[0] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENESRCBLEND];
 		[values setConstantValue:&sceneFactors[1] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENEDESTBLEND];

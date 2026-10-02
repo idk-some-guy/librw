@@ -141,6 +141,7 @@ instanceMesh(Geometry *geo)
 
 	header->indexBuffer = (uint16*)rwNew(indexBytes, MEMDUR_EVENT | ID_GEOMETRY);
 	memset(header->indexBuffer, 0, indexBytes);
+	header->stripRestart = 0;
 	InstanceData *inst = header->inst;
 	for(uint32 i = 0; i < header->numMeshes; i++){
 		findMinVertAndNumVertices(mesh->indices, mesh->numIndices,
@@ -152,9 +153,11 @@ instanceMesh(Geometry *geo)
 		inst->offset = offsets[i];
 		memcpy((uint8*)header->indexBuffer + inst->offset,
 		       mesh->indices, inst->numIndex*2);
-		if(meshh->flags == 1 && stripHasRestartIndex(mesh->indices, mesh->numIndices) &&
-		   instanceStats.stripRestartMeshes++ == 0)
-			RWERROR((ERR_GENERAL, "a triangle strip uses index 0xFFFF, which restarts the strip in Metal"));
+		if(meshh->flags == 1 && stripHasRestartIndex(mesh->indices, mesh->numIndices)){
+			header->stripRestart = 1;
+			if(instanceStats.stripRestartMeshes++ == 0)
+				RWERROR((ERR_GENERAL, "a triangle strip uses index 0xFFFF, which restarts the strip in Metal"));
+		}
 		mesh++;
 		inst++;
 	}

@@ -13,6 +13,7 @@
 #include "metalprepass.h"
 #include "metalprepasskeys.h"
 #include "metalnormals.h"
+#include "metalrelit.h"
 
 #define PLUGIN_ID 0
 
@@ -122,6 +123,7 @@ static UniformState uniformState;
 static UniformScene uniformScene;
 static UniformObject uniformObject;
 static UniformLights uniformLights;
+static UniformLights untaggedLights;
 static UniformMaterial uniformMaterial;
 static UniformSkin uniformSkin;
 static UniformMatFX uniformMatFX;
@@ -137,11 +139,44 @@ enum
 	BLOCK_CUSTOM,
 	BLOCK_SKIN,
 	BLOCK_MATFX,
+	BLOCK_RELIT,
 	NUMBLOCKS
 };
 
-static_assert(NUMBLOCKS <= 8, "block masks are uint8");
-static_assert(BUFFER_MATFX < sizeof(StateStats::blockUploads)/sizeof(StateStats::blockUploads[0]), "stat arrays");
+static_assert(NUMBLOCKS <= 16, "block masks are uint16");
+static_assert(BUFFER_RELIT < sizeof(StateStats::blockUploads)/sizeof(StateStats::blockUploads[0]), "stat arrays");
+
+struct UniformRelit
+{
+	float32 sunDir[4];
+	float32 sunColor[4];
+	float32 skyTop[4];
+	float32 skyBottom[4];
+	float32 eye[4];
+	float32 params[4];
+};
+static_assert(sizeof(UniformRelit) == 96, "relit block size");
+
+struct FaceFetchBlock
+{
+	float32 cols[3][4];
+	uint32 stride;
+	uint32 posOffset;
+	uint32 firstIndex;
+	uint32 strip;
+	uint32 numVertices;
+	uint32 twoSided;
+	uint32 pad[2];
+};
+static_assert(sizeof(FaceFetchBlock) == 80, "face fetch block size");
+
+static UniformRelit uniformRelit = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0.5f, 0.5f, 0.5f, 1 }, { 0.5f, 0.5f, 0.5f, 1 },
+	{ 0, 0, 0, 1 }, { 1.0f, 0.5f, 0.35f, 1.0f } };
+static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f };
+static const Light *relitSun;
+static std::unordered_set<uint32> relitFailed;
+static bool relitFetch = true;
+static bool relitAtFullWeight;
 
 struct BlockInfo
 {
@@ -159,6 +194,7 @@ static BlockInfo blockInfo[NUMBLOCKS] = {
 	{ BUFFER_CUSTOM, customConstants, 0 },
 	{ BUFFER_SKIN, &uniformSkin, sizeof(UniformSkin) },
 	{ BUFFER_MATFX, &uniformMatFX, sizeof(UniformMatFX) },
+	{ BUFFER_RELIT, &uniformRelit, sizeof(UniformRelit) },
 };
 
 static bool32 stateDirty = 1;
@@ -243,13 +279,14 @@ struct PipelineEntry
 {
 	id<MTLRenderPipelineState> state;
 	bool defaultAttribs;
-	uint8 vertexBlocks;
-	uint8 fragmentBlocks;
+	uint16 vertexBlocks;
+	uint16 fragmentBlocks;
 	uint32 blockSizes[NUMBLOCKS];
 	uint8 textureStages;
 	bool fixedBlend;
 	bool shaderBlend;
 	bool emissive;
+	bool shadowTexture;
 };
 static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
 static std::unordered_map<uint64_t, id<MTLDepthStencilState>> depthStencilCache;
@@ -495,6 +532,7 @@ struct EncoderState
 	id<MTLBuffer> vertexData;
 	uint32 vertexDataOffset;
 	float32 emissive;
+	id<MTLTexture> shadow;
 };
 static EncoderState enc;
 static bool haveViewport;
@@ -525,6 +563,7 @@ struct StatsLog
 	uint32 ringPeak;
 	uint32 renderPasses, copies;
 	uint32 customUploads, materialUploads, drawablesAcquired;
+	uint32 relitDraws;
 	RasterStats raster;
 	InstanceStats instance;
 };
@@ -647,6 +686,7 @@ invalidateEncoderState(void)
 	}
 	enc.vertexData = nil;
 	enc.emissive = -1.0f;
+	enc.shadow = nil;
 	prepassFrameBound = false;
 }
 
@@ -836,11 +876,13 @@ ensureNormalStream(InstanceDataHeader *h)
 {
 	if(h->mtlNormalBuffer)
 		return (__bridge id<MTLBuffer>)h->mtlNormalBuffer;
+	if(!normalBudgetLeft())
+		return nil;
+	dropQueuedNormalStream(h);
 	const AttribDesc *pos = normalStreamSource(h);
-	if(pos == nil || !normalBudgetLeft())
+	if(pos == nil)
 		return nil;
 	auto start = std::chrono::steady_clock::now();
-	dropQueuedNormalStream(h);
 	std::vector<uint32_t> list;
 	for(uint32 m = 0; m < h->numMeshes; m++){
 		const InstanceData *inst = &h->inst[m];
@@ -994,7 +1036,7 @@ makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults
 static void
 reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 {
-	uint8 *masks[2] = { &e->vertexBlocks, &e->fragmentBlocks };
+	uint16 *masks[2] = { &e->vertexBlocks, &e->fragmentBlocks };
 	NSArray<id<MTLBinding>> *stages[2] = { refl.vertexBindings, refl.fragmentBindings };
 	uint32 size;
 	int s, i;
@@ -1006,6 +1048,8 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 			if(s == 1 && (b.type == MTLBindingTypeTexture || b.type == MTLBindingTypeSampler) &&
 			   b.index < MAXNUMSTAGES)
 				e->textureStages |= 1<<b.index;
+			if(s == 1 && b.type == MTLBindingTypeTexture && b.index == TEXTURE_SHADOW)
+				e->shadowTexture = true;
 			if(b.type != MTLBindingTypeBuffer)
 				continue;
 			if(s == 1 && b.index == BUFFER_EMISSIVE)
@@ -1118,6 +1162,7 @@ forgetShaderPipelines(uint32 shaderId)
 {
 	hostRecords.erase(std::remove_if(hostRecords.begin(), hostRecords.end(),
 		[shaderId](const HostPrewarmRecord &r){ return r.shader->shaderId == shaderId; }), hostRecords.end());
+	relitFailed.erase(shaderId);
 	lastPipeKey = 0;
 	lastPipe = nil;
 	lastDepthKey = 0;
@@ -1661,7 +1706,7 @@ setLights(WorldLights *lightData)
 	int i, n;
 	Light *l;
 	int32 bits;
-	UniformLights lights = uniformLights;
+	UniformLights lights = untaggedLights;
 
 	lights.ambLight = lightData->ambient;
 
@@ -1718,6 +1763,10 @@ setLights(WorldLights *lightData)
 
 	lights.lightParams[n].type = 0.0f;
 out:
+	untaggedLights = lights;
+	if(frameRelitActive())
+		for(i = 0; i < lightData->numDirectionals && i < 8 && i < MAX_LIGHTS; i++)
+			lights.lightParams[i].hardSpot = relitSun && lightData->directionals[i] == relitSun ? 1.0f : 0.0f;
 	if(memcmp(&uniformLights, &lights, sizeof(lights)) != 0){
 		uniformLights = lights;
 		blockDirty[BLOCK_LIGHTS] = true;
@@ -1745,10 +1794,103 @@ setProjectionMatrix(float32 *mat)
 	comparePrepassView();
 }
 
+static float32
+relitNonNegative(float32 v)
+{
+	return v > 0.0f ? v : 0.0f;
+}
+
+void
+setRelitParams(const RelitParams *p)
+{
+	relitParams = *p;
+	UniformRelit u = uniformRelit;
+	for(int i = 0; i < 3; i++){
+		u.skyTop[i] = relitNonNegative(p->skyTop[i]);
+		u.skyBottom[i] = relitNonNegative(p->skyBottom[i]);
+	}
+	u.params[0] = relitClampWeight(p->weight);
+	u.params[1] = relitNonNegative(p->hemiScale);
+	u.params[2] = relitNonNegative(p->hemiSaturation);
+	u.params[3] = relitNonNegative(p->sunScale);
+	if(memcmp(&u, &uniformRelit, sizeof(u)) != 0){
+		uniformRelit = u;
+		blockDirty[BLOCK_RELIT] = true;
+	}
+}
+
+RelitParams
+getRelitParams(void)
+{
+	return relitParams;
+}
+
+void
+setSunLight(const Light *light)
+{
+	relitSun = light;
+}
+
+void
+setFaceFetchForTest(bool32 on)
+{
+	relitFetch = on != 0;
+}
+
+void
+setRelitAtFullWeightForTest(bool32 on)
+{
+	relitAtFullWeight = on != 0;
+}
+
+uint32
+lightsBlockForTest(void *dst, uint32 size)
+{
+	if(size < sizeof(uniformLights))
+		return 0;
+	memcpy(dst, &uniformLights, sizeof(uniformLights));
+	return sizeof(uniformLights);
+}
+
+static void
+refreshRelitSun(void)
+{
+	float32 dir[4] = { 0, 0, 0, 0 }, col[4] = { 0, 0, 0, 0 };
+	Frame *f = relitSun ? ((Light*)relitSun)->getFrame() : nil;
+	if(f){
+		memcpy(dir, &f->getLTM()->at, sizeof(V3d));
+		dir[3] = 1.0f;
+		col[0] = relitSun->color.red;
+		col[1] = relitSun->color.green;
+		col[2] = relitSun->color.blue;
+		col[3] = 1.0f;
+	}
+	if(memcmp(dir, uniformRelit.sunDir, sizeof(dir)) != 0 || memcmp(col, uniformRelit.sunColor, sizeof(col)) != 0){
+		memcpy(uniformRelit.sunDir, dir, sizeof(dir));
+		memcpy(uniformRelit.sunColor, col, sizeof(col));
+		blockDirty[BLOCK_RELIT] = true;
+	}
+}
+
+static void
+updateRelitEye(void)
+{
+	const float32 *v = uniformScene.view;
+	float32 eye[4];
+	for(int i = 0; i < 3; i++)
+		eye[i] = -(v[i*4]*v[12] + v[i*4 + 1]*v[13] + v[i*4 + 2]*v[14]);
+	eye[3] = 1.0f;
+	if(memcmp(eye, uniformRelit.eye, sizeof(eye)) != 0){
+		memcpy(uniformRelit.eye, eye, sizeof(eye));
+		blockDirty[BLOCK_RELIT] = true;
+	}
+}
+
 void
 setViewMatrix(float32 *mat)
 {
 	memcpy(&uniformScene.view, mat, 64);
+	updateRelitEye();
 	blockDirty[BLOCK_SCENE] = true;
 	comparePrepassView();
 }
@@ -1955,6 +2097,13 @@ encodeDraw(MetalContext *ctx, id<MTLRenderCommandEncoder> e, PipelineEntry *pipe
 		[e setFragmentBytes:&drawEmissive length:sizeof(drawEmissive) atIndex:BUFFER_EMISSIVE];
 		enc.emissive = drawEmissive;
 	}
+	if(pipe->shadowTexture){
+		id<MTLTexture> sh = frameShadowTexture();
+		if(enc.shadow != sh){
+			[e setFragmentTexture:sh atIndex:TEXTURE_SHADOW];
+			enc.shadow = sh;
+		}
+	}
 
 	dd.hasDepth = ctx->encoderHasDepth;
 	dd.ztest = rwStateCache.ztest;
@@ -2043,38 +2192,48 @@ bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
 	return true;
 }
 
-struct PrepassFaceBlock
-{
-	float32 cols[3][4];
-	uint32 stride;
-	uint32 posOffset;
-	uint32 firstIndex;
-	uint32 strip;
-	uint32 numVertices;
-	uint32 pad[3];
-};
-
-static void
-bindFaceFetch(id<MTLRenderCommandEncoder> e)
+static bool
+bindFaceFetch(id<MTLRenderCommandEncoder> e, const float32 *m, bool fetch, bool twoSided)
 {
 	const InstanceDataHeader *h = currentDrawHeader;
-	PrepassFaceBlock b = {};
+	FaceFetchBlock b = {};
+	bool float3Pos = false;
 	for(int32 i = 0; i < h->numAttribs; i++)
 		if(h->attribDesc[i].index == ATTRIB_POS){
 			b.stride = h->attribDesc[i].stride;
 			b.posOffset = h->attribDesc[i].offset;
+			float3Pos = h->attribDesc[i].format == ATTRIBFMT_FLOAT3;
 		}
 	b.firstIndex = ((const InstanceData*)currentDrawInst)->offset/sizeof(uint16);
 	b.strip = h->primType == MTLPrimitiveTypeTriangleStrip;
-	b.numVertices = h->totalNumVertex;
-	float32 vw[16];
-	mul44(vw, uniformScene.view, (const float32*)&uniformObject.world);
+	b.numVertices = fetch && float3Pos && !h->stripRestart ? h->totalNumVertex : 0;
+	b.twoSided = twoSided;
 	for(int c = 0; c < 3; c++)
 		for(int r = 0; r < 3; r++)
-			b.cols[c][r] = vw[c*4 + r];
+			b.cols[c][r] = m[c*4 + r];
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlIndexBuffer offset:0 atIndex:BUFFER_FACEINDICES];
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlVertexBuffer offset:0 atIndex:BUFFER_FACEVERTICES];
 	[e setFragmentBytes:&b length:sizeof(b) atIndex:BUFFER_FACELAYOUT];
+	return b.numVertices != 0;
+}
+
+static bool
+relitPrelitLayout(Shader *shader, uint32 layout)
+{
+	return (shader->variantMask & VARIANT_RELITPRELIT) && layoutHasAttrib(layout, ATTRIB_COLOR) &&
+		!layoutHasAttrib(layout, ATTRIB_NORMAL) && !layoutHasAttrib(layout, ATTRIB_WEIGHTS);
+}
+
+static uint32
+relitVariant(Shader *shader, uint32 layout, uint32 variant)
+{
+	if((shader->variantMask & VARIANT_RELIT) == 0)
+		return variant;
+	if(relitPrelitLayout(shader, layout))
+		return (variant & VARIANT_ALPHATEST) | VARIANT_RELIT | VARIANT_RELITPRELIT;
+	if(layoutHasAttrib(layout, ATTRIB_NORMAL))
+		return variant | VARIANT_RELIT;
+	return variant;
 }
 
 static bool32
@@ -2084,7 +2243,7 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 	Shader *sh = skinned ? prepassSkinShader : prepassShader;
 	uint32 layout = currentLayout;
 	id<MTLBuffer> stream = nil;
-	if(wantsNormalStream(currentLayout)){
+	if(wantsNormalStream(currentLayout) && !currentDrawHeader->stripRestart){
 		uint32 derived = derivedNormalLayout(currentLayout);
 		if(derived && (stream = ensureNormalStream(currentDrawHeader))){
 			layout = derived;
@@ -2127,10 +2286,14 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 	}
 	if(stream){
 		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
-		bindFaceFetch(e);
+		float32 vw[16];
+		mul44(vw, uniformScene.view, (const float32*)&uniformObject.world);
+		bindFaceFetch(e, vw, true, false);
 	}
 	if(!encodeDraw(ctx, e, pipe, false))
 		return 0;
+	if(sh == prepassFaceShader)
+		stats.prepassFaceDraws++;
 	if(!prepassKeys.insert(key))
 		stats.prepassUnkeyed++;
 	prepassDrawsThisFrame++;
@@ -2170,9 +2333,26 @@ flushCache(void)
 	if(prepassPass)
 		return keyed ? flushPrepass(ctx, e, drawKey) : (stats.prepassSkipped++, 0);
 
+	uint32 variant = currentVariant, layout = currentLayout;
+	id<MTLBuffer> stream = nil;
+	bool relitFrag = false;
+	if(ctx->encoderColorFormat == COLORFMT_SCENE && frameRelitActive() && relitFailed.count(currentShader->shaderId) == 0){
+		uint32 rv = relitVariant(currentShader, currentLayout, currentVariant);
+		if((rv & VARIANT_RELITPRELIT) == 0)
+			variant = rv;
+		else if(wantsNormalStream(currentLayout) && (uniformRelit.params[0] < 1.0f || relitAtFullWeight)){
+			variant = rv;
+			relitFrag = true;
+			uint32 derived = derivedNormalLayout(currentLayout);
+			if(derived && (stream = ensureNormalStream(currentDrawHeader)))
+				layout = derived;
+			else
+				queueNormalStream(currentDrawHeader);
+		}
+	}
 	pd.shader = currentShader->shaderId;
-	pd.variant = currentVariant;
-	pd.vertexLayout = currentLayout;
+	pd.variant = variant;
+	pd.vertexLayout = layout;
 	pd.blendEnable = rwStateCache.blendEnable;
 	pd.srcBlend = rwStateCache.srcblend;
 	pd.destBlend = rwStateCache.destblend;
@@ -2184,6 +2364,20 @@ flushCache(void)
 	if(key == lastPipeKey && lastPipe)
 		pipe = lastPipe;
 	else{
+		pipe = getPipeline(currentShader, pd, key);
+		lastPipeKey = key;
+		lastPipe = pipe;
+	}
+	if(pipe == nil && (variant & VARIANT_RELIT)){
+		relitFailed.insert(currentShader->shaderId);
+		fprintf(stderr, "rw::metal: shader %s/%s has no relit variant; it draws without the live light\n",
+			currentShader->vertexName, currentShader->fragmentName);
+		variant = currentVariant;
+		pd.variant = variant;
+		pd.vertexLayout = currentLayout;
+		stream = nil;
+		relitFrag = false;
+		key = pipelineKey(pd);
 		pipe = getPipeline(currentShader, pd, key);
 		lastPipeKey = key;
 		lastPipe = pipe;
@@ -2201,7 +2395,21 @@ flushCache(void)
 		forceEqualNext = false;
 		depthEqual = true;
 	}
-	return encodeDraw(ctx, e, pipe, depthEqual);
+	bool faced = false;
+	if(relitFrag){
+		refreshRelitSun();
+		faced = bindFaceFetch(e, (const float32*)&uniformObject.world, relitFetch, rwStateCache.cullmode == CULLNONE);
+	}
+	if(stream)
+		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
+	if(!encodeDraw(ctx, e, pipe, depthEqual))
+		return 0;
+	if(variant & VARIANT_RELIT){
+		stats.relitDraws++;
+		if(faced)
+			stats.relitFaceDraws++;
+	}
+	return 1;
 }
 
 static uint32
@@ -2470,6 +2678,88 @@ prewarmPrepass(uint32 samples)
 	}
 }
 
+static void
+prewarmRelit(Shader *shader, uint32 layout, uint32 variant, int32 blend, uint32 samples)
+{
+	if(shader == nil)
+		return;
+	uint32 v = relitVariant(shader, layout, variant & shader->variantMask);
+	if((v & VARIANT_RELIT) == 0)
+		return;
+	prewarm(shader, layout, v, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+	uint32 derived = (v & VARIANT_RELITPRELIT) ? derivedNormalLayout(layout) : 0;
+	if(derived)
+		prewarm(shader, derived, v, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+}
+
+static void
+prewarmRelitEngine(uint32 samples)
+{
+	AttribDesc descs[MAXVERTEXATTRIBS];
+	int32 i, j, n;
+	uint32 layout;
+
+	for(i = 0; i < (int32)nelem(worldLayouts); i++){
+		const WorldLayout &w = worldLayouts[i];
+		layout = registerVertexLayout(descs, defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs));
+		for(j = 0; j < w.numStates; j++)
+			prewarmRelit(defaultShader, layout, w.states[j].variant, w.states[j].blend, samples);
+	}
+	for(i = 0; i < (int32)nelem(uv2WorldLayouts); i++){
+		const WorldLayout &w = uv2WorldLayouts[i];
+		layout = registerVertexLayout(descs, defaultVertexAttribs(w.normals, w.prelit, w.numTexCoords, descs));
+		for(j = 0; j < w.numStates; j++)
+			prewarmRelit(defaultShader, layout, w.states[j].variant, w.states[j].blend, samples);
+	}
+	for(i = 0; skinShader && i < 2; i++){
+		layout = registerVertexLayout(descs, skinVertexAttribs(true, i == 0, 1, descs));
+		for(j = 0; j < (int32)nelem(litStates); j++)
+			prewarmRelit(skinShader, layout, litStates[j].variant, litStates[j].blend, samples);
+	}
+	for(i = 0; matfxEnvShader && i < (int32)nelem(envLayouts); i++){
+		n = defaultVertexAttribs(envLayouts[i].normals, envLayouts[i].prelit, 1, descs);
+		layout = registerVertexLayout(descs, n);
+		for(j = 0; j < envLayouts[i].numStates; j++)
+			prewarmRelit(matfxEnvShader, layout, envStates[j].variant, envStates[j].blend, samples);
+	}
+}
+
+static bool32
+hostPrewarmRelit(const HostPrewarmRecord &r)
+{
+	uint32 counts[2];
+	int32 i, n = prewarmSampleCounts(metalGlobals.numSamples, counts);
+	bool32 ok = 1;
+
+	if(im2DLayout(r.layout))
+		return 1;
+	uint32 v = relitVariant(r.shader, r.layout, r.variant & r.shader->variantMask);
+	if((v & VARIANT_RELIT) == 0)
+		return 1;
+	uint32 derived = (v & VARIANT_RELITPRELIT) ? derivedNormalLayout(r.layout) : 0;
+	PipelineDesc d = {};
+	d.shader = r.shader->shaderId;
+	d.variant = v;
+	d.blendEnable = r.blend != 0;
+	d.srcBlend = r.srcBlend;
+	d.destBlend = r.destBlend;
+	d.writeMask = MTLColorWriteMaskAll;
+	d.colorFormat = COLORFMT_SCENE;
+	d.depthFormat = r.depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	for(i = 0; i < n; i++){
+		d.sampleCount = counts[i];
+		d.vertexLayout = r.layout;
+		if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
+			ok = 0;
+		if(derived){
+			d.vertexLayout = derived;
+			if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
+				ok = 0;
+		}
+	}
+	return ok;
+}
+
 static bool32
 hostPrewarmPrepass(const HostPrewarmRecord &r)
 {
@@ -2522,6 +2812,9 @@ prewarmFormatSet(uint32 mask)
 	if((mask & (1u << COLORFMT_PREPASS)) && prepassShadersReady())
 		for(i = 0; i < numCounts; i++)
 			prewarmPrepass(counts[i]);
+	if(mask & (1u << COLORFMT_PREPASS))
+		for(i = 0; i < numCounts; i++)
+			prewarmRelitEngine(counts[i]);
 }
 
 void
@@ -2555,7 +2848,7 @@ hostPrewarmFormat(const HostPrewarmRecord &r, uint32 fmt)
 	if(fmt == COLORFMT_OVERLAY && !im2DLayout(r.layout))
 		return 1;
 	if(fmt == COLORFMT_PREPASS)
-		return hostPrewarmPrepass(r);
+		return hostPrewarmPrepass(r) & hostPrewarmRelit(r);
 	d.shader = r.shader->shaderId;
 	d.variant = r.variant & r.shader->variantMask;
 	d.vertexLayout = r.layout;
@@ -2691,12 +2984,13 @@ initState(void)
 		return 0;
 	memset(&stats, 0, sizeof(stats));
 	dropsReported.clear();
+	relitFailed.clear();
 	resetStatsLog();
 	@autoreleasepool {
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
 		if(im2dShader == nil)
 			return 0;
-		defaultShader = Shader::create(defaultSrc, "defaultVS", "simpleFS", VARIANT_ALL);
+		defaultShader = Shader::create(defaultSrc, "defaultVS", "simpleFS", VARIANT_ALL | VARIANT_RELITALL);
 		if(defaultShader == nil)
 			return 0;
 		defaultShader_noAT = defaultShader;
@@ -2903,6 +3197,7 @@ resetStatsLog(void)
 	statsLog.materialUploads = stats.blockUploads[BUFFER_MATERIAL];
 	statsLog.drawablesAcquired = f.drawablesAcquired;
 	statsLog.draws = 0;
+	statsLog.relitDraws = stats.relitDraws;
 	statsLog.frameBytes = 0;
 	statsLog.ringPeak = 0;
 	statsLog.raster = getRasterStats();
@@ -2923,7 +3218,7 @@ logStats(void)
 		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f "
 		"custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms "
-		"host prewarm %.1f ms samples %u%s normals built %u pending %u live %u bytes %u\n",
+		"host prewarm %.1f ms samples %u%s normals built %u pending %u live %u bytes %u relit weight %.2f relit draws/frame %.1f\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
@@ -2938,12 +3233,14 @@ logStats(void)
 		interval - (f.drawablesAcquired - statsLog.drawablesAcquired),
 		f.drawableWaitMaxUs/1000.0, stats.hostPrewarmUs/1000.0,
 		metalGlobals.numSamples ? metalGlobals.numSamples : 1, frameStatsTail(),
-		in.normalStreams - statsLog.instance.normalStreams, in.normalPending, in.normalLive, in.normalBytes);
+		in.normalStreams - statsLog.instance.normalStreams, in.normalPending, in.normalLive, in.normalBytes, uniformRelit.params[0],
+		interval ? (double)(stats.relitDraws - statsLog.relitDraws)/interval : 0.0);
 	resetDrawableWaitMax();
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();
 	statsLog.frames = frames;
 	statsLog.draws = stats.draws;
+	statsLog.relitDraws = stats.relitDraws;
 	statsLog.ringPeak = 0;
 	statsLog.renderPasses = f.renderPasses;
 	statsLog.copies = f.copies;

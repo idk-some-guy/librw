@@ -126,6 +126,7 @@ struct InstanceDataHeader : rw::InstanceDataHeader
 	void       *mtlVertexBuffer;
 	void       *mtlNormalBuffer;
 	int32       normalSlot;
+	bool32      stripRestart;
 
 	InstanceData *inst;
 };
@@ -373,6 +374,21 @@ void endScene(const GradeParams *params);
 bool32 beginPrepass(void);
 void endPrepass(void);
 void cameraCut(void);
+
+struct RelitParams
+{
+	float32 weight;
+	float32 sunDir[3];
+	float32 skyTop[3];
+	float32 skyBottom[3];
+	float32 hemiScale;
+	float32 hemiSaturation;
+	float32 sunScale;
+};
+
+void setRelitParams(const RelitParams *p);
+RelitParams getRelitParams(void);
+void setSunLight(const Light *light);
 void beginReactive(void);
 void endReactive(void);
 bool32 enhancedFrame(void);

@@ -89,9 +89,9 @@ struct StateStats
 	uint32 ringGrows;
 	uint32 ringPeakBytes;
 	uint32 frameRingBytes;
-	uint32 blockUploads[9];
-	uint32 vertexBlockBinds[9];
-	uint32 fragmentBlockBinds[9];
+	uint32 blockUploads[18];
+	uint32 vertexBlockBinds[18];
+	uint32 fragmentBlockBinds[18];
 	uint64 hostPrewarmUs;
 	uint32 formatPrewarms;
 	uint32 prepassDraws;
@@ -100,6 +100,9 @@ struct StateStats
 	uint32 prepassOrphans;
 	uint32 prepassOrphanLogs;
 	uint32 prepassUnkeyed;
+	uint32 prepassFaceDraws;
+	uint32 relitDraws;
+	uint32 relitFaceDraws;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);

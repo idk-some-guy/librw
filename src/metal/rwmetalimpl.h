@@ -77,6 +77,11 @@ struct InstanceStats
 };
 InstanceStats getInstanceStats(void);
 void setNormalBudgetForTest(float32 ms);
+void setShadowFactorForTest(float32 v);
+void setFaceFetchForTest(bool32 on);
+void setRelitAtFullWeightForTest(bool32 on);
+uint32 lightsBlockForTest(void *dst, uint32 size);
+double lastFrameGpuMsForTest(void);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);

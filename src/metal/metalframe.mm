@@ -158,6 +158,7 @@ struct FrameState
 	uint32 taaIndex = 0;
 	bool taaFail = false, taaGaveUp = false, taaReported = false;
 	uint32 taaAllocs = 0, taaLogs = 0, taaRequests = 0;
+	id<MTLTexture> white = nil, testShadow = nil;
 	char tail[512] = "";
 };
 
@@ -527,8 +528,12 @@ frameInit(void)
 		d.storageMode = MTLStorageModeShared;
 		frame.black = [getContext()->device newTextureWithDescriptor:d];
 		[frame.black replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:zero bytesPerRow:sizeof(zero)];
+		uint16 one[4] = { 0x3C00, 0x3C00, 0x3C00, 0x3C00 };
+		frame.white = [getContext()->device newTextureWithDescriptor:d];
+		[frame.white replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:one bytesPerRow:sizeof(one)];
+		frame.testShadow = nil;
 	}
-	frame.available = frame.compositeBGRA && frame.copyScene && frame.copyPost && frame.grade && frame.black;
+	frame.available = frame.compositeBGRA && frame.copyScene && frame.copyPost && frame.grade && frame.black && frame.white;
 	return frame.available;
 }
 
@@ -632,8 +637,12 @@ reactivePipeline(id<MTLLibrary> lib, NSString *vs, uint32 layout)
 		return nil;
 	MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
 	NSError *err = nil;
-	d.vertexFunction = [lib newFunctionWithName:vs];
-	d.fragmentFunction = [lib newFunctionWithName:@"reactiveFS"];
+	MTLFunctionConstantValues *off = [MTLFunctionConstantValues new];
+	bool no = false;
+	[off setConstantValue:&no type:MTLDataTypeBool atIndex:6];
+	[off setConstantValue:&no type:MTLDataTypeBool atIndex:7];
+	d.vertexFunction = [lib newFunctionWithName:vs constantValues:off error:&err];
+	d.fragmentFunction = [lib newFunctionWithName:@"reactiveFS" constantValues:off error:&err];
 	d.vertexDescriptor = vd;
 	d.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
 	d.colorAttachments[0].blendingEnabled = YES;
@@ -1272,6 +1281,38 @@ bool
 frameModernTier(void)
 {
 	return frame.activeTier == TIER_MODERN;
+}
+
+bool
+frameRelitActive(void)
+{
+	return frame.activeTier == TIER_MODERN && frame.phase == PHASE_SCENE;
+}
+
+id<MTLTexture>
+frameShadowTexture(void)
+{
+	return frame.testShadow ? frame.testShadow : frame.white;
+}
+
+void
+setShadowFactorForTest(float32 v)
+{
+	if(v < 0.0f || getContext() == nil){
+		frame.testShadow = nil;
+		return;
+	}
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+		width:1 height:1 mipmapped:NO];
+	d.usage = MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModeShared;
+	frame.testShadow = [getContext()->device newTextureWithDescriptor:d];
+	__fp16 h = (__fp16)v;
+	uint16 bits, texel[4];
+	memcpy(&bits, &h, sizeof(bits));
+	for(int i = 0; i < 4; i++)
+		texel[i] = bits;
+	[frame.testShadow replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:texel bytesPerRow:sizeof(texel)];
 }
 
 bool

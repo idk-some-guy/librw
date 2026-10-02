@@ -5,11 +5,13 @@
 #define RL_MIN fmin
 #define RL_MAX fmax
 #define RL_SQRT sqrt
+#define RL_ABS fabs
 #else
 #include <math.h>
 #define RL_MIN fminf
 #define RL_MAX fmaxf
 #define RL_SQRT sqrtf
+#define RL_ABS fabsf
 #endif
 
 struct RLColor { float r, g, b; };
@@ -66,6 +68,29 @@ static inline float
 relitShadowed(float full, float sunPart, float shadow)
 {
 	return full - (1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f))*sunPart;
+}
+
+static inline float
+relitWeighted(float c, float w)
+{
+	return w < 1.0f ? c*w : c;
+}
+
+static inline RLSplit
+relitSplitAdd(float classic, float hemi, float sun, float mat)
+{
+	float room = RL_MAX(mat - classic, 0.0f);
+	float base = RL_MIN(hemi*mat, room);
+	RLSplit s;
+	s.sun = RL_MIN(sun*mat, room - base);
+	s.full = classic + base + s.sun;
+	return s;
+}
+
+static inline float
+relitSunCos(float c, bool twoSided)
+{
+	return twoSided ? RL_ABS(c) : RL_MAX(c, 0.0f);
 }
 
 static inline RLVec3

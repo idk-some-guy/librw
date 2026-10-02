@@ -42,6 +42,8 @@ const char *skin_metal_src =
 "	out.color.rgb += DoDynamicLight(V.xyz, N, lights)*surfDiffuse;\n"
 "	out.color = clamp(out.color, 0.0, 1.0);\n"
 "	out.color *= material.matColor;\n"
+"	if(relit)\n"
+"		out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);\n"
 "	out.fog = DoFog(out.position.z, state);\n"
 "	out.pointSize = 1.0;\n"
 "	out.position = MetalDepth(out.position);\n"

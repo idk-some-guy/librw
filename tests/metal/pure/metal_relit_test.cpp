@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include "metalrelit.h"
 
 static int failures = 0;
@@ -108,6 +109,43 @@ TestFillMidpoint(void)
 	CHECK(Vec(relitFillNormal(mid, 1.0f, g, up), 0.0f, 0.0f, -1.0f, 1e-6f));
 }
 
+static void
+TestWeighted(void)
+{
+	const float cs[] = { 0.0f, 1e-8f, 0.1f, 140.0f/255.0f, 0.99999994f, 1.0f, 3.0f };
+	for(float c : cs){
+		float r = relitWeighted(c, 1.0f);
+		CHECK(memcmp(&r, &c, sizeof(r)) == 0);
+	}
+	CHECK(relitWeighted(0.6f, 0.5f) == 0.3f && relitWeighted(0.6f, 0.0f) == 0.0f);
+}
+
+static void
+TestSplitAdd(void)
+{
+	const float bs[] = { 0.0f, 0.3f, 0.9f, 1.0f, 1.4f }, hs[] = { 0.0f, 0.05f, 0.5f, 2.0f }, ss[] = { 0.0f, 0.05f, 0.5f, 2.0f },
+		ms[] = { 0.0f, 0.5f, 1.0f };
+	for(float b : bs)
+		for(float h : hs)
+			for(float s : ss)
+				for(float m : ms){
+					RLSplit a = relitSplitAdd(fminf(fmaxf(b, 0.0f), 1.0f)*m, h, s, m), r = relitSplit(b + h, s, m);
+					CHECK(Near(a.full, r.full, 1e-6f) && Near(a.sun, r.sun, 1e-6f));
+				}
+	const float over[] = { 0.5f, 0.50000006f, 0.2f };
+	for(float c : over){
+		RLSplit z = relitSplitAdd(c, 0.0f, 0.0f, 0.5f);
+		CHECK(memcmp(&z.full, &c, sizeof(c)) == 0 && z.sun == 0.0f);
+	}
+}
+
+static void
+TestSunCos(void)
+{
+	CHECK(relitSunCos(-0.4f, false) == 0.0f && relitSunCos(-0.4f, true) == 0.4f);
+	CHECK(relitSunCos(0.7f, false) == 0.7f && relitSunCos(0.7f, true) == 0.7f);
+}
+
 int
 main(void)
 {
@@ -116,6 +154,9 @@ main(void)
 	TestSplit();
 	TestFillNormal();
 	TestFillMidpoint();
+	TestWeighted();
+	TestSplitAdd();
+	TestSunCos();
 	if(failures == 0)
 		printf("all relit tests passed\n");
 	return failures != 0;
