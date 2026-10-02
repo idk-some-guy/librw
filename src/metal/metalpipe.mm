@@ -199,7 +199,12 @@ drawIndexed(InstanceDataHeader *header, InstanceData *inst)
 	if(ctx == nil || inst->numIndex == 0 || header->mtlIndexBuffer == nil || header->mtlVertexBuffer == nil)
 		return 0;
 	@autoreleasepool {
-		if(!beginDraw() || !flushCache())
+		if(!beginDraw())
+			return 0;
+		setDrawInstance(inst);
+		bool32 ok = flushCache();
+		setDrawInstance(nil);
+		if(!ok)
 			return 0;
 		bindVertexBuffer(header->mtlVertexBuffer, 0);
 		[ctx->encoder drawIndexedPrimitives:(MTLPrimitiveType)header->primType indexCount:inst->numIndex

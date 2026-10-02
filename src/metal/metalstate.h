@@ -11,6 +11,7 @@ enum { MAXSKINBONES = 64 };
 bool32 initState(void);
 void prewarmPipelines(void);
 void openIm2DEmit(void);
+void openPrepass(void);
 void prewarmFormats(uint32 mask);
 void termState(void);
 void startFrame(void);
@@ -92,6 +93,11 @@ struct StateStats
 	uint32 fragmentBlockBinds[9];
 	uint64 hostPrewarmUs;
 	uint32 formatPrewarms;
+	uint32 prepassDraws;
+	uint32 prepassSkipped;
+	uint32 prepassEqual;
+	uint32 prepassOrphans;
+	uint32 prepassOrphanLogs;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);
@@ -107,6 +113,11 @@ struct PipelineBlendInfo
 };
 PipelineBlendInfo pipelineBlendInfo(uint64 key);
 void setDrawEmissiveScale(float32 s);
+void setDrawInstance(const void *inst);
+bool prepassShadersReady(void);
+void beginPrepassState(void);
+uint32 endPrepassState(void);
+void finishPrepassFrame(bool countOrphans);
 int32 getVertexLayout(uint32 layout, AttribDesc *attribs, int32 maxAttribs);
 
 }

@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cmath>
 #include "metalprepass.h"
+#include "metalprepasskeys.h"
 
 static int failures = 0;
 
@@ -84,6 +85,29 @@ TestKey(void)
 	CHECK(prepassKey(&a, w, bone) != prepassKey(&a, w, bone2));
 }
 
+static void
+TestKeySet(void)
+{
+	PrepassKeySet s;
+	s.reserve(4);
+	CHECK(s.capacity() == 4);
+	CHECK(!s.markUsed(7));
+	CHECK(s.insert(7) && s.insert(0) && s.insert(7));
+	CHECK(s.size() == 2 && s.unused() == 2);
+	CHECK(s.markUsed(7) && s.unused() == 1);
+	CHECK(!s.markUsed(8));
+	CHECK(s.insert(1ull << 40) && s.insert(9));
+	CHECK(!s.insert(10));
+	CHECK(s.size() == 4 && !s.markUsed(10));
+	CHECK(s.markUsed(0) && s.markUsed(1ull << 40) && s.markUsed(9) && s.unused() == 0);
+	const void *slots = s.slotData();
+	s.clear();
+	CHECK(s.size() == 0 && s.unused() == 0 && !s.markUsed(7) && !s.markUsed(0));
+	for(uint64_t k = 100; k < 104; k++)
+		CHECK(s.insert(k*0x9e3779b97f4a7c15ull));
+	CHECK(s.unused() == 4 && s.slotData() == slots);
+}
+
 int
 main(void)
 {
@@ -91,6 +115,7 @@ main(void)
 	TestMotion();
 	TestEligible();
 	TestKey();
+	TestKeySet();
 	if(failures == 0)
 		printf("all prepass tests passed\n");
 	return failures != 0;

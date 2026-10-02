@@ -32,6 +32,7 @@ PassManager::PassManager(void)
 	this->hasPending = false;
 	this->pendingTarget = noTarget;
 	this->pending = PassClear();
+	this->depthSplit = nullptr;
 	this->numActions = 0;
 }
 
@@ -69,20 +70,34 @@ pendingAppliesTo(const PassTarget &pending, const PassTarget &target)
 	return samePassTarget(pending, target);
 }
 
+static bool
+splitsOnDepth(const void *split, const PassTarget &pending, const PassTarget &target)
+{
+	return split && target.color == split && target.depth && pending.depth == target.depth && pending.color &&
+		!usesRaster(target, pending.color) && target.color != pending.depth;
+}
+
 void
 PassManager::openOn(const PassTarget &target)
 {
 	bool applies = this->hasPending && pendingAppliesTo(this->pendingTarget, target);
-	if(this->hasPending && !applies && sharesRaster(this->pendingTarget, target))
+	PassClear split = PassClear();
+	if(this->hasPending && !applies && splitsOnDepth(this->depthSplit, this->pendingTarget, target)){
+		split = this->pending;
+		split.flags &= PASSCLEAR_DEPTH|PASSCLEAR_STENCIL;
+		this->pending.flags &= ~(PASSCLEAR_DEPTH|PASSCLEAR_STENCIL);
+		if(this->pending.flags == 0)
+			this->hasPending = false;
+	}else if(this->hasPending && !applies && sharesRaster(this->pendingTarget, target))
 		resolvePending();
-	if(this->open && samePassTarget(this->openTarget, target) && !applies)
+	if(this->open && samePassTarget(this->openTarget, target) && !applies && split.flags == 0)
 		return;
 	end();
 	if(applies){
 		push(PASSACTION_BEGIN, target, &this->pending);
 		this->hasPending = false;
 	}else
-		push(PASSACTION_BEGIN, target, nullptr);
+		push(PASSACTION_BEGIN, target, split.flags ? &split : nullptr);
 	this->open = true;
 	this->openTarget = target;
 }
@@ -190,6 +205,8 @@ PassManager::forget(const void *raster)
 	reset();
 	if(raster == nullptr)
 		return;
+	if(raster == this->depthSplit)
+		this->depthSplit = nullptr;
 	if(this->open && usesRaster(this->openTarget, raster))
 		end();
 	if(this->hasPending && usesRaster(this->pendingTarget, raster)){

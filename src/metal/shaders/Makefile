@@ -1,4 +1,4 @@
-all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc emit_metal.inc output_metal.inc bloom_metal.inc bloomh_metal.inc dering_metal.inc deringh_metal.inc fxaa_metal.inc aah_metal.inc prepassh_metal.inc temporalh_metal.inc
+all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc emit_metal.inc output_metal.inc bloom_metal.inc bloomh_metal.inc dering_metal.inc deringh_metal.inc fxaa_metal.inc aah_metal.inc prepassh_metal.inc temporalh_metal.inc prepass_metal.inc prepass_skin_metal.inc
 
 header_metal.inc: header.metal
 	(echo 'const char *header_metal_src =';\
@@ -99,3 +99,13 @@ temporalh_metal.inc: ../metaltemporal.h
 	(echo 'const char *temporalh_metal_src =';\
 	 sed 's/..*/"&\\n"/' ../metaltemporal.h;\
 	 echo ';') >temporalh_metal.inc
+
+prepass_metal.inc: prepass.metal
+	(echo 'const char *prepass_metal_src =';\
+	 sed 's/..*/"&\\n"/' prepass.metal;\
+	 echo ';') >prepass_metal.inc
+
+prepass_skin_metal.inc: prepass_skin.metal
+	(echo 'const char *prepass_skin_metal_src =';\
+	 sed 's/..*/"&\\n"/' prepass_skin.metal;\
+	 echo ';') >prepass_skin_metal.inc

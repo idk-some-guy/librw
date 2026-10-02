@@ -10,6 +10,8 @@
 #include "metalstate.h"
 #include "metalkeys.h"
 #include "metalframe.h"
+#include "metalprepass.h"
+#include "metalprepasskeys.h"
 
 #define PLUGIN_ID 0
 
@@ -38,6 +40,9 @@ static_assert(VARIANT_DIRECTIONALS == LIGHTBIT_DIRECT << 1 && VARIANT_POINTLIGHT
 #include "shaders/simple_metal.inc"
 #include "shaders/default_metal.inc"
 #include "shaders/emit_metal.inc"
+#include "shaders/prepassh_metal.inc"
+#include "shaders/prepass_metal.inc"
+#include "shaders/prepass_skin_metal.inc"
 
 static int32   alphaFunc;
 static float32 alphaRef;
@@ -264,6 +269,116 @@ im2DLayout(uint32 layout)
 }
 static StateStats stats;
 
+Shader *prepassShader, *prepassSkinShader;
+static const void *currentDrawInst;
+static const void *currentObject;
+enum { PREPASS_KEYS = 8192 };
+static PrepassKeySet prepassKeys;
+static bool prepassFrame;
+static bool orphanReported;
+static uint32 prepassDrawsThisFrame;
+static float32 prepassView[16], prepassProj[16];
+static bool prepassViewSame;
+static bool forceEqualNext;
+
+struct PrepassFrameBlock
+{
+	RawMatrix viewProj;
+	RawMatrix prevViewProj;
+};
+static PrepassFrameBlock prepassFrameBlock;
+static bool prepassFrameBound;
+
+static void
+mul44(float32 *out, const float32 *a, const float32 *b)
+{
+	for(int c = 0; c < 4; c++)
+		for(int r = 0; r < 4; r++){
+			float32 s = 0.0f;
+			for(int k = 0; k < 4; k++)
+				s += a[k*4+r]*b[c*4+k];
+			out[c*4+r] = s;
+		}
+}
+
+static bool
+layoutHasAttrib(uint32 layout, uint32 index)
+{
+	if(layout == 0 || layout >= vertexLayouts.size())
+		return false;
+	const VertexLayout &l = vertexLayouts[layout];
+	for(int32 i = 0; i < l.numAttribs; i++)
+		if(l.attribs[i].index == index)
+			return true;
+	return false;
+}
+
+bool
+prepassShadersReady(void)
+{
+	return prepassShader != nil && prepassSkinShader != nil;
+}
+
+static void
+comparePrepassView(void)
+{
+	if(prepassFrame)
+		prepassViewSame = memcmp(prepassView, uniformScene.view, sizeof(prepassView)) == 0 &&
+			memcmp(prepassProj, uniformScene.proj, sizeof(prepassProj)) == 0;
+}
+
+void
+beginPrepassState(void)
+{
+	if(prepassKeys.capacity() == 0)
+		prepassKeys.reserve(PREPASS_KEYS);
+	prepassKeys.clear();
+	prepassFrame = true;
+	prepassFrameBound = false;
+	prepassDrawsThisFrame = 0;
+	memcpy(prepassView, uniformScene.view, sizeof(prepassView));
+	memcpy(prepassProj, uniformScene.proj, sizeof(prepassProj));
+	prepassViewSame = true;
+	RawMatrix vp;
+	mul44((float32*)&vp, uniformScene.proj, uniformScene.view);
+	prepassFrameBlock.viewProj = vp;
+	prepassFrameBlock.prevViewProj = vp;
+}
+
+uint32
+endPrepassState(void)
+{
+	return prepassDrawsThisFrame;
+}
+
+void
+finishPrepassFrame(bool countOrphans)
+{
+	if(!prepassFrame)
+		return;
+	uint32 orphans = countOrphans ? prepassKeys.unused() : 0;
+	stats.prepassOrphans += orphans;
+	if(orphans && !orphanReported){
+		orphanReported = true;
+		stats.prepassOrphanLogs++;
+		fprintf(stderr, "rw::metal: %u prepass draws had no forward draw this frame; their depth hides what lies behind them\n", orphans);
+	}
+	prepassKeys.clear();
+	prepassFrame = false;
+}
+
+void
+setDrawInstance(const void *inst)
+{
+	currentDrawInst = inst;
+}
+
+void
+forcePrepassEqualForTest(void)
+{
+	forceEqualNext = true;
+}
+
 struct DefaultAttribs
 {
 	float32 f[4];
@@ -329,7 +444,7 @@ static StatsLog statsLog;
 static uint32 statsInterval;
 static void resetStatsLog(void);
 static char prewarmLine[128];
-static char statsLine[768];
+static char statsLine[1024];
 static char dropLine[256];
 static std::unordered_set<uint32> dropsReported;
 
@@ -444,6 +559,7 @@ invalidateEncoderState(void)
 	}
 	enc.vertexData = nil;
 	enc.emissive = -1.0f;
+	prepassFrameBound = false;
 }
 
 static void
@@ -587,7 +703,8 @@ static MTLPixelFormat colorFormatMap[] = {
 	MTLPixelFormatRGBA8Unorm,
 	MTLPixelFormatBGRA8Unorm,
 	MTLPixelFormatRGBA16Float,
-	MTLPixelFormatRGBA8Unorm
+	MTLPixelFormatRGBA8Unorm,
+	MTLPixelFormatRG16Snorm
 };
 
 static MTLPixelFormat depthFormatMap[] = {
@@ -628,6 +745,10 @@ makePipelineDescriptor(Shader *shader, const PipelineDesc &d, bool *usesDefaults
 		bool over = d.destBlend == BLENDINVSRCALPHA;
 		pd.colorAttachments[0].sourceAlphaBlendFactor = over ? MTLBlendFactorOne : MTLBlendFactorZero;
 		pd.colorAttachments[0].destinationAlphaBlendFactor = over ? MTLBlendFactorOneMinusSourceAlpha : MTLBlendFactorOne;
+	}
+	if(d.colorFormat == COLORFMT_PREPASS){
+		pd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Float;
+		pd.colorAttachments[1].writeMask = MTLColorWriteMaskAll;
 	}
 	pd.depthAttachmentPixelFormat = depthFormatMap[d.depthFormat];
 	pd.stencilAttachmentPixelFormat = depthFormatMap[d.depthFormat];
@@ -1291,6 +1412,7 @@ setWorldMatrix(Matrix *mat, const void *object)
 {
 	RawMatrix world;
 
+	currentObject = object;
 	convMatrix(&world, mat);
 	if(memcmp(&uniformObject.world, &world, sizeof(world)) != 0){
 		uniformObject.world = world;
@@ -1373,6 +1495,7 @@ setProjectionMatrix(float32 *mat)
 {
 	memcpy(&uniformScene.proj, mat, 64);
 	blockDirty[BLOCK_SCENE] = true;
+	comparePrepassView();
 }
 
 void
@@ -1380,6 +1503,7 @@ setViewMatrix(float32 *mat)
 {
 	memcpy(&uniformScene.view, mat, 64);
 	blockDirty[BLOCK_SCENE] = true;
+	comparePrepassView();
 }
 
 void
@@ -1563,48 +1687,15 @@ bindTextures(id<MTLRenderCommandEncoder> e, const PipelineEntry *pipe)
 	}
 }
 
-bool32
-flushCache(void)
+static bool32
+encodeDraw(MetalContext *ctx, id<MTLRenderCommandEncoder> e, PipelineEntry *pipe, bool depthEqual)
 {
-	MetalContext *ctx = getContext();
-	id<MTLRenderCommandEncoder> e;
-	PipelineEntry *pipe;
-	PipelineDesc pd;
 	DepthStencilDesc dd;
 	DepthStencilResolved dr;
 	id<MTLDepthStencilState> ds;
 	uint64 key;
 	int32 cull;
 
-	if(ctx == nil || ctx->encoder == nil || currentShader == nil){
-		countDroppedDraw(currentShader ? DROP_NOENCODER : DROP_NOSHADER, currentShader);
-		return 0;
-	}
-	syncEncoder(ctx);
-	e = ctx->encoder;
-
-	pd.shader = currentShader->shaderId;
-	pd.variant = currentVariant;
-	pd.vertexLayout = currentLayout;
-	pd.blendEnable = rwStateCache.blendEnable;
-	pd.srcBlend = rwStateCache.srcblend;
-	pd.destBlend = rwStateCache.destblend;
-	pd.writeMask = MTLColorWriteMaskAll;
-	pd.colorFormat = ctx->encoderColorFormat;
-	pd.depthFormat = ctx->encoderHasDepth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
-	pd.sampleCount = ctx->encoderSamples;
-	key = pipelineKey(pd);
-	if(key == lastPipeKey && lastPipe)
-		pipe = lastPipe;
-	else{
-		pipe = getPipeline(currentShader, pd, key);
-		lastPipeKey = key;
-		lastPipe = pipe;
-	}
-	if(pipe == nil){
-		countDroppedDraw(DROP_NOPIPELINE, currentShader);
-		return 0;
-	}
 	if(enc.pipeline != pipe->state){
 		[e setRenderPipelineState:pipe->state];
 		enc.pipeline = pipe->state;
@@ -1628,6 +1719,7 @@ flushCache(void)
 	dd.stencilPass = rwStateCache.stencilpass;
 	dd.stencilMask = rwStateCache.stencilmask;
 	dd.stencilWriteMask = rwStateCache.stencilwritemask;
+	dd.depthEqual = depthEqual;
 	dr = resolveDepthStencil(dd);
 	key = depthStencilKey(dd);
 	if(key == lastDepthKey && lastDepth)
@@ -1670,6 +1762,133 @@ flushCache(void)
 	}
 	stats.draws++;
 	return 1;
+}
+
+static RawMatrix
+previousWorld(const void *object, const RawMatrix &current)
+{
+	return current;
+}
+
+static bool
+bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
+{
+	RingSpace space;
+	if(!ringAlloc(sizeof(uniformSkin), 256, &space))
+		return false;
+	memcpy(space.cpu, &uniformSkin, sizeof(uniformSkin));
+	[e setVertexBuffer:(__bridge id<MTLBuffer>)space.buffer offset:space.offset atIndex:BUFFER_PREVSKIN];
+	return true;
+}
+
+static bool32
+flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
+{
+	bool skinned = layoutHasAttrib(currentLayout, ATTRIB_WEIGHTS);
+	Shader *sh = skinned ? prepassSkinShader : prepassShader;
+	PipelineDesc pd = {};
+	pd.shader = sh->shaderId;
+	pd.variant = 0;
+	pd.vertexLayout = currentLayout;
+	pd.blendEnable = false;
+	pd.writeMask = MTLColorWriteMaskAll;
+	pd.colorFormat = COLORFMT_PREPASS;
+	pd.depthFormat = DEPTHFMT_D32S8;
+	pd.sampleCount = ctx->encoderSamples;
+	uint64 pkey = pipelineKey(pd);
+	PipelineEntry *pipe = pkey == lastPipeKey && lastPipe ? lastPipe : getPipeline(sh, pd, pkey);
+	lastPipeKey = pkey;
+	lastPipe = pipe;
+	if(pipe == nil){
+		stats.prepassSkipped++;
+		return 0;
+	}
+	if(!prepassFrameBound){
+		RingSpace space;
+		if(!ringAlloc(sizeof(prepassFrameBlock), 256, &space)){
+			countDroppedDraw(DROP_NORINGSPACE, currentShader);
+			return 0;
+		}
+		memcpy(space.cpu, &prepassFrameBlock, sizeof(prepassFrameBlock));
+		[e setVertexBuffer:(__bridge id<MTLBuffer>)space.buffer offset:space.offset atIndex:BUFFER_PREPASSFRAME];
+		prepassFrameBound = true;
+	}
+	RawMatrix prevWorld = previousWorld(currentObject, uniformObject.world);
+	[e setVertexBytes:&prevWorld length:sizeof(prevWorld) atIndex:BUFFER_PREPASSOBJECT];
+	if(skinned && !bindPreviousBones(e, currentObject)){
+		countDroppedDraw(DROP_NORINGSPACE, currentShader);
+		return 0;
+	}
+	if(!encodeDraw(ctx, e, pipe, false))
+		return 0;
+	prepassKeys.insert(key);
+	prepassDrawsThisFrame++;
+	stats.prepassDraws++;
+	return 1;
+}
+
+bool32
+flushCache(void)
+{
+	MetalContext *ctx = getContext();
+	id<MTLRenderCommandEncoder> e;
+	PipelineEntry *pipe;
+	PipelineDesc pd;
+	uint64 key;
+
+	if(ctx == nil || ctx->encoder == nil || currentShader == nil){
+		countDroppedDraw(currentShader ? DROP_NOENCODER : DROP_NOSHADER, currentShader);
+		return 0;
+	}
+	syncEncoder(ctx);
+	e = ctx->encoder;
+
+	bool prepassPass = ctx->encoderColorFormat == COLORFMT_PREPASS;
+	bool keyed = false;
+	uint64 drawKey = 0;
+	if(prepassViewSame && (prepassPass || (prepassFrame && ctx->encoderColorFormat == COLORFMT_SCENE))){
+		PrepassDraw pdraw = { rwStateCache.blendEnable != 0, rwStateCache.ztest != 0, rwStateCache.zwrite != 0,
+			ctx->encoderHasDepth, currentDrawInst != nil };
+		if(prepassEligible(pdraw)){
+			bool skinned = layoutHasAttrib(currentLayout, ATTRIB_WEIGHTS);
+			drawKey = prepassKey(currentDrawInst, (const float*)&uniformObject.world,
+				skinned ? (const float*)&uniformSkin.bones[0] : nil);
+			keyed = true;
+		}
+	}
+	if(prepassPass)
+		return keyed ? flushPrepass(ctx, e, drawKey) : (stats.prepassSkipped++, 0);
+
+	pd.shader = currentShader->shaderId;
+	pd.variant = currentVariant;
+	pd.vertexLayout = currentLayout;
+	pd.blendEnable = rwStateCache.blendEnable;
+	pd.srcBlend = rwStateCache.srcblend;
+	pd.destBlend = rwStateCache.destblend;
+	pd.writeMask = MTLColorWriteMaskAll;
+	pd.colorFormat = ctx->encoderColorFormat;
+	pd.depthFormat = ctx->encoderHasDepth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	pd.sampleCount = ctx->encoderSamples;
+	key = pipelineKey(pd);
+	if(key == lastPipeKey && lastPipe)
+		pipe = lastPipe;
+	else{
+		pipe = getPipeline(currentShader, pd, key);
+		lastPipeKey = key;
+		lastPipe = pipe;
+	}
+	if(pipe == nil){
+		countDroppedDraw(DROP_NOPIPELINE, currentShader);
+		return 0;
+	}
+	bool depthEqual = keyed && prepassKeys.markUsed(drawKey);
+	if(depthEqual)
+		stats.prepassEqual++;
+	if(forceEqualNext && ctx->encoderColorFormat == COLORFMT_SCENE){
+		forceEqualNext = false;
+		depthEqual = true;
+	}
+	return encodeDraw(ctx, e, pipe, depthEqual);
 }
 
 static uint32
@@ -1907,6 +2126,57 @@ prewarmUV2Layouts(uint32 samples, uint32 fmt)
 }
 
 static void
+prewarmPrepassLayout(uint32 layout, uint32 samples)
+{
+	prewarm(layoutHasAttrib(layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader, layout, 0, BLEND_OFF, DEPTHFMT_D32S8,
+		samples, COLORFMT_PREPASS);
+}
+
+static void
+prewarmPrepass(uint32 samples)
+{
+	AttribDesc descs[MAXVERTEXATTRIBS];
+	int32 i, n;
+
+	for(i = 0; i < (int32)nelem(worldLayouts); i++){
+		n = defaultVertexAttribs(worldLayouts[i].normals, worldLayouts[i].prelit, worldLayouts[i].numTexCoords, descs);
+		prewarmPrepassLayout(registerVertexLayout(descs, n), samples);
+	}
+	for(i = 0; i < (int32)nelem(uv2WorldLayouts); i++){
+		n = defaultVertexAttribs(uv2WorldLayouts[i].normals, uv2WorldLayouts[i].prelit, uv2WorldLayouts[i].numTexCoords, descs);
+		prewarmPrepassLayout(registerVertexLayout(descs, n), samples);
+	}
+	for(i = 0; i < 2; i++){
+		n = skinVertexAttribs(true, i == 0, 1, descs);
+		prewarmPrepassLayout(registerVertexLayout(descs, n), samples);
+	}
+}
+
+static bool32
+hostPrewarmPrepass(const HostPrewarmRecord &r)
+{
+	uint32 counts[2];
+	int32 i, n = prewarmSampleCounts(metalGlobals.numSamples, counts);
+	bool32 ok = 1;
+
+	if(r.blend || !r.depth || im2DLayout(r.layout) || !prepassShadersReady())
+		return 1;
+	for(i = 0; i < n; i++){
+		Shader *sh = layoutHasAttrib(r.layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader;
+		PipelineDesc d = {};
+		d.shader = sh->shaderId;
+		d.vertexLayout = r.layout;
+		d.writeMask = MTLColorWriteMaskAll;
+		d.colorFormat = COLORFMT_PREPASS;
+		d.depthFormat = DEPTHFMT_D32S8;
+		d.sampleCount = counts[i];
+		if(getPipeline(sh, d, pipelineKey(d)) == nil)
+			ok = 0;
+	}
+	return ok;
+}
+
+static void
 prewarmFormatSet(uint32 mask)
 {
 	uint32 counts[2];
@@ -1923,6 +2193,9 @@ prewarmFormatSet(uint32 mask)
 			for(i = 0; i < numCounts; i++)
 				prewarmUV2Layouts(counts[i], fmt);
 	}
+	if((mask & (1u << COLORFMT_PREPASS)) && prepassShadersReady())
+		for(i = 0; i < numCounts; i++)
+			prewarmPrepass(counts[i]);
 }
 
 void
@@ -1955,6 +2228,8 @@ hostPrewarmFormat(const HostPrewarmRecord &r, uint32 fmt)
 
 	if(fmt == COLORFMT_OVERLAY && !im2DLayout(r.layout))
 		return 1;
+	if(fmt == COLORFMT_PREPASS)
+		return hostPrewarmPrepass(r);
 	d.shader = r.shader->shaderId;
 	d.variant = r.variant & r.shader->variantMask;
 	d.vertexLayout = r.layout;
@@ -1991,7 +2266,7 @@ prewarmFormats(uint32 mask)
 	@autoreleasepool {
 		prewarmFormatSet(fresh);
 		for(HostPrewarmRecord &r : hostRecords){
-			for(fmt = COLORFMT_RGBA8; fmt <= COLORFMT_OVERLAY; fmt++)
+			for(fmt = COLORFMT_RGBA8; fmt <= COLORFMT_PREPASS; fmt++)
 				if(mask & ~r.formats & (1u << fmt))
 					hostPrewarmFormat(r, fmt);
 			r.formats |= mask;
@@ -2016,7 +2291,7 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 	auto start = std::chrono::steady_clock::now();
 	hostPrewarming = true;
 	@autoreleasepool {
-		for(fmt = COLORFMT_RGBA8; fmt <= COLORFMT_OVERLAY; fmt++)
+		for(fmt = COLORFMT_RGBA8; fmt <= COLORFMT_PREPASS; fmt++)
 			if(mask & (1u << fmt))
 				if(!hostPrewarmFormat(r, fmt))
 					ok = 0;
@@ -2051,6 +2326,21 @@ prewarmShader(Shader *shader, const AttribDesc *attribs, int32 numAttribs, uint3
 	if(layout == 0)
 		return 0;
 	return hostPrewarm(shader, layout, variant, blend, srcBlend, destBlend, depth);
+}
+
+void
+openPrepass(void)
+{
+	const char *ppSrc[] = { header_metal_src, prepassh_metal_src, prepass_metal_src, nil };
+	const char *ppSkinSrc[] = { header_metal_src, skin_metal_src, prepassh_metal_src, prepass_metal_src,
+		prepass_skin_metal_src, nil };
+
+	@autoreleasepool {
+		prepassShader = Shader::create(ppSrc, "prepassVS", "prepassFS", 0);
+		prepassSkinShader = Shader::create(ppSkinSrc, "prepassSkinVS", "prepassFS", 0);
+	}
+	if(prepassShader == nil || prepassSkinShader == nil)
+		fprintf(stderr, "rw::metal: prepass shaders failed to build; modern frames draw without the prepass\n");
 }
 
 void
@@ -2111,6 +2401,16 @@ termState(void)
 	defaultShader_noAT = nil;
 	defaultShader_fullLight = nil;
 	defaultShader_fullLight_noAT = nil;
+	if(prepassShader)
+		prepassShader->destroy();
+	prepassShader = nil;
+	if(prepassSkinShader)
+		prepassSkinShader->destroy();
+	prepassSkinShader = nil;
+	prepassKeys = PrepassKeySet();
+	prepassFrame = false;
+	currentObject = nil;
+	currentDrawInst = nil;
 	currentShader = nil;
 	lastPipeKey = 0;
 	lastPipe = nil;

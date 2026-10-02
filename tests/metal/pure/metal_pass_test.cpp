@@ -328,6 +328,33 @@ TestPendingClearResolvesBeforeDrawOnSharedDepth(void)
 }
 
 static void
+TestDepthSplitTargetTakesDepthClearAndLeavesColourPending(void)
+{
+	PassManager pm;
+	Log log = {};
+	PassClear c = FullClear(PASSCLEAR_COLOR|PASSCLEAR_DEPTH|PASSCLEAR_STENCIL, 1.0f, 0.0f, 0.0f, 1.0f);
+	c.depth = 0.5f;
+	c.stencil = 3;
+	pm.setDepthSplit(&colorB);
+	pm.clear(targetA, c); Record(&log, pm);
+	pm.beginUpdate(targetSharedDepth); Record(&log, pm);
+	pm.draw(); Record(&log, pm);
+	pm.draw(); Record(&log, pm);
+	CHECK(log.num == 1);
+	CHECK(log.num >= 1 && log.actions[0].type == PASSACTION_BEGIN && samePassTarget(log.actions[0].target, targetSharedDepth));
+	CHECK(log.num >= 1 && log.actions[0].clear.flags == (PASSCLEAR_DEPTH|PASSCLEAR_STENCIL));
+	CHECK(log.num >= 1 && log.actions[0].clear.depth == 0.5f && log.actions[0].clear.stencil == 3);
+	pm.beginUpdate(targetA); Record(&log, pm);
+	pm.draw(); Record(&log, pm);
+	CHECK(log.num == 3);
+	CHECK(log.num == 3 && log.actions[1].type == PASSACTION_END && log.actions[2].type == PASSACTION_BEGIN);
+	CHECK(log.num == 3 && samePassTarget(log.actions[2].target, targetA) && log.actions[2].clear.flags == PASSCLEAR_COLOR);
+	CHECK(log.num == 3 && log.actions[2].clear.color[0] == 1.0f);
+	pm.forget(&colorB);
+	CHECK(pm.depthSplit == nullptr);
+}
+
+static void
 TestPendingClearResolvesBeforeSubRectClearOnSharedColor(void)
 {
 	PassManager pm;
@@ -954,6 +981,7 @@ main(void)
 	TestPendingClearSurvivesUnrelatedPassAndLoadsOnce();
 	TestClearOnSharedTargetResolvesEarlierPendingFirst();
 	TestClearWithNoFlagsSetsTargetOnly();
+	TestDepthSplitTargetTakesDepthClearAndLeavesColourPending();
 	TestForgetDepthKeepsColourClearForColourPass();
 	TestForgetDepthKeepsColourClearForPassWithNewDepth();
 	TestForgetColourKeepsDepthClearForNextPassOnDepth();

@@ -205,6 +205,10 @@ resolveDepthStencil(const DepthStencilDesc &d)
 		return r;
 	r.depthCompare = d.ztest ? MTLCMP_LESSEQUAL : MTLCMP_ALWAYS;
 	r.depthWrite = d.zwrite;
+	if(d.ztest && d.depthEqual){
+		r.depthCompare = MTLCMP_EQUAL;
+		r.depthWrite = false;
+	}
 	if(d.stencilEnable){
 		r.stencilEnable = true;
 		r.stencilCompare = compareFunction(d.stencilFunc);

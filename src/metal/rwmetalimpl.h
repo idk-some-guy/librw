@@ -119,6 +119,8 @@ void antiAliasCountsForTest(uint32 *allocs, uint32 *logs);
 bool32 antiAliasTextureForTest(void);
 bool32 readFrameOutput(int32 x, int32 y, float32 rgba[4]);
 bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
+bool32 readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
+void forcePrepassEqualForTest(void);
 void setEdrForTest(float32 current, float32 potential, bool32 notify);
 bool32 layerIsEdrForTest(void);
 void setEdrScreenLostForTest(bool32 lost);

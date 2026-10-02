@@ -81,7 +81,8 @@ enum ColorFormatId
 	COLORFMT_RGBA8,
 	COLORFMT_BGRA8,
 	COLORFMT_SCENE,
-	COLORFMT_OVERLAY
+	COLORFMT_OVERLAY,
+	COLORFMT_PREPASS
 };
 
 enum DepthFormatId
@@ -138,6 +139,7 @@ struct DepthStencilDesc
 	uint32_t stencilFunc;
 	uint32_t stencilFail, stencilZFail, stencilPass;
 	uint32_t stencilMask, stencilWriteMask;
+	bool depthEqual = false;
 };
 
 struct DepthStencilResolved

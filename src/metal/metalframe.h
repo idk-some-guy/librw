@@ -39,6 +39,11 @@ int32 frameCopyRoute(Raster *src);
 bool frameReadsComposite(Raster *src);
 bool32 frameRenderCopy(Raster *src, id<MTLTexture> dst, int32 dx, int32 dy, int32 w, int32 h);
 void frameForget(Raster *raster);
+bool frameIsPrepassTarget(Raster *r);
+void framePrepassAttachments(MTLRenderPassDescriptor *desc, uint32 samples);
+PassTarget currentPassTarget(void);
+void resumePassTarget(const PassTarget &t);
+void setPassDepthSplit(Raster *color);
 
 }
 }

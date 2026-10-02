@@ -8,6 +8,8 @@
 #include "metaloutput.h"
 #include "metaldering.h"
 #include "metalaa.h"
+#include "metalprepass.h"
+#include <algorithm>
 #include <string>
 #import <AppKit/AppKit.h>
 #import <MetalFX/MetalFX.h>
@@ -103,7 +105,14 @@ struct FrameState
 	id<MTLTexture> bloomDown[BLOOM_LEVELS], bloomUp[BLOOM_LEVELS];
 	id<MTLComputePipelineState> bloomDownFirst = nil, bloomDownPipe = nil, bloomUpPipe = nil;
 	bool karis = true;
-	char tail[256] = "";
+	Raster *prepassRaster = nil;
+	id<MTLTexture> prepassNormal = nil, prepassMotion = nil, prepassNormalMS = nil, prepassMotionMS = nil;
+	bool prepassOpen = false, prepassDone = false, prepassFail = false, prepassReported = false;
+	bool prepassSplitReported = false;
+	uint32 prepassPasses = 0;
+	PassTarget prepassReturn = { nil, nil };
+	uint32 prepassDrawsLast = 0;
+	char tail[512] = "";
 };
 
 static FrameState frame;
@@ -234,10 +243,10 @@ frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s",
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		f.upscaler == UPSCALER_SPATIAL ? "spatial" : "none", f.edr ? "on" : "off",
-		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing));
+		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast);
 	return frame.tail;
 }
 
@@ -246,7 +255,10 @@ activeFormatMask(void)
 {
 	if(frame.activeTier == TIER_CLASSIC)
 		return 1u << COLORFMT_RGBA8;
-	return 1u << COLORFMT_RGBA8 | 1u << COLORFMT_SCENE | 1u << COLORFMT_OVERLAY;
+	uint32 mask = 1u << COLORFMT_RGBA8 | 1u << COLORFMT_SCENE | 1u << COLORFMT_OVERLAY;
+	if(frame.activeTier == TIER_MODERN)
+		mask |= 1u << COLORFMT_PREPASS;
+	return mask;
 }
 
 static id<MTLTexture>
@@ -416,10 +428,16 @@ frameInit(void)
 	return frame.available;
 }
 
+static void dropPrepassTargets(void);
+
 static void
 dropSceneTargets(void)
 {
 	frame.dropping = true;
+	dropPrepassTargets();
+	finishPrepassFrame(false);
+	frame.prepassOpen = false;
+	frame.prepassDone = false;
 	if(frame.sceneBase){
 		frame.sceneBase->destroy();
 		frame.sceneBase = nil;
@@ -775,8 +793,12 @@ beginScene(Camera *cam)
 	if(getContext() == nil || cam == nil || cam->frameBuffer == nil)
 		return;
 	@autoreleasepool {
-		if(frame.phase == PHASE_SCENE)
+		if(frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS)
 			endScene(nil);
+		frame.prepassOpen = false;
+		frame.prepassDone = false;
+		frame.prepassPasses = 0;
+		frame.prepassDrawsLast = 0;
 		Raster *main = cam->frameBuffer->parent;
 		Raster *depth = cam->zBuffer ? cam->zBuffer->parent : nil;
 		bool enhanced = frame.activeTier != TIER_CLASSIC && frame.available && main->type == Raster::CAMERA &&
@@ -788,10 +810,13 @@ beginScene(Camera *cam)
 void
 endScene(const GradeParams *params)
 {
+	if(frame.prepassOpen)
+		endPrepass();
 	if(getContext() == nil || frame.phase != PHASE_SCENE)
 		return;
 	@autoreleasepool {
 		flushPasses();
+		finishPrepassFrame(true);
 		encodeGrade(params);
 		frame.phase = phaseOnEndScene(frame.phase);
 		PassTarget t = { frame.mainColor, frame.mainDepth };
@@ -807,7 +832,7 @@ endScene(const GradeParams *params)
 bool32
 enhancedFrame(void)
 {
-	return frame.phase == PHASE_SCENE || frame.phase == PHASE_POST;
+	return frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS || frame.phase == PHASE_POST;
 }
 
 void
@@ -863,7 +888,8 @@ frameSceneBase(void)
 bool
 frameSubViewport(Raster *fb, Raster *target, HostRect *r)
 {
-	if(target == nil || target != frame.sceneBase || fb->parent != frame.mainColor || fb == fb->parent)
+	if(target == nil || (target != frame.sceneBase && target != frame.prepassRaster) || fb->parent != frame.mainColor ||
+	   fb == fb->parent)
 		return false;
 	HostRect s = { fb->offsetX, fb->offsetY, fb->width, fb->height };
 	*r = scaleRect(s, frame.outputWidth, frame.outputHeight, frame.internalWidth, frame.internalHeight);
@@ -884,6 +910,8 @@ frameScaleClear(PassClear *c)
 void
 frameShow(void)
 {
+	if(frame.prepassOpen)
+		endPrepass();
 	if(frame.phase == PHASE_SCENE){
 		if(!frame.unendedReported){
 			frame.unendedReported = true;
@@ -1101,9 +1129,10 @@ readHalfPixel(id<MTLTexture> tex, int32 x, int32 y, float32 rgba[4])
 {
 	MetalContext *ctx = getContext();
 
-	if(ctx == nil || tex == nil || tex.pixelFormat != MTLPixelFormatRGBA16Float || x < 0 || y < 0 ||
-	   x >= (int32)tex.width || y >= (int32)tex.height)
+	if(ctx == nil || tex == nil || (tex.pixelFormat != MTLPixelFormatRGBA16Float && tex.pixelFormat != MTLPixelFormatRG16Float) ||
+	   x < 0 || y < 0 || x >= (int32)tex.width || y >= (int32)tex.height)
 		return 0;
+	int32 channels = tex.pixelFormat == MTLPixelFormatRG16Float ? 2 : 4;
 	@autoreleasepool {
 		flushPasses();
 		id<MTLBuffer> buf = [ctx->device newBufferWithLength:8 options:MTLResourceStorageModeShared];
@@ -1111,13 +1140,39 @@ readHalfPixel(id<MTLTexture> tex, int32 x, int32 y, float32 rgba[4])
 		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
 			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
-			destinationBytesPerRow:8 destinationBytesPerImage:8];
+			destinationBytesPerRow:channels*2 destinationBytesPerImage:channels*2];
 		[blit endEncoding];
 		if(!commitAndWait(cb))
 			return 0;
 		const __fp16 *h = (const __fp16*)buf.contents;
 		for(int i = 0; i < 4; i++)
-			rgba[i] = h[i];
+			rgba[i] = i < channels ? (float32)h[i] : 0.0f;
+	}
+	return 1;
+}
+
+static bool32
+readSnormPixel(id<MTLTexture> tex, int32 x, int32 y, float32 rgba[4])
+{
+	MetalContext *ctx = getContext();
+
+	if(ctx == nil || tex == nil || tex.pixelFormat != MTLPixelFormatRG16Snorm || x < 0 || y < 0 ||
+	   x >= (int32)tex.width || y >= (int32)tex.height)
+		return 0;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:4 destinationBytesPerImage:4];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		const int16 *v = (const int16*)buf.contents;
+		for(int i = 0; i < 4; i++)
+			rgba[i] = i < 2 ? std::max(v[i]/32767.0f, -1.0f) : 0.0f;
 	}
 	return 1;
 }
@@ -1136,6 +1191,161 @@ readScenePixel(int32 x, int32 y, float32 rgba[4])
 	if(frame.sceneBase == nil)
 		return 0;
 	return readHalfPixel(getRasterTexture(frame.sceneBase), x, y, rgba);
+}
+
+static id<MTLTexture>
+newMemoryless(MTLPixelFormat format, int32 w, int32 h, uint32 samples)
+{
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped:NO];
+	d.textureType = MTLTextureType2DMultisample;
+	d.sampleCount = samples;
+	d.usage = MTLTextureUsageRenderTarget;
+	d.storageMode = MTLStorageModeMemoryless;
+	return [getContext()->device newTextureWithDescriptor:d];
+}
+
+static void
+dropPrepassTargets(void)
+{
+	if(frame.prepassRaster){
+		frame.prepassRaster->destroy();
+		frame.prepassRaster = nil;
+	}
+	frame.prepassNormal = frame.prepassMotion = nil;
+	frame.prepassNormalMS = frame.prepassMotionMS = nil;
+}
+
+static bool
+ensurePrepassTargets(void)
+{
+	int32 w = frame.internalWidth, h = frame.internalHeight;
+	if(frame.prepassRaster && frame.prepassRaster->width == w && frame.prepassRaster->height == h &&
+	   GETMETALRASTEREXT(frame.prepassRaster)->numSamples == frame.samples)
+		return true;
+	dropPrepassTargets();
+	MTLTextureUsage u = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	if(!frame.prepassFail){
+		frame.prepassNormal = newTexture(MTLPixelFormatRG16Snorm, w, h, u, 1);
+		frame.prepassMotion = newTexture(MTLPixelFormatRG16Float, w, h, u, 1);
+		if(frame.samples > 1){
+			frame.prepassNormalMS = newMemoryless(MTLPixelFormatRG16Snorm, w, h, frame.samples);
+			frame.prepassMotionMS = newMemoryless(MTLPixelFormatRG16Float, w, h, frame.samples);
+		}
+		frame.prepassRaster = Raster::create(w, h, 0, Raster::CAMERA | Raster::DONTALLOCATE);
+	}
+	if(frame.prepassNormal == nil || frame.prepassMotion == nil || frame.prepassRaster == nil ||
+	   (frame.samples > 1 && (frame.prepassNormalMS == nil || frame.prepassMotionMS == nil))){
+		dropPrepassTargets();
+		if(!frame.prepassReported){
+			frame.prepassReported = true;
+			fprintf(stderr, "rw::metal: prepass targets for %dx%d could not be created; modern frames draw without the prepass\n", w, h);
+		}
+		return false;
+	}
+	GETMETALRASTEREXT(frame.prepassRaster)->numSamples = frame.samples;
+	return true;
+}
+
+bool
+frameIsPrepassTarget(Raster *r)
+{
+	return r && r == frame.prepassRaster;
+}
+
+void
+framePrepassAttachments(MTLRenderPassDescriptor *desc, uint32 samples)
+{
+	bool ms = samples > 1;
+	id<MTLTexture> tex[2] = { frame.prepassNormal, frame.prepassMotion };
+	id<MTLTexture> twin[2] = { frame.prepassNormalMS, frame.prepassMotionMS };
+	bool reopen = frame.prepassPasses > 0;
+	if(reopen && ms && !frame.prepassSplitReported){
+		frame.prepassSplitReported = true;
+		fprintf(stderr, "rw::metal: the prepass was split into more than one pass; normals and motion before the split are lost\n");
+	}
+	for(int i = 0; i < 2; i++){
+		desc.colorAttachments[i].texture = ms ? twin[i] : tex[i];
+		desc.colorAttachments[i].resolveTexture = ms ? tex[i] : nil;
+		desc.colorAttachments[i].loadAction = reopen && !ms ? MTLLoadActionLoad : MTLLoadActionClear;
+		desc.colorAttachments[i].storeAction = ms ? MTLStoreActionMultisampleResolve : MTLStoreActionStore;
+		desc.colorAttachments[i].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+	}
+	frame.prepassPasses++;
+}
+
+bool32
+beginPrepass(void)
+{
+	if(getContext() == nil || frame.phase != PHASE_SCENE || frame.activeTier != TIER_MODERN || frame.prepassOpen ||
+	   frame.prepassDone || frame.sceneDepth == nil || !prepassShadersReady() || !ensurePrepassTargets())
+		return 0;
+	@autoreleasepool {
+		frame.prepassReturn = currentPassTarget();
+		frame.phase = PHASE_PREPASS;
+		frame.prepassOpen = true;
+		frame.prepassPasses = 0;
+		beginPrepassState();
+		setPassDepthSplit(frame.prepassRaster);
+		PassTarget t = { frame.prepassRaster, frame.sceneDepth };
+		resumePassTarget(t);
+	}
+	return 1;
+}
+
+void
+endPrepass(void)
+{
+	if(!frame.prepassOpen)
+		return;
+	@autoreleasepool {
+		frame.prepassOpen = false;
+		frame.prepassDone = true;
+		frame.phase = PHASE_SCENE;
+		frame.prepassDrawsLast = endPrepassState();
+		resumePassTarget(frame.prepassReturn);
+	}
+}
+
+static bool32
+readResolvedDepth(Raster *zb, int32 x, int32 y, float32 *depth)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = zb ? getRasterTexture(zb) : nil;
+
+	if(ctx == nil || tex == nil || tex.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 || x < 0 || y < 0 ||
+	   x >= (int32)tex.width || y >= (int32)tex.height)
+		return 0;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:4 destinationBytesPerImage:4 options:MTLBlitOptionDepthFromDepthStencil];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		memcpy(depth, buf.contents, 4);
+	}
+	return 1;
+}
+
+bool32
+readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth)
+{
+	float32 n[4], m[4];
+	if(frame.prepassNormal == nil || !readHalfPixel(frame.prepassMotion, x, y, m))
+		return 0;
+	if(!readSnormPixel(frame.prepassNormal, x, y, n))
+		return 0;
+	PPVec3 d = n[0] == 0.0f && n[1] == 0.0f ? PPVec3{ 0.0f, 0.0f, 0.0f } : ppOctDecode(n[0], n[1]);
+	normal[0] = d.x;
+	normal[1] = d.y;
+	normal[2] = d.z;
+	motion[0] = m[0];
+	motion[1] = m[1];
+	return readResolvedDepth(frame.sceneDepth, x, y, depth);
 }
 
 void
@@ -1171,7 +1381,7 @@ frameTierChanged(void)
 		return;
 	prewarmFormats(activeFormatMask());
 	if(frame.activeTier == TIER_CLASSIC){
-		if(frame.phase == PHASE_SCENE)
+		if(frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS)
 			endScene(nil);
 		dropSceneTargets();
 	}

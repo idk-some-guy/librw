@@ -15,6 +15,7 @@
 #include "objc_checks.h"
 #include "msaa_checks.h"
 #include "frame_checks.h"
+#include "modern_checks.h"
 #ifdef LIBRW_COCOA
 #include <src/metal/metaldrawable.h>
 #include "cocoa_checks.h"
@@ -4869,6 +4870,7 @@ main(void)
 	CheckIm2D();
 	CheckSurfaceNotVisible();
 	failures += RunFrameChecks(ctx.camera);
+	failures += RunModernChecks(ctx.camera);
 	failures += RunWorldChecks(ctx.camera);
 	failures += RunSkinChecks(ctx.camera);
 	failures += RunMatFXChecks(ctx.camera);
@@ -4886,6 +4888,7 @@ main(void)
 		failures += RunRestartHostChecks(RestartEngine, CurrentCamera);
 		failures += RunMsaaChecks(RestartEngineSamples, CurrentCamera);
 		failures += RunRestartFrameChecks(RestartEngineSamples, CurrentCamera);
+		failures += RunRestartModernChecks(RestartEngineSamples, CurrentCamera);
 #ifdef LIBRW_COCOA
 		CheckCocoaWindowClosed();
 #else

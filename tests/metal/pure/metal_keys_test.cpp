@@ -529,6 +529,28 @@ TestColorFormatKeys(void)
 	CHECK(COLORFMT_OVERLAY < 16);
 }
 
+static void
+TestDepthEqual(void)
+{
+	DepthStencilDesc d = {};
+	d.hasDepth = true;
+	d.ztest = true;
+	d.zwrite = true;
+	DepthStencilDesc e = d;
+	e.depthEqual = true;
+	DepthStencilResolved r = resolveDepthStencil(e);
+	CHECK(r.depthCompare == MTLCMP_EQUAL && !r.depthWrite);
+	CHECK(depthStencilKey(d) != depthStencilKey(e));
+	e.ztest = false;
+	r = resolveDepthStencil(e);
+	CHECK(r.depthCompare == MTLCMP_ALWAYS);
+	PipelineDesc p = {};
+	p.colorFormat = COLORFMT_PREPASS;
+	PipelineDesc q = p;
+	q.colorFormat = COLORFMT_SCENE;
+	CHECK(pipelineKey(p) != pipelineKey(q));
+}
+
 int
 main(void)
 {
@@ -551,6 +573,7 @@ main(void)
 	TestSupportedSampleCount();
 	TestPrewarmSampleCounts();
 	TestColorFormatKeys();
+	TestDepthEqual();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;

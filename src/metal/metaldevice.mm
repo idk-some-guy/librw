@@ -294,8 +294,11 @@ beginPass(MetalContext *ctx, const PassAction *a)
 		}
 	}
 
+	bool prepass = frameIsPrepassTarget(fb);
 	desc = [MTLRenderPassDescriptor renderPassDescriptor];
-	if(color){
+	if(prepass)
+		framePrepassAttachments(desc, samples);
+	else if(color){
 		desc.colorAttachments[0].texture = colorMS ? colorMS : color;
 		desc.colorAttachments[0].resolveTexture = colorMS ? color : nil;
 		desc.colorAttachments[0].loadAction = c->flags & PASSCLEAR_COLOR ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -306,6 +309,11 @@ beginPass(MetalContext *ctx, const PassAction *a)
 		desc.depthAttachment.texture = depth;
 		desc.depthAttachment.loadAction = c->flags & PASSCLEAR_DEPTH ? MTLLoadActionClear : MTLLoadActionLoad;
 		desc.depthAttachment.storeAction = MTLStoreActionStore;
+		if(prepass && samples > 1){
+			desc.depthAttachment.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+			desc.depthAttachment.resolveTexture = getRasterTexture(zb);
+			desc.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+		}
 		desc.depthAttachment.clearDepth = c->depth;
 		desc.stencilAttachment.texture = depth;
 		desc.stencilAttachment.loadAction = c->flags & PASSCLEAR_STENCIL ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -320,7 +328,7 @@ beginPass(MetalContext *ctx, const PassAction *a)
 	if(depth)
 		GETMETALRASTEREXT(zb)->msaaCurrent = samples > 1;
 	ctx->encoderSamples = samples;
-	ctx->encoderColorFormat = frameColorFormat(fb);
+	ctx->encoderColorFormat = prepass ? COLORFMT_PREPASS : frameColorFormat(fb);
 	ctx->encoderWidth = (uint32)(color ? color.width : depth.width);
 	ctx->encoderHeight = (uint32)(color ? color.height : depth.height);
 	if(fb)
@@ -402,6 +410,28 @@ flushPasses(void)
 {
 	passManager.flush();
 	runPassActions();
+}
+
+PassTarget
+currentPassTarget(void)
+{
+	return passManager.current;
+}
+
+void
+setPassDepthSplit(Raster *color)
+{
+	passManager.setDepthSplit(color);
+}
+
+void
+resumePassTarget(const PassTarget &t)
+{
+	passManager.beginUpdate(t);
+	runPassActions();
+	MetalContext *ctx = getContext();
+	if(ctx && ctx->encoder && passManager.openTarget.color)
+		setViewport(ctx, (Raster*)passManager.openTarget.color);
 }
 
 void
@@ -1031,6 +1061,7 @@ initMetal(void)
 	if(!openMatFX())
 		return 0;
 	openIm2DEmit();
+	openPrepass();
 	prewarmPipelines();
 	openIm2DUV2();
 	return 1;

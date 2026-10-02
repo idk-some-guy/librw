@@ -59,12 +59,14 @@ struct PassManager
 	bool hasPending;
 	PassTarget pendingTarget;
 	PassClear pending;
+	const void *depthSplit;
 
 	int numActions;
 	PassAction actions[MAXACTIONS];
 
 	PassManager(void);
 	bool isOpen(void) const { return this->open; }
+	void setDepthSplit(const void *color) { this->depthSplit = color; }
 
 	void beginUpdate(const PassTarget &target);
 	void clear(const PassTarget &target, const PassClear &clear);

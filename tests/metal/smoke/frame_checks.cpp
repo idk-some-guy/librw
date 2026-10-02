@@ -1788,7 +1788,7 @@ CheckTaaFallback(void)
 	int32 stored = metal::getRenderSettings().antiAliasing;
 	int32 active = metal::getFrameInfo().antiAliasing;
 	metal::logStats();
-	bool stats = strstr(metal::getStatsLine(), " aa fxaa\n") != nil;
+	bool stats = strstr(metal::getStatsLine(), " aa fxaa ") != nil;
 	SetTier(metal::TIER_CLASSIC);
 	int32 classic = metal::getFrameInfo().antiAliasing;
 	SetAntiAlias(metal::ANTIALIAS_OFF);
@@ -1821,7 +1821,7 @@ CheckFxaaTexture(void)
 	PlainFrame(col);
 	metal::FrameInfo fi = metal::getFrameInfo();
 	metal::logStats();
-	bool stats = strstr(metal::getStatsLine(), " aa off\n") != nil;
+	bool stats = strstr(metal::getStatsLine(), " aa off ") != nil;
 	uint8 *px = Composite();
 	cam->showRaster(0);
 	metal::setAntiAliasFailForTest(0);
