@@ -434,6 +434,347 @@ CheckPrepassPrewarmed(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckShowClosesPrepass(void)
+{
+	const char *name = "a frame shown with its prepass still open leaves no keys behind for the next frame";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	bool began = metal::beginPrepass();
+	if(began)
+		DrawOpaque(&s);
+	WorldEnd();
+	float px[4] = {}, sky[4] = {};
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	DrawOpaque(&s);
+	bool read = metal::readScenePixel(PX(0.5f, 10.0f), PY(0.25f, 10.0f), px) && metal::readScenePixel(5, 5, sky);
+	metal::endScene(nil);
+	WorldEnd();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = began && read && Red(px, sky);
+	if(!ok)
+		Detail("  prepass %d read %d; front quad %.3f,%.3f,%.3f, sky %.3f,%.3f,%.3f\n", began, read, px[0], px[1], px[2],
+			sky[0], sky[1], sky[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckForcedEqualCleared(void)
+{
+	const char *name = "a forced equal test left unused in one frame does not reach the next frame";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	bool began = metal::beginPrepass();
+	if(began){
+		s.front->render();
+		metal::endPrepass();
+	}
+	s.front->render();
+	metal::forcePrepassEqualForTest();
+	metal::endScene(nil);
+	WorldEnd();
+	float px[4] = {}, sky[4] = {};
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	s.front->render();
+	bool read = metal::readScenePixel(PX(0.5f, 10.0f), PY(0.25f, 10.0f), px) && metal::readScenePixel(5, 5, sky);
+	metal::endScene(nil);
+	WorldEnd();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = began && read && Red(px, sky);
+	if(!ok)
+		Detail("  prepass %d read %d; front quad %.3f,%.3f,%.3f, sky %.3f,%.3f,%.3f\n", began, read, px[0], px[1], px[2],
+			sky[0], sky[1], sky[2]);
+	return Report(ok, name);
+}
+
+static void
+DrawSpread(Atomic *a, int n)
+{
+	Frame *f = a->getFrame();
+	for(int i = 0; i < n; i++){
+		V3d p = { 0.0005f*i, 0.0f, 0.0f };
+		f->translate(&p, COMBINEREPLACE);
+		f->updateObjects();
+		a->render();
+	}
+}
+
+static bool
+CheckPrepassUnkeyed(void)
+{
+	const char *name = "prepass draws past the key capacity are counted as unkeyed and their forward draws keep their depth test";
+	enum { CAPACITY = 8192, EXTRA = 5 };
+	RGBA red = { 220, 40, 30, 255 }, col[4] = { red, red, red, red };
+	Material *mat = Material::create();
+	Geometry *g = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::PRELIT | Geometry::NORMALS,
+		0.1f, 0.1f, -0.1f, -0.1f, 10.0f, col, nil, mat);
+	Atomic *a = MakeAtomic(g);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	SetRenderState(VERTEXALPHA, 0);
+	bool began = metal::beginPrepass();
+	if(began){
+		DrawSpread(a, CAPACITY + EXTRA);
+		metal::endPrepass();
+	}
+	DrawSpread(a, CAPACITY + EXTRA);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats after = metal::getStateStats();
+	metal::logStats();
+	const char *tail = strstr(metal::getStatsLine(), " unkeyed ");
+	unsigned shown = 0;
+	bool printed = tail && sscanf(tail, " unkeyed %u", &shown) == 1 && shown == after.prepassUnkeyed;
+	TiersOff();
+	DestroyAtomic(a);
+	g->destroy();
+	mat->destroy();
+	uint32 draws = after.prepassDraws - before.prepassDraws, unkeyed = after.prepassUnkeyed - before.prepassUnkeyed;
+	uint32 equal = after.prepassEqual - before.prepassEqual, orphans = after.prepassOrphans - before.prepassOrphans;
+	bool ok = began && draws == CAPACITY + EXTRA && unkeyed == EXTRA && equal == CAPACITY && orphans == 0 && printed;
+	if(!ok)
+		Detail("  prepass %d draws %u unkeyed %u equal %u orphans %u; stats line shows %u\n", began, draws, unkeyed, equal,
+			orphans, shown);
+	return Report(ok, name);
+}
+
+static bool
+CheckPrepassDropMidFrame(void)
+{
+	const char *name = "a camera depth raster destroyed inside the prepass bracket drops the frame's keys without orphans";
+	Scene3D s;
+	MakeScene(&s);
+	int w = cam->zBuffer->width, h = cam->zBuffer->height;
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	bool began = metal::beginPrepass();
+	if(began)
+		DrawOpaque(&s);
+	cam->zBuffer->destroy();
+	cam->zBuffer = Raster::create(w, h, 0, Raster::ZBUFFER);
+	metal::endPrepass();
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats mid = metal::getStateStats();
+	SceneFrame(&s, true);
+	metal::StateStats after = metal::getStateStats();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = began && mid.prepassOrphans == before.prepassOrphans && mid.prepassOrphanLogs == before.prepassOrphanLogs &&
+		after.prepassDraws - mid.prepassDraws == 2 && after.prepassEqual - mid.prepassEqual == 2 &&
+		after.prepassOrphans == before.prepassOrphans;
+	if(!ok)
+		Detail("  prepass %d orphans %u logs %u after the drop; next frame prepass draws %u equal %u orphans %u\n", began,
+			mid.prepassOrphans - before.prepassOrphans, mid.prepassOrphanLogs - before.prepassOrphanLogs,
+			after.prepassDraws - mid.prepassDraws, after.prepassEqual - mid.prepassEqual,
+			after.prepassOrphans - mid.prepassOrphans);
+	return Report(ok, name);
+}
+
+static void
+PlaceCamera(float yawDeg, float x, float y, float z)
+{
+	Frame *f = cam->getFrame();
+	f->matrix.setIdentity();
+	V3d up = { 0.0f, 1.0f, 0.0f };
+	f->rotate(&up, yawDeg, COMBINEREPLACE);
+	V3d pos = { x, y, z };
+	f->translate(&pos, COMBINEPOSTCONCAT);
+	f->updateObjects();
+}
+
+static bool
+PrepassMotionAt(int x, int y, float m[2])
+{
+	float n[3], d;
+	return metal::readPrepassForTest(x, y, n, m, &d);
+}
+
+static void
+TurnMotion(int x, int y, float sign, float deg, float m[2])
+{
+	float nx = 2.0f*(x + 0.5f)/640.0f - 1.0f, ny = 1.0f - 2.0f*(y + 0.5f)/480.0f;
+	float a = atanf(nx), b = a + sign*deg*3.14159265f/180.0f;
+	m[0] = 0.5f*(tanf(b) - nx);
+	m[1] = -0.5f*ny*(cosf(a)/cosf(b) - 1.0f);
+}
+
+static bool
+CheckCameraMotion(void)
+{
+	const char *name = "a turning camera gives a drawn surface and an uncovered far pixel the motion of their view directions";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	SceneFrame(&s, true);
+	PlaceCamera(2.0f, 0.0f, 0.0f, 0.0f);
+	SceneFrame(&s, true);
+	float onQuad[2] = {}, far[2] = {};
+	bool read = PrepassMotionAt(320, 240, onQuad) && PrepassMotionAt(20, 20, far);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	TiersOff();
+	FreeScene(&s);
+	float sign = onQuad[0] < 0.0f ? -1.0f : 1.0f, wantQuad[2], wantFar[2];
+	TurnMotion(320, 240, sign, 2.0f, wantQuad);
+	TurnMotion(20, 20, sign, 2.0f, wantFar);
+	bool ok = read && fabsf(onQuad[0]) > 0.01f && fabsf(onQuad[0] - wantQuad[0]) < 0.0015f &&
+		fabsf(onQuad[1] - wantQuad[1]) < 0.001f && fabsf(far[0] - wantFar[0]) < 0.0015f && fabsf(far[1] - wantFar[1]) < 0.0015f;
+	if(!ok)
+		Detail("  quad motion %.5f,%.5f expected %.5f,%.5f; far motion %.5f,%.5f expected %.5f,%.5f\n", onQuad[0], onQuad[1],
+			wantQuad[0], wantQuad[1], far[0], far[1], wantFar[0], wantFar[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckMotionAfterGap(void)
+{
+	const char *name = "a prepass frame after a frame without the prepass starts without camera history";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	SceneFrame(&s, true);
+	PlaceCamera(2.0f, 0.0f, 0.0f, 0.0f);
+	SceneFrame(&s, false);
+	SceneFrame(&s, true);
+	float m[2] = { 1.0f, 1.0f };
+	bool read = PrepassMotionAt(320, 240, m);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && fabsf(m[0]) < 1e-4f && fabsf(m[1]) < 1e-4f;
+	if(!ok)
+		Detail("  motion %.5f,%.5f, expected none\n", m[0], m[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckObjectMotion(void)
+{
+	const char *name = "an object's previous world matrix gives its motion and a static scene gives none";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	SceneFrame(&s, true);
+	SceneFrame(&s, true);
+	float still[2] = { 1.0f, 1.0f };
+	bool readStill = PrepassMotionAt(PX(0.5f, 10.0f), PY(0.25f, 10.0f), still);
+	V3d up = { 0.0f, 1.0f, 0.0f };
+	s.front->getFrame()->translate(&up, COMBINEPOSTCONCAT);
+	s.front->getFrame()->updateObjects();
+	SceneFrame(&s, true);
+	float moved[2] = {};
+	bool readMoved = PrepassMotionAt(PX(0.5f, 10.0f), PY(1.25f, 10.0f), moved);
+	TiersOff();
+	FreeScene(&s);
+	float want = 240.0f/(0.75f*10.0f)/480.0f;
+	bool ok = readStill && readMoved && fabsf(still[0]) < 1e-4f && fabsf(still[1]) < 1e-4f &&
+		fabsf(moved[0]) < 1e-3f && fabsf(moved[1] - want) < 0.002f;
+	if(!ok)
+		Detail("  still %.5f,%.5f moved %.5f,%.5f, expected y %.5f\n", still[0], still[1], moved[0], moved[1], want);
+	return Report(ok, name);
+}
+
+static bool
+CheckObjectMotionAfterCut(void)
+{
+	const char *name = "an object moved across a camera cut has no object motion";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	SceneFrame(&s, true);
+	V3d up = { 0.0f, 1.0f, 0.0f };
+	s.front->getFrame()->translate(&up, COMBINEPOSTCONCAT);
+	s.front->getFrame()->updateObjects();
+	metal::cameraCut();
+	SceneFrame(&s, true);
+	float m[2] = { 1.0f, 1.0f };
+	bool read = PrepassMotionAt(PX(0.5f, 10.0f), PY(1.25f, 10.0f), m);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && fabsf(m[0]) < 1e-4f && fabsf(m[1]) < 1e-4f;
+	if(!ok)
+		Detail("  motion %.5f,%.5f, expected none\n", m[0], m[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckSkinnedMotion(void)
+{
+	const char *name = "a skinned draw's previous bones give its motion and its forward draw tests equal";
+	RGBA red = { 220, 40, 30, 255 }, col[4] = { red, red, red, red };
+	Material *mat = Material::create();
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::NORMALS | Geometry::PRELIT, 1.0f, 1.0f,
+		-1.0f, -1.0f, 0.0f, col, nil, mat);
+	Matrix ident[2];
+	ident[0].setIdentity();
+	ident[1].setIdentity();
+	uint8 idx[4][4] = { { 0, 1, 0, 0 }, { 0, 1, 0, 0 }, { 0, 1, 0, 0 }, { 0, 1, 0, 0 } };
+	float wts[4][4] = { { 0.5f, 0.5f, 0, 0 }, { 0.5f, 0.5f, 0, 0 }, { 0.5f, 0.5f, 0, 0 }, { 0.5f, 0.5f, 0, 0 } };
+	AttachSkin(geo, 2, ident, idx, wts);
+	Atomic *a = SkinAtomic(geo);
+	V3d away = { 0.0f, 0.0f, 10.0f };
+	a->getFrame()->translate(&away, COMBINEREPLACE);
+	a->getFrame()->updateObjects();
+	HAnimHierarchy *h = HAnimHierarchy::create(2, nil, nil, 0, 36);
+	h->matrices[0] = *a->getFrame()->getLTM();
+	h->matrices[1] = *a->getFrame()->getLTM();
+	Skin::setHierarchy(a, h);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::StateStats before = metal::getStateStats();
+	float m[2] = { 0.0f, 0.0f }, px[4] = {}, sky[4] = {};
+	bool read = false;
+	for(int f = 0; f < 2; f++){
+		if(f == 1){
+			V3d right = { 1.0f, 0.0f, 0.0f };
+			h->matrices[0].translate(&right, COMBINEPOSTCONCAT);
+			h->matrices[1].translate(&right, COMBINEPOSTCONCAT);
+		}
+		metal::beginScene(cam);
+		WorldBegin(SKY);
+		if(metal::beginPrepass()){
+			a->render();
+			metal::endPrepass();
+		}
+		a->render();
+		if(f == 1)
+			read = metal::readScenePixel(PX(0.5f, 10.0f), PY(0.0f, 10.0f), px) && metal::readScenePixel(5, 5, sky);
+		metal::endScene(nil);
+		WorldEnd();
+		if(f == 1)
+			read = read && PrepassMotionAt(PX(0.5f, 10.0f), PY(0.0f, 10.0f), m);
+	}
+	metal::StateStats after = metal::getStateStats();
+	TiersOff();
+	DestroySkinAtomic(a);
+	geo->destroy();
+	mat->destroy();
+	float want = 0.5f/10.0f;
+	bool ok = read && fabsf(m[0] - want) < 0.002f && fabsf(m[1]) < 0.001f && Red(px, sky) &&
+		after.prepassEqual - before.prepassEqual == 2 && after.prepassOrphans == before.prepassOrphans;
+	if(!ok)
+		Detail("  motion %.5f,%.5f expected x %.5f; pixel %.3f,%.3f,%.3f; equal draws %u orphans %u\n", m[0], m[1], want,
+			px[0], px[1], px[2], after.prepassEqual - before.prepassEqual, after.prepassOrphans - before.prepassOrphans);
+	return Report(ok, name);
+}
+
 int
 RunModernChecks(Camera *camera)
 {
@@ -447,8 +788,81 @@ RunModernChecks(Camera *camera)
 	CheckPrepassEqualOnGpu();
 	CheckPrepassKeepsSceneClearPending();
 	CheckPrepassPrewarmed();
+	CheckShowClosesPrepass();
+	CheckForcedEqualCleared();
+	CheckPrepassUnkeyed();
+	CheckPrepassDropMidFrame();
+	CheckCameraMotion();
+	CheckMotionAfterGap();
+	CheckObjectMotion();
+	CheckObjectMotionAfterCut();
+	CheckSkinnedMotion();
 	WorldClose();
 	return failures;
+}
+
+static bool
+SampleZeroPixel(int x, int y, float wantMotionY, int *onQuad)
+{
+	float n[3] = {}, m[2] = {}, d = -1.0f;
+	if(!metal::readPrepassForTest(x, y, n, m, &d)){
+		Detail("  pixel %d,%d could not be read\n", x, y);
+		return false;
+	}
+	bool quad = d < 1.0f;
+	bool ok = quad ? fabsf(n[0]) < 0.01f && fabsf(n[1]) < 0.01f && fabsf(n[2] + 1.0f) < 0.01f &&
+			fabsf(m[0]) < 1e-3f && fabsf(m[1] - wantMotionY) < 0.002f :
+		n[0] == 0.0f && n[1] == 0.0f && n[2] == 0.0f && fabsf(m[0]) < 1e-4f && fabsf(m[1]) < 1e-4f;
+	if(quad)
+		(*onQuad)++;
+	if(!ok)
+		Detail("  pixel %d,%d depth %.6f normal %.3f,%.3f,%.3f motion %.5f,%.5f\n", x, y, d, n[0], n[1], n[2], m[0], m[1]);
+	return ok;
+}
+
+static bool
+CheckPrepassSampleZero(void)
+{
+	const char *name = "with four samples the resolved normal, motion and depth of an edge pixel all come from sample 0";
+	RGBA red = { 220, 40, 30, 255 }, col[4] = { red, red, red, red };
+	Material *mat = Material::create();
+	Geometry *g = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::PRELIT | Geometry::NORMALS,
+		0.015625f, 1.0f, -0.984375f, -1.0f, 10.0f, col, nil, mat);
+	Atomic *a = MakeAtomic(g);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::cameraCut();
+	bool ok = true;
+	int onQuad = 0;
+	for(int f = 0; f < 2; f++){
+		if(f == 1){
+			V3d up = { 0.0f, 0.5f, 0.0f };
+			a->getFrame()->translate(&up, COMBINEPOSTCONCAT);
+			a->getFrame()->updateObjects();
+		}
+		metal::beginScene(cam);
+		WorldBegin(SKY);
+		SetRenderState(VERTEXALPHA, 0);
+		if(metal::beginPrepass()){
+			a->render();
+			metal::endPrepass();
+		}
+		a->render();
+		metal::endScene(nil);
+		if(f == 1){
+			float want = 0.5f/(0.75f*10.0f)*0.5f;
+			bool left = SampleZeroPixel(319, PY(0.5f, 10.0f), want, &onQuad);
+			bool right = SampleZeroPixel(351, PY(0.5f, 10.0f), want, &onQuad);
+			ok = left && right;
+		}
+		WorldEnd();
+	}
+	TiersOff();
+	DestroyAtomic(a);
+	g->destroy();
+	mat->destroy();
+	if(onQuad != 1)
+		Detail("  %d of the two edge pixels have sample 0 on the quad, expected 1\n", onQuad);
+	return Report(ok && onQuad == 1, name);
 }
 
 int
@@ -466,6 +880,7 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	cam = camera();
 	WorldOpen(cam);
 	PrepassIdentity(name);
+	CheckPrepassSampleZero();
 	WorldClose();
 	if(!restart(1))
 		Report(false, "the engine restarts at one sample after the modern checks");

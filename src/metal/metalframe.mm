@@ -11,6 +11,7 @@
 #include "metalprepass.h"
 #include <algorithm>
 #include <string>
+#include <simd/simd.h>
 #import <AppKit/AppKit.h>
 #import <MetalFX/MetalFX.h>
 
@@ -26,6 +27,8 @@ namespace metal {
 #include "shaders/deringh_metal.inc"
 #include "shaders/fxaa_metal.inc"
 #include "shaders/aah_metal.inc"
+#include "shaders/motion_metal.inc"
+extern const char *prepassh_metal_src;
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -112,6 +115,9 @@ struct FrameState
 	uint32 prepassPasses = 0;
 	PassTarget prepassReturn = { nil, nil };
 	uint32 prepassDrawsLast = 0;
+	id<MTLComputePipelineState> farMotion = nil, prepassResolve = nil;
+	uint32 shows = 0, prepassShow = 0;
+	bool prepassShowKnown = false;
 	char tail[512] = "";
 };
 
@@ -243,10 +249,11 @@ frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u",
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u unkeyed %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		f.upscaler == UPSCALER_SPATIAL ? "spatial" : "none", f.edr ? "on" : "off",
-		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast);
+		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
+		getStateStats().prepassUnkeyed);
 	return frame.tail;
 }
 
@@ -417,6 +424,18 @@ frameInit(void)
 		if(frame.fxaa == nil)
 			fprintf(stderr, "rw::metal: FXAA kernel failed to build: %s\n",
 				aerr ? aerr.localizedDescription.UTF8String : aaLib ? "no fxaaKernel" : err ? err.UTF8String : "");
+			const char *motionParts[] = { frameHead, prepassh_metal_src, motion_metal_src, nil };
+			id<MTLLibrary> motionLib = frameLibrary(motionParts, &err);
+			if(motionLib){
+				NSError *perr = nil;
+				id<MTLDevice> dev = getContext()->device;
+				frame.farMotion = [dev newComputePipelineStateWithFunction:[motionLib newFunctionWithName:@"farMotion"] error:&perr];
+				frame.prepassResolve = [dev newComputePipelineStateWithFunction:[motionLib newFunctionWithName:@"prepassResolve"]
+					error:&perr];
+			}else
+				frame.farMotion = frame.prepassResolve = nil;
+			if(frame.farMotion == nil || frame.prepassResolve == nil)
+				fprintf(stderr, "rw::metal: motion kernels failed to build; modern frames draw without the prepass\n");
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -910,6 +929,7 @@ frameScaleClear(PassClear *c)
 void
 frameShow(void)
 {
+	frame.shows++;
 	if(frame.prepassOpen)
 		endPrepass();
 	if(frame.phase == PHASE_SCENE){
@@ -1193,17 +1213,6 @@ readScenePixel(int32 x, int32 y, float32 rgba[4])
 	return readHalfPixel(getRasterTexture(frame.sceneBase), x, y, rgba);
 }
 
-static id<MTLTexture>
-newMemoryless(MTLPixelFormat format, int32 w, int32 h, uint32 samples)
-{
-	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped:NO];
-	d.textureType = MTLTextureType2DMultisample;
-	d.sampleCount = samples;
-	d.usage = MTLTextureUsageRenderTarget;
-	d.storageMode = MTLStorageModeMemoryless;
-	return [getContext()->device newTextureWithDescriptor:d];
-}
-
 static void
 dropPrepassTargets(void)
 {
@@ -1228,8 +1237,9 @@ ensurePrepassTargets(void)
 		frame.prepassNormal = newTexture(MTLPixelFormatRG16Snorm, w, h, u, 1);
 		frame.prepassMotion = newTexture(MTLPixelFormatRG16Float, w, h, u, 1);
 		if(frame.samples > 1){
-			frame.prepassNormalMS = newMemoryless(MTLPixelFormatRG16Snorm, w, h, frame.samples);
-			frame.prepassMotionMS = newMemoryless(MTLPixelFormatRG16Float, w, h, frame.samples);
+			MTLTextureUsage twin = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+			frame.prepassNormalMS = newTexture(MTLPixelFormatRG16Snorm, w, h, twin, frame.samples);
+			frame.prepassMotionMS = newTexture(MTLPixelFormatRG16Float, w, h, twin, frame.samples);
 		}
 		frame.prepassRaster = Raster::create(w, h, 0, Raster::CAMERA | Raster::DONTALLOCATE);
 	}
@@ -1265,9 +1275,8 @@ framePrepassAttachments(MTLRenderPassDescriptor *desc, uint32 samples)
 	}
 	for(int i = 0; i < 2; i++){
 		desc.colorAttachments[i].texture = ms ? twin[i] : tex[i];
-		desc.colorAttachments[i].resolveTexture = ms ? tex[i] : nil;
 		desc.colorAttachments[i].loadAction = reopen && !ms ? MTLLoadActionLoad : MTLLoadActionClear;
-		desc.colorAttachments[i].storeAction = ms ? MTLStoreActionMultisampleResolve : MTLStoreActionStore;
+		desc.colorAttachments[i].storeAction = MTLStoreActionStore;
 		desc.colorAttachments[i].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 	}
 	frame.prepassPasses++;
@@ -1277,14 +1286,18 @@ bool32
 beginPrepass(void)
 {
 	if(getContext() == nil || frame.phase != PHASE_SCENE || frame.activeTier != TIER_MODERN || frame.prepassOpen ||
-	   frame.prepassDone || frame.sceneDepth == nil || !prepassShadersReady() || !ensurePrepassTargets())
+	   frame.prepassDone || frame.sceneDepth == nil || !prepassShadersReady() || frame.farMotion == nil ||
+	   frame.prepassResolve == nil || !ensurePrepassTargets())
 		return 0;
 	@autoreleasepool {
 		frame.prepassReturn = currentPassTarget();
 		frame.phase = PHASE_PREPASS;
 		frame.prepassOpen = true;
 		frame.prepassPasses = 0;
-		beginPrepassState();
+		bool continuous = frame.prepassShowKnown && frame.shows == frame.prepassShow + 1;
+		frame.prepassShow = frame.shows;
+		frame.prepassShowKnown = true;
+		beginPrepassState(continuous);
 		setPassDepthSplit(frame.prepassRaster);
 		PassTarget t = { frame.prepassRaster, frame.sceneDepth };
 		resumePassTarget(t);
@@ -1304,6 +1317,34 @@ endPrepass(void)
 		frame.prepassDrawsLast = endPrepassState();
 		resumePassTarget(frame.prepassReturn);
 	}
+}
+
+void
+framePrepassPassEnded(void)
+{
+	if(frame.dropping || frame.prepassMotion == nil || frame.sceneDepth == nil)
+		return;
+	bool ms = frame.prepassMotionMS != nil;
+	struct { simd_float4x4 inv, vp, prev; simd_uint2 size; } p;
+	const PrepassMatrices &m = prepassMatrices();
+	simd_float4x4 uploaded;
+	memcpy(&uploaded, &m.uploadedViewProj, 64);
+	p.inv = simd_inverse(uploaded);
+	memcpy(&p.vp, &m.viewProj, 64);
+	memcpy(&p.prev, &m.prevViewProj, 64);
+	p.size = simd_make_uint2((uint32)frame.prepassMotion.width, (uint32)frame.prepassMotion.height);
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:ms ? frame.prepassResolve : frame.farMotion];
+	[enc setTexture:getRasterTexture(frame.sceneDepth) atIndex:0];
+	[enc setTexture:frame.prepassMotion atIndex:1];
+	if(ms){
+		[enc setTexture:frame.prepassNormalMS atIndex:2];
+		[enc setTexture:frame.prepassMotionMS atIndex:3];
+		[enc setTexture:frame.prepassNormal atIndex:4];
+	}
+	[enc setBytes:&p length:sizeof(p) atIndex:0];
+	dispatchOver(enc, frame.prepassMotion);
+	[enc endEncoding];
 }
 
 static bool32

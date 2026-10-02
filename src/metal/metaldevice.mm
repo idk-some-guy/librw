@@ -394,6 +394,8 @@ runPassActions(void)
 		case PASSACTION_END:
 			[ctx->encoder endEncoding];
 			ctx->encoder = nil;
+			if(ctx->encoderColorFormat == COLORFMT_PREPASS)
+				framePrepassPassEnded();
 			break;
 		case PASSACTION_BEGIN:
 			beginPass(ctx, a);

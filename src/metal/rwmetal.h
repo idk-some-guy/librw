@@ -366,6 +366,7 @@ void beginScene(Camera *cam);
 void endScene(const GradeParams *params);
 bool32 beginPrepass(void);
 void endPrepass(void);
+void cameraCut(void);
 bool32 enhancedFrame(void);
 void setEmissiveScale(float32 s);
 float32 getEmissiveScale(void);

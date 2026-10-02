@@ -100,4 +100,89 @@ struct PrepassKeySet
 	}
 };
 
+template<typename T>
+struct PrevMap
+{
+	struct Slot
+	{
+		const void *key;
+		uint32_t gen;
+		uint32_t index;
+	};
+
+	std::vector<Slot> slots;
+	std::vector<T> values;
+	uint32_t gen = 1;
+	uint32_t mask = 0;
+	uint32_t count = 0;
+
+	void reserve(uint32_t n)
+	{
+		uint32_t s = 1;
+		while(s < n*2)
+			s <<= 1;
+		this->slots.assign(s, Slot{ nullptr, 0, 0 });
+		this->values.assign(n, T());
+		this->mask = s - 1;
+		this->count = 0;
+		this->gen = 1;
+	}
+	uint32_t capacity(void) const { return (uint32_t)this->values.size(); }
+	uint32_t size(void) const { return this->count; }
+	const void *slotData(void) const { return this->slots.data(); }
+
+	void clear(void)
+	{
+		this->count = 0;
+		if(++this->gen == 0){
+			for(Slot &s : this->slots)
+				s.gen = 0;
+			this->gen = 1;
+		}
+	}
+
+	Slot *slot(const void *key, bool *found)
+	{
+		uint64_t h = (uint64_t)(uintptr_t)key;
+		h ^= h >> 29;
+		h *= 0xbf58476d1ce4e5b9ull;
+		for(uint32_t i = (uint32_t)(h >> 32) & this->mask;; i = (i + 1) & this->mask){
+			Slot &s = this->slots[i];
+			if(s.gen != this->gen){
+				*found = false;
+				return &s;
+			}
+			if(s.key == key){
+				*found = true;
+				return &s;
+			}
+		}
+	}
+
+	const T *find(const void *key)
+	{
+		if(this->slots.empty())
+			return nullptr;
+		bool found;
+		Slot *s = slot(key, &found);
+		return found ? &this->values[s->index] : nullptr;
+	}
+
+	T *put(const void *key)
+	{
+		if(this->slots.empty())
+			return nullptr;
+		bool found;
+		Slot *s = slot(key, &found);
+		if(found)
+			return &this->values[s->index];
+		if(this->count >= this->values.size())
+			return nullptr;
+		s->key = key;
+		s->gen = this->gen;
+		s->index = this->count++;
+		return &this->values[s->index];
+	}
+};
+
 #endif

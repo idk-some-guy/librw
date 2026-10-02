@@ -261,6 +261,10 @@ With `antiAliasing` FXAA in the enhanced and modern tiers, the grade writes into
 
 In the modern tier the host may bracket a second submission of its opaque draws with beginPrepass and endPrepass after it opens the scene. Inside the bracket, an instanced draw with blending off and depth test and write on is drawn by a generic prepass pipeline into the scene depth, an RG16Snorm octahedral view-space normal and an RG16Float motion target at the internal resolution; every other draw is skipped. Its key (instance, world matrix, first bone) is recorded. After the bracket, a scene draw with the same key, drawn under the view and projection the prepass began with, tests depth equal without writing it; any other draw tests as before. A draw inside the bracket under another view and projection is skipped. A frame keys up to 8192 prepass draws; past that, a draw still enters the prepass but is not keyed, and its forward draw keeps the normal depth test. A prepass key with no forward draw by the end of the scene is counted as an orphan and logged once. Without the bracket a modern frame draws as an enhanced one. The prepass takes the pending depth and stencil clear of the scene; the scene colour clear stays pending for the first forward pass. Routing to the scene targets applies only in the scene phase, so a camera begin-update or a target change inside the bracket sends draws, unkeyed, to the raw main colour: hosts must not switch targets inside the bracket. The cleared normal (0,0) decodes to +z, so consumers classify sky by a depth of 1, not by the normal. Forward vertex shaders must compute the position as scene.proj * scene.view * (object.world * pos) followed by MetalDepth, with [[position, invariant]]; skinned shaders as skinVS does.
 
+The motion target holds the previous UV minus the current UV (y down). Object motion uses the previous frame's world matrix and bone palette of the object named by setWorldMatrix's object argument (an atomic); a nil object is treated as static. Pixels the prepass did not cover get the motion of the far plane, so the sky moves with the camera. cameraCut() makes the next frame start without camera history, and so does a prepass frame that does not directly follow another prepass frame. The previous matrices are kept for up to 8192 objects and 256 bone palettes per frame in tables reserved once; an object past that, seen for the first time, or not drawn in the previous prepass frame has no object motion. The previous view-projection is the unjittered one.
+
+At more than one sample, the multisampled normal and motion targets are stored and a kernel after the prepass writes sample 0 of each into the resolved targets, the sample the depth resolve takes, so the depth, normal and motion of a pixel describe the same surface.
+
 ## Log lines
 
 The backend writes these lines to stderr, each starting with `rw::metal:`. Errors such as a pipeline that fails to build, an oversized custom block or a texture that cannot be created go through librw's error mechanism (`RWERROR`) instead.
@@ -275,6 +279,7 @@ The backend writes these lines to stderr, each starting with `rw::metal:`. Error
 - `FXAA kernel failed to build: <error>`; the frame then runs without anti-aliasing.
 - `prepass shaders failed to build; modern frames draw without the prepass` at start.
 - `prepass targets for <w>x<h> could not be created; modern frames draw without the prepass` once.
+- `motion kernels failed to build; modern frames draw without the prepass` at start.
 - `the prepass was split into more than one pass; normals and motion before the split are lost` once, at more than one sample.
 - `<n> prepass draws had no forward draw this frame; their depth hides what lies behind them` once.
 - `FXAA texture for <w>x<h> could not be created; rendering without anti-aliasing` once.
@@ -284,7 +289,7 @@ The backend writes these lines to stderr, each starting with `rw::metal:`. Error
 ### Statistics line
 
 ```
-rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms host prewarm %.1f ms samples %u tier %s internal %dx%d output %dx%d upscaler %s edr %s headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u
+rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms host prewarm %.1f ms samples %u tier %s internal %dx%d output %dx%d upscaler %s edr %s headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u unkeyed %u
 ```
 
 The backend prints it at every `Engine::stop`, and every `n` seconds while frames are shown after the host calls `metal::setStatsInterval(n)`. The default interval is 0, which prints only the line at stop. Counters start again from zero at every `Engine::start`. The line ends with the frame: tier, internal and output size, upscaler (none or spatial), EDR state (on or off), the current and potential headroom, the emitter peak, the bloom weight and the anti-aliasing in use (off or fxaa).
@@ -311,6 +316,7 @@ The backend prints it at every `Engine::stop`, and every `n` seconds while frame
 | host prewarm | time spent in host prewarms | since start |
 | samples | sample count in use | now |
 | prepass | draws in the last frame's prepass | last frame |
+| unkeyed | prepass draws past the key capacity, drawn without a key | since start |
 
 ## Build
 

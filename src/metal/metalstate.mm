@@ -280,6 +280,13 @@ static uint32 prepassDrawsThisFrame;
 static float32 prepassView[16], prepassProj[16];
 static bool prepassViewSame;
 static bool forceEqualNext;
+enum { PREV_WORLDS = 8192, PREV_PALETTES = 256 };
+static PrevMap<RawMatrix> worldsPrev, worldsCur;
+static PrevMap<UniformSkin> bonesPrev, bonesCur;
+static float32 projBase[16];
+static RawMatrix lastViewProj;
+static bool haveLastViewProj;
+static PrepassMatrices prepassMats;
 
 struct PrepassFrameBlock
 {
@@ -328,10 +335,15 @@ comparePrepassView(void)
 }
 
 void
-beginPrepassState(void)
+beginPrepassState(bool continuous)
 {
-	if(prepassKeys.capacity() == 0)
+	if(prepassKeys.capacity() == 0){
 		prepassKeys.reserve(PREPASS_KEYS);
+		worldsPrev.reserve(PREV_WORLDS);
+		worldsCur.reserve(PREV_WORLDS);
+		bonesPrev.reserve(PREV_PALETTES);
+		bonesCur.reserve(PREV_PALETTES);
+	}
 	prepassKeys.clear();
 	prepassFrame = true;
 	prepassFrameBound = false;
@@ -339,10 +351,30 @@ beginPrepassState(void)
 	memcpy(prepassView, uniformScene.view, sizeof(prepassView));
 	memcpy(prepassProj, uniformScene.proj, sizeof(prepassProj));
 	prepassViewSame = true;
+	bool cut = !haveLastViewProj || !continuous;
+	std::swap(worldsPrev, worldsCur);
+	worldsCur.clear();
+	std::swap(bonesPrev, bonesCur);
+	bonesCur.clear();
+	if(cut){
+		worldsPrev.clear();
+		bonesPrev.clear();
+	}
 	RawMatrix vp;
-	mul44((float32*)&vp, uniformScene.proj, uniformScene.view);
+	mul44((float32*)&vp, projBase, uniformScene.view);
+	mul44((float32*)&prepassMats.uploadedViewProj, uniformScene.proj, uniformScene.view);
+	prepassMats.viewProj = vp;
+	prepassMats.prevViewProj = cut ? vp : lastViewProj;
 	prepassFrameBlock.viewProj = vp;
-	prepassFrameBlock.prevViewProj = vp;
+	prepassFrameBlock.prevViewProj = prepassMats.prevViewProj;
+	lastViewProj = vp;
+	haveLastViewProj = true;
+}
+
+const PrepassMatrices&
+prepassMatrices(void)
+{
+	return prepassMats;
 }
 
 uint32
@@ -365,12 +397,19 @@ finishPrepassFrame(bool countOrphans)
 	}
 	prepassKeys.clear();
 	prepassFrame = false;
+	forceEqualNext = false;
 }
 
 void
 setDrawInstance(const void *inst)
 {
 	currentDrawInst = inst;
+}
+
+void
+cameraCut(void)
+{
+	haveLastViewProj = false;
 }
 
 void
@@ -1493,6 +1532,7 @@ out:
 void
 setProjectionMatrix(float32 *mat)
 {
+	memcpy(projBase, mat, 64);
 	memcpy(&uniformScene.proj, mat, 64);
 	blockDirty[BLOCK_SCENE] = true;
 	comparePrepassView();
@@ -1767,7 +1807,13 @@ encodeDraw(MetalContext *ctx, id<MTLRenderCommandEncoder> e, PipelineEntry *pipe
 static RawMatrix
 previousWorld(const void *object, const RawMatrix &current)
 {
-	return current;
+	if(object == nil)
+		return current;
+	RawMatrix *cur = worldsCur.put(object);
+	if(cur)
+		*cur = current;
+	const RawMatrix *prev = worldsPrev.find(object);
+	return prev ? *prev : current;
 }
 
 static bool
@@ -1776,7 +1822,16 @@ bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
 	RingSpace space;
 	if(!ringAlloc(sizeof(uniformSkin), 256, &space))
 		return false;
-	memcpy(space.cpu, &uniformSkin, sizeof(uniformSkin));
+	const UniformSkin *src = &uniformSkin;
+	if(object){
+		UniformSkin *cur = bonesCur.put(object);
+		if(cur)
+			*cur = uniformSkin;
+		const UniformSkin *prev = bonesPrev.find(object);
+		if(prev)
+			src = prev;
+	}
+	memcpy(space.cpu, src, sizeof(uniformSkin));
 	[e setVertexBuffer:(__bridge id<MTLBuffer>)space.buffer offset:space.offset atIndex:BUFFER_PREVSKIN];
 	return true;
 }
@@ -1821,7 +1876,8 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 	}
 	if(!encodeDraw(ctx, e, pipe, false))
 		return 0;
-	prepassKeys.insert(key);
+	if(!prepassKeys.insert(key))
+		stats.prepassUnkeyed++;
 	prepassDrawsThisFrame++;
 	stats.prepassDraws++;
 	return 1;
@@ -2409,6 +2465,12 @@ termState(void)
 	prepassSkinShader = nil;
 	prepassKeys = PrepassKeySet();
 	prepassFrame = false;
+	forceEqualNext = false;
+	worldsPrev = PrevMap<RawMatrix>();
+	worldsCur = PrevMap<RawMatrix>();
+	bonesPrev = PrevMap<UniformSkin>();
+	bonesCur = PrevMap<UniformSkin>();
+	haveLastViewProj = false;
 	currentObject = nil;
 	currentDrawInst = nil;
 	currentShader = nil;

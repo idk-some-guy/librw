@@ -98,6 +98,7 @@ struct StateStats
 	uint32 prepassEqual;
 	uint32 prepassOrphans;
 	uint32 prepassOrphanLogs;
+	uint32 prepassUnkeyed;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);
@@ -115,7 +116,14 @@ PipelineBlendInfo pipelineBlendInfo(uint64 key);
 void setDrawEmissiveScale(float32 s);
 void setDrawInstance(const void *inst);
 bool prepassShadersReady(void);
-void beginPrepassState(void);
+void beginPrepassState(bool continuous);
+struct PrepassMatrices
+{
+	RawMatrix viewProj;
+	RawMatrix prevViewProj;
+	RawMatrix uploadedViewProj;
+};
+const PrepassMatrices &prepassMatrices(void);
 uint32 endPrepassState(void);
 void finishPrepassFrame(bool countOrphans);
 int32 getVertexLayout(uint32 layout, AttribDesc *attribs, int32 maxAttribs);

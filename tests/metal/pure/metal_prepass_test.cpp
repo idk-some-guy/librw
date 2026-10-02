@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cmath>
+#include <utility>
 #include "metalprepass.h"
 #include "metalprepasskeys.h"
 
@@ -108,6 +109,33 @@ TestKeySet(void)
 	CHECK(s.unused() == 4 && s.slotData() == slots);
 }
 
+static void
+TestPrevMap(void)
+{
+	int a, b, c;
+	PrevMap<float> m;
+	CHECK(m.capacity() == 0 && m.put(&a) == nullptr && m.find(&a) == nullptr);
+	m.reserve(2);
+	CHECK(m.capacity() == 2 && m.find(&a) == nullptr);
+	float *pa = m.put(&a);
+	CHECK(pa != nullptr);
+	*pa = 1.5f;
+	CHECK(m.put(&a) == pa && m.find(&a) && *m.find(&a) == 1.5f);
+	float *pb = m.put(&b);
+	CHECK(pb != nullptr && pb != pa);
+	*pb = 2.5f;
+	CHECK(m.put(&c) == nullptr && m.find(&c) == nullptr && m.size() == 2);
+	CHECK(*m.find(&a) == 1.5f && *m.find(&b) == 2.5f);
+	PrevMap<float> n;
+	n.reserve(2);
+	const void *slots = m.slotData();
+	std::swap(m, n);
+	CHECK(n.find(&a) && *n.find(&a) == 1.5f && m.find(&a) == nullptr && n.slotData() == slots);
+	n.clear();
+	CHECK(n.size() == 0 && n.find(&a) == nullptr && n.find(&b) == nullptr && n.slotData() == slots);
+	CHECK(n.put(&c) != nullptr && n.put(&a) != nullptr && n.put(&b) == nullptr);
+}
+
 int
 main(void)
 {
@@ -116,6 +144,7 @@ main(void)
 	TestEligible();
 	TestKey();
 	TestKeySet();
+	TestPrevMap();
 	if(failures == 0)
 		printf("all prepass tests passed\n");
 	return failures != 0;
