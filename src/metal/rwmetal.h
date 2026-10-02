@@ -389,6 +389,8 @@ struct RelitParams
 void setRelitParams(const RelitParams *p);
 RelitParams getRelitParams(void);
 void setSunLight(const Light *light);
+void setRelitDraw(bool32 on);
+void setRelitTwoSided(bool32 on);
 void beginReactive(void);
 void endReactive(void);
 bool32 enhancedFrame(void);

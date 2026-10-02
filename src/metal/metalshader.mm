@@ -65,6 +65,8 @@ specialise(id<MTLLibrary> lib, const char *name, uint32 variant, const uint32 *s
 	[values setConstantValue:&v type:MTLDataTypeBool atIndex:6];
 	v = (variant >> 5) & 1;
 	[values setConstantValue:&v type:MTLDataTypeBool atIndex:7];
+	v = (variant >> 6) & 1;
+	[values setConstantValue:&v type:MTLDataTypeBool atIndex:8];
 	if(sceneFactors){
 		[values setConstantValue:&sceneFactors[0] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENESRCBLEND];
 		[values setConstantValue:&sceneFactors[1] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENEDESTBLEND];
@@ -115,6 +117,8 @@ Shader::create(const char **src, const char *vs, const char *fs, uint32 variantM
 		sh->fragmentName = copyString(fs);
 		sh->shaderId = sid;
 		sh->variantMask = variantMask & (NUMVARIANTS-1);
+		if(sh->variantMask & VARIANT_RELIT)
+			sh->variantMask |= VARIANT_RELITSHADOW;
 		sh->textureStages = -1;
 		std::string scene;
 		if(sceneBlendSource(all.UTF8String, fs, &scene))

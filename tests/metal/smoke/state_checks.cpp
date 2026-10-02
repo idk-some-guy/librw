@@ -104,9 +104,9 @@ bool
 CheckPrewarmedPipelines(void)
 {
 	metal::StateStats s = metal::getStateStats();
-	bool depthOnlyIm2d = metal::pipelineCached(0x000023e210010401ull);
+	bool depthOnlyIm2d = metal::pipelineCached(0x000047c420020401ull);
 	if(!depthOnlyIm2d)
-		Detail("  depth-only im2d pipeline 000023e210010401 is not cached\n");
+		Detail("  depth-only im2d pipeline 000047c420020401 is not cached\n");
 	bool ok = s.pipelinesAtInit == 51 && s.pipelineFailures == 0 && s.blockSizeMismatches == 0 && depthOnlyIm2d;
 	if(!ok)
 		Detail("  pipelines at init %u, after init %u, failures %u, uniform block size mismatches %u\n",

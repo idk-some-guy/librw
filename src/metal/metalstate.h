@@ -58,7 +58,7 @@ enum DropCause
 bool32 countDroppedDraw(int32 cause, Shader *shader);
 void countFeedbackDraw(void);
 void countSkinnedUnrouted(void);
-void logStats(void);
+void logStats(bool32 atExit = 0);
 void logStatsIfDue(void);
 
 extern Shader *im2dShader;
@@ -103,6 +103,7 @@ struct StateStats
 	uint32 prepassFaceDraws;
 	uint32 relitDraws;
 	uint32 relitFaceDraws;
+	uint32 relitShadowDraws;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);
@@ -118,6 +119,9 @@ struct PipelineBlendInfo
 };
 PipelineBlendInfo pipelineBlendInfo(uint64 key);
 void setDrawEmissiveScale(float32 s);
+void setDrawRelitGeometry(bool32 lit);
+void relitSceneBegin(void);
+void prewarmShadowTwins(void);
 void setDrawInstance(const void *inst);
 void setDrawHeader(InstanceDataHeader *header);
 void noteNormalStream(uint32 bytes);

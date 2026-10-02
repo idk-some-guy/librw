@@ -2541,7 +2541,7 @@ static const RGBA GREY = { 128, 128, 128, 255 };
 static Geometry*
 MeshGeometry(const float (*p)[3], int numVerts, const uint16 (*t)[3], int numTris, bool strips)
 {
-	Geometry *geo = Geometry::create(numVerts, numTris, Geometry::POSITIONS | Geometry::PRELIT |
+	Geometry *geo = Geometry::create(numVerts, numTris, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT |
 		(strips ? Geometry::TRISTRIP : 0));
 	V3d *v = geo->morphTargets[0].vertices;
 	for(int i = 0; i < numVerts; i++){
@@ -2591,7 +2591,7 @@ TwoMaterialBox(float cx, float cy, float cz)
 	static const uint16 t[12][3] = {
 		{ 0, 4, 6 }, { 0, 6, 2 }, { 1, 3, 7 }, { 1, 7, 5 }, { 0, 1, 5 }, { 0, 5, 4 },
 		{ 2, 6, 7 }, { 2, 7, 3 }, { 4, 5, 7 }, { 4, 7, 6 }, { 0, 2, 3 }, { 0, 3, 1 } };
-	Geometry *geo = Geometry::create(8, 12, Geometry::POSITIONS | Geometry::PRELIT);
+	Geometry *geo = Geometry::create(8, 12, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT);
 	V3d *v = geo->morphTargets[0].vertices;
 	for(int i = 0; i < 8; i++){
 		v[i].set(cx + (i & 1 ? 1.0f : -1.0f), cy + (i & 2 ? 1.0f : -1.0f), cz + (i & 4 ? 1.0f : -1.0f));
@@ -3209,6 +3209,7 @@ static void
 LitBegin(Atomic **atoms, int n, int32 cull)
 {
 	metal::beginScene(cam);
+	metal::setRelitTwoSided(cull == CULLNONE);
 	WorldBegin(SKY);
 	SetRenderState(CULLMODE, cull);
 	if(metal::beginPrepass()){
@@ -3369,6 +3370,7 @@ static int32
 RelitSceneFrame(RelitScene *s, int32 cull)
 {
 	metal::beginScene(cam);
+	metal::setRelitTwoSided(cull == CULLNONE);
 	WorldBegin(SKY);
 	int32 tier = metal::getFrameInfo().tier;
 	SetRenderState(CULLMODE, cull);
@@ -3901,7 +3903,7 @@ CheckRelitOwnNormals(void)
 static bool
 CheckRelitTwoSided(void)
 {
-	const char *name = "with culling off a thin prelit surface takes the sun from either side; with culling on only from its front";
+	const char *name = "a thin prelit surface marked two-sided takes the sun from either side; unmarked only from its front";
 	Sun sun;
 	MakeSun(&sun, 0.1f);
 	Material *mat = TestMaterial();
@@ -3940,7 +3942,7 @@ CheckRelitWorldUp(void)
 	Sun sun;
 	MakeSun(&sun, 0.0f);
 	Material *mat = TestMaterial();
-	Geometry *geo = TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT, 0.0f, 10.0f, 0.5f, BLACK, mat);
+	Geometry *geo = TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 0.0f, 10.0f, 0.5f, BLACK, mat);
 	Atomic *a = MakeAtomic(geo);
 	PlaceCamera(90.0f, 0.0f, 0.0f, 0.0f);
 	V3d look = cam->getFrame()->getLTM()->at;
@@ -3978,7 +3980,7 @@ RestartStripGeometry(void)
 	static const float p[10][3] = { { 3.5f, -1, 10 }, { 3.5f, 1, 10 }, { 1.5f, -1, 10 }, { 1.5f, 1, 10 }, { -3.5f, -1, 10 },
 		{ -3.5f, 1, 10 }, { -2, -1, 9 }, { -2, 1, 9 }, { -0.5f, -1, 10 }, { -0.5f, 1, 10 } };
 	static const uint16 strip[11] = { 0, 1, 2, 3, 0xFFFF, 4, 5, 6, 7, 8, 9 };
-	Geometry *geo = Geometry::create(0x10000, 1, Geometry::POSITIONS | Geometry::PRELIT | Geometry::TRISTRIP);
+	Geometry *geo = Geometry::create(0x10000, 1, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TRISTRIP);
 	V3d *v = geo->morphTargets[0].vertices;
 	for(int i = 0; i < 0x10000; i++){
 		v[i].set(i < 10 ? p[i][0] : 0.0f, i < 10 ? p[i][1] : 0.0f, i < 10 ? p[i][2] : 10.0f);
@@ -4092,7 +4094,8 @@ CheckRelitCost(const char *name, int samples)
 	RGBA glass = { 128, 128, 128, 254 }, col[4] = { glass, glass, glass, glass };
 	for(int i = 0; i < LAYERS; i++){
 		float z = 33.0f - i;
-		geos[i] = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, -1.2f*z, -0.9f*z, 1.2f*z, 0.9f*z, z, col, nil, mat);
+		geos[i] = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, -1.2f*z, -0.9f*z, 1.2f*z, 0.9f*z, z, col, nil,
+			mat);
 		as[i] = MakeAtomic(geos[i]);
 	}
 	EnhancedOn();
@@ -4315,6 +4318,41 @@ CreaseTaa(bool split, CreaseRead *msaa, CreaseRead *taa, int *jittered, int32 *a
 }
 
 static bool
+CreaseScaler(CreaseRead *r, int *jittered, int32 *upscaler)
+{
+	enum { FRAMES = 32, LAST = 8 };
+	int w = cam->frameBuffer->width, n = w*cam->frameBuffer->height;
+	float *red = new float[n]();
+	CreaseBox b;
+	MakeCreaseBox(&b, false);
+	cam->showRaster(0);
+	metal::cameraCut();
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	metal::setJitterIndexForTest(0);
+	*jittered = 0;
+	bool read = true;
+	for(int f = 0; f < FRAMES && read; f++){
+		LitBegin(&b.atomic, 1, CULLNONE);
+		LitEnd();
+		if(f < FRAMES - LAST)
+			continue;
+		*jittered += Jittered(metal::getFrameInfo());
+		uint8 *px = CompositeNow();
+		read = px != nil;
+		if(px)
+			CompositeRed(px, n, red, 1.0f/LAST);
+		delete[] px;
+	}
+	*upscaler = metal::getFrameInfo().upscaler;
+	ReadCrease(red, w, b.atomic, r);
+	metal::cameraCut();
+	TiersOff();
+	FreeCreaseBox(&b);
+	delete[] red;
+	return read;
+}
+
+static bool
 CheckRelitCreaseTaa(void)
 {
 	const char *name = "at four samples TAA at native resolves the crease between two lit faces that share their vertices to a blend of both by coverage";
@@ -4329,6 +4367,15 @@ CheckRelitCreaseTaa(void)
 		jittered, taa.between, taa.pixels, taa.front*255.0f, taa.side*255.0f, taa.got*255.0f, taa.want*255.0f);
 	Detail("  the same faces with their own vertices under TAA (%d jittered): %d of %d between, mean %.2f against %.2f\n",
 		splitJittered, splitTaa.between, splitTaa.pixels, splitTaa.got*255.0f, splitTaa.want*255.0f);
+	CreaseRead scaled;
+	int scaledJittered;
+	int32 upscaler;
+	if(CreaseScaler(&scaled, &scaledJittered, &upscaler))
+		Detail("  temporal scaler (%s, %d jittered): %d of %d crease pixels between the faces (by more than 3 of 255), mean %.2f against coverage %.2f\n",
+			upscaler == metal::UPSCALER_TEMPORAL ? "temporal" : "not temporal", scaledJittered, scaled.between, scaled.pixels,
+			scaled.got*255.0f, scaled.want*255.0f);
+	else
+		Detail("  temporal scaler: the composite could not be read\n");
 	bool ok = read && aa == metal::ANTIALIAS_TAA && jittered >= 6 && fabsf(taa.front - taa.side) > 30.0f/255.0f &&
 		taa.pixels >= 20 && taa.between == taa.pixels && fabsf(taa.got - taa.want) < 0.25f*fabsf(taa.front - taa.side);
 	return Report(ok, name);
@@ -4358,6 +4405,506 @@ CheckTaaFaintReactive(void)
 	Detail("  over the last 8 frames (%d and %d jittered) the edge pixels swing by up to %.3f in red without the fringe and %.3f under it\n",
 		jPlain, jFringe, plain, fringe);
 	return Report(ok, name);
+}
+
+struct KeptFrame
+{
+	int32 tier;
+	uint32 relit, face, prepass, equal;
+};
+
+static void
+RelitKeptFrame(RelitScene *s, bool32 relit, KeptFrame *k)
+{
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	metal::setRelitTwoSided(1);
+	WorldBegin(SKY);
+	metal::setRelitDraw(relit);
+	k->tier = metal::getFrameInfo().tier;
+	SetRenderState(CULLMODE, CULLNONE);
+	if(metal::beginPrepass()){
+		DrawRelitScene(s);
+		metal::endPrepass();
+	}
+	SetRenderState(CULLMODE, CULLNONE);
+	DrawRelitScene(s);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats after = metal::getStateStats();
+	k->relit = after.relitDraws - before.relitDraws;
+	k->face = after.relitFaceDraws - before.relitFaceDraws;
+	k->prepass = after.prepassDraws - before.prepassDraws;
+	k->equal = after.prepassEqual - before.prepassEqual;
+}
+
+static bool
+CheckRelitKeptBaked(void)
+{
+	const char *name = "a draw the host keeps baked draws exactly its enhanced frame at weight 0.5 and still takes part in the prepass";
+	RelitScene s;
+	MakeRelitScene(&s);
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	cam->showRaster(0);
+	EnhancedOn();
+	int32 enhancedTier = RelitSceneFrame(&s, CULLNONE);
+	uint8 *enhanced = CompositeNow();
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.5f, 0.5f, 1.0f);
+	KeptFrame kept, lit;
+	RelitKeptFrame(&s, 0, &kept);
+	uint8 *modern = CompositeNow();
+	cam->showRaster(0);
+	RelitKeptFrame(&s, 1, &lit);
+	cam->showRaster(0);
+	RelitReset();
+	TiersOff();
+	FreeRelitScene(&s);
+	bool same = FramesEqual(enhanced, modern, w, h, "kept baked against enhanced");
+	bool ok = same && kept.relit == 0 && kept.face == 0 && lit.relit > 0 && enhancedTier == metal::TIER_ENHANCED &&
+		kept.tier == metal::TIER_MODERN && lit.tier == metal::TIER_MODERN && kept.prepass > 0 && kept.prepass == lit.prepass &&
+		kept.equal == lit.equal;
+	if(!ok)
+		Detail("  kept: relit %u face %u prepass %u equal %u; relit: relit %u face %u prepass %u equal %u; tiers %d %d %d\n",
+			kept.relit, kept.face, kept.prepass, kept.equal, lit.relit, lit.face, lit.prepass, lit.equal, enhancedTier, kept.tier,
+			lit.tier);
+	delete[] enhanced;
+	delete[] modern;
+	return Report(ok, name);
+}
+
+static int32
+TwoQuadFrame(Atomic **as, metal::StateStats *before, metal::StateStats *after)
+{
+	*before = metal::getStateStats();
+	LitBegin(as, 2, CULLBACK);
+	int32 tier = metal::getFrameInfo().tier;
+	LitEnd();
+	*after = metal::getStateStats();
+	return tier;
+}
+
+static bool
+CheckRelitUnflagged(void)
+{
+	const char *name = "the default render path keeps prelit geometry without the light flag baked below weight 1";
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	Material *mat = TestMaterial();
+	float tilt = FacingTilt(&sun);
+	Geometry *geos[2] = { TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT, -2.5f, 12.0f, tilt, STONE, mat),
+		TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 2.5f, 12.0f, tilt, STONE, mat) };
+	Atomic *as[2] = { MakeAtomic(geos[0]), MakeAtomic(geos[1]) };
+	int w = cam->frameBuffer->width, y = PY(0.0f, 12.0f), xs[2] = { PX(-2.5f, 12.0f), PX(2.5f, 12.0f) };
+	metal::StateStats b0, b1, m0, m1;
+	cam->showRaster(0);
+	EnhancedOn();
+	int32 enhancedTier = TwoQuadFrame(as, &b0, &b1);
+	uint8 *enhanced = CompositeNow();
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.5f, 1.0f);
+	int32 modernTier = TwoQuadFrame(as, &m0, &m1);
+	uint8 *modern = CompositeNow();
+	cam->showRaster(0);
+	RelitReset();
+	TiersOff();
+	for(int i = 0; i < 2; i++){
+		DestroyAtomic(as[i]);
+		geos[i]->destroy();
+	}
+	mat->destroy();
+	FreeSun(&sun);
+	bool ok = false;
+	if(enhanced && modern){
+		const uint8 *e0 = enhanced + (y*w + xs[0])*4, *n0 = modern + (y*w + xs[0])*4;
+		const uint8 *e1 = enhanced + (y*w + xs[1])*4, *n1 = modern + (y*w + xs[1])*4;
+		uint32 relit = m1.relitDraws - m0.relitDraws;
+		ok = e0[0] == n0[0] && e0[1] == n0[1] && e0[2] == n0[2] && n1[2] > e1[2] + 13 && relit == 1 &&
+			enhancedTier == metal::TIER_ENHANCED && modernTier == metal::TIER_MODERN;
+		if(!ok)
+			Detail("  unflagged %u,%u,%u against enhanced %u,%u,%u; flagged red %u against %u; relit draws %u; tiers %d %d\n",
+				n0[2], n0[1], n0[0], e0[2], e0[1], e0[0], n1[2], e1[2], relit, enhancedTier, modernTier);
+	}
+	delete[] enhanced;
+	delete[] modern;
+	return Report(ok, name);
+}
+
+static void
+HostLoopDraw(Atomic *a)
+{
+	a->getPipeline()->instance(a);
+	metal::InstanceDataHeader *h = (metal::InstanceDataHeader*)a->geometry->instData;
+	Geometry *geo = a->geometry;
+	metal::setWorldMatrix(a->getFrame()->getLTM(), a);
+	metal::setupVertexInput(h);
+	Material *m = h->inst->material;
+	metal::setMaterial(geo->flags, m->color, m->surfaceProps);
+	metal::setTexture(0, nil);
+	SetRenderState(VERTEXALPHA, 0);
+	metal::defaultShader->use(metal::drawVariant(0));
+	metal::drawInst(h, h->inst);
+	metal::teardownVertexInput(h);
+}
+
+static bool
+CheckRelitOptOutScoped(void)
+{
+	const char *name = "the relit opt-out does not carry to the next object or the next frame";
+	Sun sun;
+	MakeSun(&sun, 0.1f);
+	Material *mat = TestMaterial();
+	float away = AwayTilt(&sun);
+	Geometry *plain = TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT, -3.0f, 12.0f, away, STONE, mat);
+	Geometry *flagged = TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 0.0f, 12.0f, away, STONE, mat);
+	Atomic *pa = MakeAtomic(plain), *fa = MakeAtomic(flagged);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.0f, 1.0f);
+	metal::StateStats s0 = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	int32 tier1 = metal::getFrameInfo().tier;
+	SetRenderState(CULLMODE, CULLNONE);
+	pa->render();
+	HostLoopDraw(fa);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats s1 = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	metal::setRelitDraw(0);
+	metal::setRelitTwoSided(1);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats s2 = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	int32 tier2 = metal::getFrameInfo().tier;
+	SetRenderState(CULLMODE, CULLNONE);
+	fa->render();
+	float red = ScenePixel(PX(0.0f, 12.0f), PY(0.0f, 12.0f), 0);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats s3 = metal::getStateStats();
+	float want = Expect(0, 140/255.0f, 0.1f, 0.0f, TiltNormal(away), &sun, false, 1.0f);
+	float both = Expect(0, 140/255.0f, 0.1f, 0.0f, TiltNormal(away), &sun, true, 1.0f);
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(pa);
+	DestroyAtomic(fa);
+	plain->destroy();
+	flagged->destroy();
+	mat->destroy();
+	FreeSun(&sun);
+	uint32 objectRelit = s1.relitDraws - s0.relitDraws, frameRelit = s3.relitDraws - s2.relitDraws;
+	bool object = objectRelit == 1 && tier1 == metal::TIER_MODERN;
+	bool frame = frameRelit == 1 && tier2 == metal::TIER_MODERN && fabsf(red - want) < 2.0f/255.0f && fabsf(both - want) > 0.05f;
+	if(!object)
+		Detail("  next object: relit draws %u (want 1), tier %d\n", objectRelit, tier1);
+	if(!frame)
+		Detail("  next frame: relit draws %u (want 1), red %.4f (want %.4f, two-sided %.4f), tier %d\n", frameRelit, red, want,
+			both, tier2);
+	return Report(object && frame, name);
+}
+
+static float
+HostSidedFrame(Atomic *a, int32 cull, bool32 twoSided, bool *sky)
+{
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	metal::setRelitTwoSided(twoSided);
+	SetRenderState(CULLMODE, cull);
+	if(metal::beginPrepass()){
+		a->render();
+		metal::endPrepass();
+	}
+	SetRenderState(CULLMODE, cull);
+	a->render();
+	float red = ScenePixel(PX(0.0f, 12.0f), PY(0.0f, 12.0f), 0);
+	*sky = *sky || IsSky(PX(0.0f, 12.0f), PY(0.0f, 12.0f));
+	metal::endScene(nil);
+	WorldEnd();
+	return red;
+}
+
+static bool
+CheckRelitTwoSidedHost(void)
+{
+	const char *name = "the sun lights a thin prelit surface from behind only when the host marks the draw two-sided, whatever the cull state";
+	Sun sun;
+	MakeSun(&sun, 0.1f);
+	Material *mat = TestMaterial();
+	float tilt = AwayTilt(&sun);
+	Geometry *geo = TiltedQuad(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 0.0f, 12.0f, tilt, STONE, mat);
+	Atomic *a = MakeAtomic(geo);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.0f, 1.0f);
+	bool sky = false;
+	float off = HostSidedFrame(a, CULLNONE, 0, &sky);
+	float on = HostSidedFrame(a, CULLBACK, 1, &sky);
+	float wantOff = Expect(0, 140/255.0f, 0.1f, 0.0f, TiltNormal(tilt), &sun, false, 1.0f);
+	float wantOn = Expect(0, 140/255.0f, 0.1f, 0.0f, TiltNormal(tilt), &sun, true, 1.0f);
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	mat->destroy();
+	FreeSun(&sun);
+	bool ok = !sky && fabsf(off - wantOff) < 2.0f/255.0f && fabsf(on - wantOn) < 2.0f/255.0f && on - off > 0.05f;
+	if(!ok)
+		Detail("  culling off unmarked %.4f (want %.4f), culling on marked %.4f (want %.4f); sky %d\n", off, wantOff, on, wantOn, sky);
+	return Report(ok, name);
+}
+
+static bool
+CheckRelitShadowConstant(void)
+{
+	const char *name = "no relit draw reads the shadow factor until a shadow source exists";
+	RelitScene s;
+	MakeRelitScene(&s);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.5f, 0.5f, 1.0f);
+	metal::setShadowFactorForTest(-1.0f);
+	metal::StateStats a0 = metal::getStateStats();
+	int32 tier1 = RelitSceneFrame(&s, CULLNONE);
+	cam->showRaster(0);
+	metal::StateStats a1 = metal::getStateStats();
+	metal::setShadowFactorForTest(0.5f);
+	int32 tier2 = RelitSceneFrame(&s, CULLNONE);
+	cam->showRaster(0);
+	metal::StateStats a2 = metal::getStateStats();
+	RelitReset();
+	TiersOff();
+	FreeRelitScene(&s);
+	uint32 relit1 = a1.relitDraws - a0.relitDraws, shadow1 = a1.relitShadowDraws - a0.relitShadowDraws;
+	uint32 relit2 = a2.relitDraws - a1.relitDraws, shadow2 = a2.relitShadowDraws - a1.relitShadowDraws;
+	uint32 late = a2.pipelinesLate - a1.pipelinesLate;
+	bool ok = relit1 > 0 && shadow1 == 0 && relit2 > 0 && shadow2 == relit2 && late == 0 && tier1 == metal::TIER_MODERN &&
+		tier2 == metal::TIER_MODERN;
+	if(!ok)
+		Detail("  without a source: relit %u shadow %u; with one: relit %u shadow %u; late %u; tiers %d %d\n", relit1, shadow1,
+			relit2, shadow2, late, tier1, tier2);
+	return Report(ok, name);
+}
+
+static uint8*
+SkipFrame(Atomic **as, int n, bool32 skip, uint32 *face)
+{
+	metal::setFaceSkipForTest(skip);
+	metal::StateStats before = metal::getStateStats();
+	LitBegin(as, n, CULLNONE);
+	LitEnd();
+	metal::StateStats after = metal::getStateStats();
+	*face = after.relitFaceDraws - before.relitFaceDraws;
+	uint8 *px = CompositeNow();
+	cam->showRaster(0);
+	return px;
+}
+
+static bool
+CheckRelitFaceSkip(void)
+{
+	const char *name = "where the derived normal is fully valid the forward light skips the face fetch and draws exactly the values the fetch gives";
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	Geometry *geos[2] = { CylinderGeometry(1.0f, 10.0f, false), CylinderGeometry(1.0f, 10.0f, true) };
+	Atomic *as[2] = { MakeAtomic(geos[0]), MakeAtomic(geos[1]) };
+	MoveAtomic(as[0], -1.5f, 0.0f, 0.0f);
+	MoveAtomic(as[1], 1.5f, 0.0f, 0.0f);
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.5f, 1.0f);
+	uint32 warmFace, faceA, faceB;
+	delete[] SkipFrame(as, 2, 1, &warmFace);
+	uint32 pending = metal::getInstanceStats().normalPending;
+	uint8 *a = SkipFrame(as, 2, 1, &faceA);
+	uint8 *b = SkipFrame(as, 2, 0, &faceB);
+	metal::setFaceSkipForTest(1);
+	RelitReset();
+	TiersOff();
+	for(int i = 0; i < 2; i++){
+		DestroyAtomic(as[i]);
+		geos[i]->destroy();
+	}
+	FreeSun(&sun);
+	bool same = FramesEqual(a, b, w, h, "skipping against fetching");
+	bool ok = same && pending == 0 && faceA == faceB && faceA > 0;
+	if(!ok)
+		Detail("  pending streams %u; face draws %u and %u\n", pending, faceA, faceB);
+	delete[] a;
+	delete[] b;
+	return Report(ok, name);
+}
+
+static bool
+CheckRelitFetchTransform(void)
+{
+	const char *name = "a prelit box under a turned, mirrored and unevenly scaled world matrix is lit by its own face normal through the face fetch";
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	Geometry *geo = BoxGeometry(0.0f, 0.0f, 0.0f);
+	Atomic *a = MakeAtomic(geo);
+	V3d scale = { 1.5f, -0.75f, 1.25f }, yAxis = { 0.0f, 1.0f, 0.0f }, pos = { 0.0f, 0.0f, 10.0f };
+	a->getFrame()->scale(&scale, COMBINEREPLACE);
+	a->getFrame()->rotate(&yAxis, 25.0f, COMBINEPOSTCONCAT);
+	a->getFrame()->translate(&pos, COMBINEPOSTCONCAT);
+	a->getFrame()->updateObjects();
+	V3d local[3] = { { 0.0f, 0.0f, -1.0f }, { 1.0f, 0.0f, -1.0f }, { 0.0f, 1.0f, -1.0f } }, p[3];
+	V3d::transformPoints(p, local, 3, a->getFrame()->getLTM());
+	V3d e1 = sub(p[1], p[0]), e2 = sub(p[2], p[0]);
+	V3d n = normalize(cross(e1, e2));
+	int x = PX(p[0].x, p[0].z), y = PY(p[0].y, p[0].z);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.0f, 1.0f);
+	float want = Expect(0, 128/255.0f, 0.0f, 0.0f, n, &sun, true, 1.0f);
+	V3d turned = { -n.x, n.y, n.z };
+	float other = Expect(0, 128/255.0f, 0.0f, 0.0f, turned, &sun, true, 1.0f);
+	metal::StateStats before = metal::getStateStats();
+	LitBegin(&a, 1, CULLNONE);
+	float red = ScenePixel(x, y, 0);
+	bool sky = IsSky(x, y);
+	LitEnd();
+	metal::StateStats after = metal::getStateStats();
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	FreeSun(&sun);
+	uint32 face = after.relitFaceDraws - before.relitFaceDraws;
+	bool ok = !sky && face == 1 && fabsf(red - want) < 2.0f/255.0f && fabsf(other - want) > 0.05f;
+	if(!ok)
+		Detail("  red %.4f at %d,%d (want %.4f, the mirrored turn would give %.4f); face draws %u; sky %d\n", red, x, y, want, other,
+			face, sky);
+	return Report(ok, name);
+}
+
+static bool
+CheckRelitNoFetchFallback(void)
+{
+	const char *name = "without the face fetch the forward pass lights only where the derived normal is valid and the prepass still writes a geometric normal";
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	Geometry *geo = BoxGeometry(2.5f, 0.0f, 10.0f);
+	Atomic *a = MakeAtomic(geo);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.5f, 1.0f);
+	metal::setFaceFetchForTest(0);
+	V3d front = { 0.0f, 0.0f, -1.0f };
+	float want = Expect(0, 128/255.0f, 0.0f, 1.0f, front, &sun, true, 1.0f);
+	float lit = Expect(0, 128/255.0f, 0.0f, 0.0f, front, &sun, true, 1.0f);
+	int x = PX(2.5f, 9.0f), y = PY(0.0f, 9.0f);
+	LitBegin(&a, 1, CULLNONE);
+	int32 tier = metal::getFrameInfo().tier;
+	float red = ScenePixel(x, y, 0);
+	metal::endScene(nil);
+	float n[3] = { -9.0f, -9.0f, -9.0f }, m[2] = {}, d = -1.0f;
+	bool read = metal::readPrepassForTest(x, y, n, m, &d);
+	WorldEnd();
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	FreeSun(&sun);
+	bool normal = read && fabsf(n[0]) < 0.02f && fabsf(n[1]) < 0.02f && fabsf(n[2] + 1.0f) < 0.02f;
+	bool ok = normal && fabsf(red - want) < 1.0f/255.0f && fabsf(lit - want) > 0.05f && tier == metal::TIER_MODERN;
+	if(!ok)
+		Detail("  front red %.4f (want %.4f, lit would be %.4f); prepass normal %.3f,%.3f,%.3f read %d; tier %d\n", red, want, lit,
+			n[0], n[1], n[2], read, tier);
+	return Report(ok, name);
+}
+
+static float
+SunStartFrame(Atomic *a, Sun *sun, bool blacken)
+{
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(blacken)
+		sun->sun->setColor(0.0f, 0.0f, 0.0f);
+	SetRenderState(CULLMODE, CULLBACK);
+	if(metal::beginPrepass()){
+		a->render();
+		metal::endPrepass();
+	}
+	SetRenderState(CULLMODE, CULLBACK);
+	a->render();
+	float red = ScenePixel(PX(0.0f, 12.0f), PY(0.0f, 12.0f), 0);
+	metal::endScene(nil);
+	WorldEnd();
+	return red;
+}
+
+static bool
+CheckRelitSunAtStart(void)
+{
+	const char *name = "a relit prelit draw takes the sun as it was when the scene began";
+	Sun sun;
+	MakeSun(&sun, 0.1f);
+	Material *mat = TestMaterial();
+	Geometry *geo;
+	Atomic *a = FacingQuad(&geo, &sun, STONE, mat);
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.0f, 0.5f);
+	float want = Expect(0, 140/255.0f, 0.1f, 0.0f, TiltNormal(FacingTilt(&sun)), &sun, false, 1.0f);
+	float started = SunStartFrame(a, &sun, true);
+	float black = SunStartFrame(a, &sun, false);
+	sun.sun->setColor(0.8f, 0.6f, 0.5f);
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	mat->destroy();
+	FreeSun(&sun);
+	bool ok = fabsf(started - want) < 2.0f/255.0f && started > black + 0.05f;
+	if(!ok)
+		Detail("  red %.4f (want %.4f), with a black sun from the start %.4f\n", started, want, black);
+	return Report(ok, name);
+}
+
+static bool
+StatsLineEnds(const char *line, const char *end)
+{
+	size_t n = strlen(line), e = strlen(end);
+	while(n > 0 && line[n-1] == '\n')
+		n--;
+	return n >= e && strncmp(line + n - e, end, e) == 0;
+}
+
+static bool
+CheckRelitStatsSun(void)
+{
+	const char *name = "the stats line names the relit weight and whether a sun lights the frame";
+	metal::setSunLight(nil);
+	metal::logStats();
+	bool none = StatsLineEnds(metal::getStatsLine(), " sun off");
+	if(!none)
+		Detail("  no sun: \"%s\"\n", metal::getStatsLine());
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	RelitSet(0.5f, 0.5f, 1.0f);
+	metal::logStats();
+	const char *tail = strstr(metal::getStatsLine(), " relit weight ");
+	float weight = -1.0f;
+	bool lit = tail && sscanf(tail, " relit weight %f", &weight) == 1 && fabsf(weight - 0.5f) < 1e-6f &&
+		strstr(tail, " relit weight 0.50 ") && StatsLineEnds(metal::getStatsLine(), " sun on");
+	if(!lit)
+		Detail("  sun at 0.5: \"%s\"\n", metal::getStatsLine());
+	RelitSet(0.5f, 0.5f, 0.0f);
+	metal::logStats();
+	bool scaled = StatsLineEnds(metal::getStatsLine(), " sun off");
+	if(!scaled)
+		Detail("  sun scale 0: \"%s\"\n", metal::getStatsLine());
+	RelitReset();
+	FreeSun(&sun);
+	return Report(none && lit && scaled, name);
 }
 
 int
@@ -4441,6 +4988,8 @@ RunModernChecks(Camera *camera)
 	RelitIdentity("a NaN prelit weight is clamped on the CPU and draws exactly the enhanced frame", NAN, true);
 	RelitIdentity("at weight 1 a modern frame draws prelit geometry with the plain variant and only geometry with its own normals relit",
 		1.0f, false);
+	RelitIdentity("a prelit weight of 0.9999999 counts as 1: prelit geometry takes the plain variant and the frame equals the enhanced one",
+		0.9999999f, false);
 	CheckRelitContinuity();
 	CheckRelitLightsUntagged();
 	CheckRelitTiersUntouched();
@@ -4456,6 +5005,16 @@ RunModernChecks(Camera *camera)
 	CheckRelitWorldUp();
 	CheckRelitRestart();
 	CheckRelitStatsLine();
+	CheckRelitKeptBaked();
+	CheckRelitUnflagged();
+	CheckRelitOptOutScoped();
+	CheckRelitTwoSidedHost();
+	CheckRelitShadowConstant();
+	CheckRelitFaceSkip();
+	CheckRelitFetchTransform();
+	CheckRelitNoFetchFallback();
+	CheckRelitSunAtStart();
+	CheckRelitStatsSun();
 	CheckRelitCost("the GPU time of a modern frame of relit layers is measured with the face fetch on and off", 1);
 	WorldClose();
 	return failures;
@@ -4525,6 +5084,36 @@ CheckPrepassSampleZero(void)
 	return Report(ok && onQuad == 1, name);
 }
 
+static int32
+ExitStatsFrame(metal::FrameInfo *f)
+{
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	*f = metal::getFrameInfo();
+	if(metal::beginPrepass())
+		metal::endPrepass();
+	metal::endScene(nil);
+	WorldEnd();
+	TiersOff();
+	return f->tier;
+}
+
+static bool
+CheckStatsAtExit(int32 tier, const metal::FrameInfo &f)
+{
+	const char *name = "the stats line logged at shutdown carries the last scene frame's values";
+	const char *line = metal::getStatsLine();
+	char size[64];
+	snprintf(size, sizeof(size), " internal %dx%d ", f.internalWidth, f.internalHeight);
+	bool ok = tier == metal::TIER_MODERN && f.internalWidth > 0 && strstr(line, " at exit") && strstr(line, " tier modern ") &&
+		strstr(line, size);
+	if(!ok)
+		Detail("  tier %d, internal %dx%d; got \"%s\"\n", tier, f.internalWidth, f.internalHeight, line);
+	return Report(ok, name);
+}
+
 int
 RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 {
@@ -4551,9 +5140,12 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	CheckRelitSplitEdge();
 	CheckRelitCreaseTaa();
 	CheckRelitCost("the GPU time of a modern frame of relit layers is measured with the face fetch on and off at four samples", 4);
+	metal::FrameInfo exitFrame;
+	int32 exitTier = ExitStatsFrame(&exitFrame);
 	WorldClose();
 	if(!restart(1))
 		Report(false, "the engine restarts at one sample after the modern checks");
 	cam = camera();
+	CheckStatsAtExit(exitTier, exitFrame);
 	return failures;
 }

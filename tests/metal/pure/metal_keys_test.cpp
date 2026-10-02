@@ -474,7 +474,7 @@ TestLateDepthOnlyIm2dKey(void)
 	d.colorFormat = COLORFMT_RGBA8;
 	d.depthFormat = DEPTHFMT_D32S8;
 	d.sampleCount = 1;
-	CHECK(pipelineKey(d) == 0x000023e210010401ull);
+	CHECK(pipelineKey(d) == 0x000047c420020401ull);
 }
 
 static void

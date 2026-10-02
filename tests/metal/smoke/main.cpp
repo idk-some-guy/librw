@@ -412,7 +412,7 @@ CheckStatsLineAtStop(void)
 	unsigned frames, ringPeak, grows, late, host, skinned, strips, staged, direct, mips, waits, mismatches, dropped;
 	double drawsPerFrame, passesPerFrame = -1.0, copiesPerFrame = -1.0;
 	StatsTail t;
-	int n = sscanf(line, "rw::metal: stats frames %u draws/frame %lf ring peak %u ring grows %u late pipelines %u "
+	int n = sscanf(line, "rw::metal: stats at exit, last scene frame, frames %u draws/frame %lf ring peak %u ring grows %u late pipelines %u "
 	               "host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 	               "mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %lf copies/frame %lf",
 	               &frames, &drawsPerFrame, &ringPeak, &grows, &late, &host, &skinned, &strips, &staged, &direct, &mips,

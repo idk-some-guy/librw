@@ -79,6 +79,7 @@ InstanceStats getInstanceStats(void);
 void setNormalBudgetForTest(float32 ms);
 void setShadowFactorForTest(float32 v);
 void setFaceFetchForTest(bool32 on);
+void setFaceSkipForTest(bool32 on);
 void setRelitAtFullWeightForTest(bool32 on);
 uint32 lightsBlockForTest(void *dst, uint32 size);
 double lastFrameGpuMsForTest(void);

@@ -166,7 +166,8 @@ struct FaceFetchBlock
 	uint32 strip;
 	uint32 numVertices;
 	uint32 twoSided;
-	uint32 pad[2];
+	uint32 skipFull;
+	uint32 pad[1];
 };
 static_assert(sizeof(FaceFetchBlock) == 80, "face fetch block size");
 
@@ -177,6 +178,10 @@ static const Light *relitSun;
 static std::unordered_set<uint32> relitFailed;
 static bool relitFetch = true;
 static bool relitAtFullWeight;
+static bool relitFaceSkip = true;
+static bool relitHostDraw = true;
+static bool relitHostTwoSided;
+static bool relitGeometryDraw = true;
 
 struct BlockInfo
 {
@@ -1692,6 +1697,7 @@ setWorldMatrix(Matrix *mat, const void *object)
 {
 	RawMatrix world;
 
+	relitGeometryDraw = true;
 	currentObject = object;
 	convMatrix(&world, mat);
 	if(memcmp(&uniformObject.world, &world, sizeof(world)) != 0){
@@ -1809,7 +1815,7 @@ setRelitParams(const RelitParams *p)
 		u.skyTop[i] = relitNonNegative(p->skyTop[i]);
 		u.skyBottom[i] = relitNonNegative(p->skyBottom[i]);
 	}
-	u.params[0] = relitClampWeight(p->weight);
+	u.params[0] = relitSnapWeight(p->weight);
 	u.params[1] = relitNonNegative(p->hemiScale);
 	u.params[2] = relitNonNegative(p->hemiSaturation);
 	u.params[3] = relitNonNegative(p->sunScale);
@@ -1825,10 +1831,37 @@ getRelitParams(void)
 	return relitParams;
 }
 
+static void refreshRelitSun(void);
+
 void
 setSunLight(const Light *light)
 {
 	relitSun = light;
+	refreshRelitSun();
+}
+
+void
+setRelitDraw(bool32 on)
+{
+	relitHostDraw = on != 0;
+}
+
+void
+setRelitTwoSided(bool32 on)
+{
+	relitHostTwoSided = on != 0;
+}
+
+void
+setDrawRelitGeometry(bool32 lit)
+{
+	relitGeometryDraw = lit != 0;
+}
+
+void
+setFaceSkipForTest(bool32 on)
+{
+	relitFaceSkip = on != 0;
 }
 
 void
@@ -1870,6 +1903,15 @@ refreshRelitSun(void)
 		memcpy(uniformRelit.sunColor, col, sizeof(col));
 		blockDirty[BLOCK_RELIT] = true;
 	}
+}
+
+void
+relitSceneBegin(void)
+{
+	relitHostDraw = true;
+	relitHostTwoSided = false;
+	relitGeometryDraw = true;
+	refreshRelitSun();
 }
 
 static void
@@ -2208,9 +2250,12 @@ bindFaceFetch(id<MTLRenderCommandEncoder> e, const float32 *m, bool fetch, bool 
 	b.strip = h->primType == MTLPrimitiveTypeTriangleStrip;
 	b.numVertices = fetch && float3Pos && !h->stripRestart ? h->totalNumVertex : 0;
 	b.twoSided = twoSided;
+	b.skipFull = relitFaceSkip;
+	float32 c0[3] = { m[0], m[1], m[2] }, c1[3] = { m[4], m[5], m[6] }, c2[3] = { m[8], m[9], m[10] }, k[9];
+	relitCofactor(c0, c1, c2, k);
 	for(int c = 0; c < 3; c++)
 		for(int r = 0; r < 3; r++)
-			b.cols[c][r] = m[c*4 + r];
+			b.cols[c][r] = k[c*3 + r];
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlIndexBuffer offset:0 atIndex:BUFFER_FACEINDICES];
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlVertexBuffer offset:0 atIndex:BUFFER_FACEVERTICES];
 	[e setFragmentBytes:&b length:sizeof(b) atIndex:BUFFER_FACELAYOUT];
@@ -2336,7 +2381,8 @@ flushCache(void)
 	uint32 variant = currentVariant, layout = currentLayout;
 	id<MTLBuffer> stream = nil;
 	bool relitFrag = false;
-	if(ctx->encoderColorFormat == COLORFMT_SCENE && frameRelitActive() && relitFailed.count(currentShader->shaderId) == 0){
+	if(ctx->encoderColorFormat == COLORFMT_SCENE && frameRelitActive() && relitHostDraw && relitGeometryDraw &&
+	   relitFailed.count(currentShader->shaderId) == 0){
 		uint32 rv = relitVariant(currentShader, currentLayout, currentVariant);
 		if((rv & VARIANT_RELITPRELIT) == 0)
 			variant = rv;
@@ -2349,6 +2395,8 @@ flushCache(void)
 			else
 				queueNormalStream(currentDrawHeader);
 		}
+		if((variant & VARIANT_RELIT) && frameShadowSource())
+			variant |= VARIANT_RELITSHADOW;
 	}
 	pd.shader = currentShader->shaderId;
 	pd.variant = variant;
@@ -2396,10 +2444,8 @@ flushCache(void)
 		depthEqual = true;
 	}
 	bool faced = false;
-	if(relitFrag){
-		refreshRelitSun();
-		faced = bindFaceFetch(e, (const float32*)&uniformObject.world, relitFetch, rwStateCache.cullmode == CULLNONE);
-	}
+	if(relitFrag)
+		faced = bindFaceFetch(e, (const float32*)&uniformObject.world, relitFetch, relitHostTwoSided);
 	if(stream)
 		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
 	if(!encodeDraw(ctx, e, pipe, depthEqual))
@@ -2408,6 +2454,8 @@ flushCache(void)
 		stats.relitDraws++;
 		if(faced)
 			stats.relitFaceDraws++;
+		if(variant & VARIANT_RELITSHADOW)
+			stats.relitShadowDraws++;
 	}
 	return 1;
 }
@@ -2686,10 +2734,13 @@ prewarmRelit(Shader *shader, uint32 layout, uint32 variant, int32 blend, uint32 
 	uint32 v = relitVariant(shader, layout, variant & shader->variantMask);
 	if((v & VARIANT_RELIT) == 0)
 		return;
-	prewarm(shader, layout, v, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
 	uint32 derived = (v & VARIANT_RELITPRELIT) ? derivedNormalLayout(layout) : 0;
-	if(derived)
-		prewarm(shader, derived, v, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+	for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
+		uint32 sv = shadow ? v | VARIANT_RELITSHADOW : v;
+		prewarm(shader, layout, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+		if(derived)
+			prewarm(shader, derived, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+	}
 }
 
 static void
@@ -2746,18 +2797,40 @@ hostPrewarmRelit(const HostPrewarmRecord &r)
 	d.writeMask = MTLColorWriteMaskAll;
 	d.colorFormat = COLORFMT_SCENE;
 	d.depthFormat = r.depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
-	for(i = 0; i < n; i++){
-		d.sampleCount = counts[i];
-		d.vertexLayout = r.layout;
-		if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
-			ok = 0;
-		if(derived){
-			d.vertexLayout = derived;
+	for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
+		d.variant = shadow ? v | VARIANT_RELITSHADOW : v;
+		for(i = 0; i < n; i++){
+			d.sampleCount = counts[i];
+			d.vertexLayout = r.layout;
 			if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
 				ok = 0;
+			if(derived){
+				d.vertexLayout = derived;
+				if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
+					ok = 0;
+			}
 		}
 	}
 	return ok;
+}
+
+void
+prewarmShadowTwins(void)
+{
+	uint32 counts[2];
+	int32 i, n = prewarmSampleCounts(metalGlobals.numSamples, counts);
+
+	if(getContext() == nil || defaultShader == nil || (warmedFormats & (1u << COLORFMT_PREPASS)) == 0)
+		return;
+	prewarming = true;
+	@autoreleasepool {
+		for(i = 0; i < n; i++)
+			prewarmRelitEngine(counts[i]);
+		for(const HostPrewarmRecord &r : hostRecords)
+			if(r.formats & (1u << COLORFMT_PREPASS))
+				hostPrewarmRelit(r);
+	}
+	prewarming = false;
 }
 
 static bool32
@@ -3051,6 +3124,9 @@ termState(void)
 	samplerCache.clear();
 	warmedFormats = 0;
 	drawEmissive = 1.0f;
+	relitHostDraw = true;
+	relitHostTwoSided = false;
+	relitGeometryDraw = true;
 	hostRecords.clear();
 	currentLayout = 0;
 	im2dVertexLayout = 0;
@@ -3205,7 +3281,7 @@ resetStatsLog(void)
 }
 
 void
-logStats(void)
+logStats(bool32 atExit)
 {
 	FrameStats f = getFrameStats();
 	uint32 frames = f.framesShown;
@@ -3214,12 +3290,13 @@ logStats(void)
 	RasterStats r = getRasterStats();
 	InstanceStats in = getInstanceStats();
 
-	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats frames %u draws/frame %.1f ring peak %u ring grows %u "
+	snprintf(statsLine, sizeof(statsLine), "rw::metal: stats %sframes %u draws/frame %.1f ring peak %u ring grows %u "
 		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f "
 		"custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms "
-		"host prewarm %.1f ms samples %u%s normals built %u pending %u live %u bytes %u relit weight %.2f relit draws/frame %.1f\n",
-		frames - statsLog.framesAtStart,
+		"host prewarm %.1f ms samples %u%s normals built %u pending %u live %u bytes %u relit weight %.2f relit draws/frame %.1f "
+		"sun %s\n",
+		atExit ? "at exit, last scene frame, " : "", frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
 		in.stripRestartMeshes - statsLog.instance.stripRestartMeshes,
@@ -3232,9 +3309,10 @@ logStats(void)
 		interval ? (double)(stats.blockUploads[BUFFER_MATERIAL] - statsLog.materialUploads)/interval : 0.0,
 		interval - (f.drawablesAcquired - statsLog.drawablesAcquired),
 		f.drawableWaitMaxUs/1000.0, stats.hostPrewarmUs/1000.0,
-		metalGlobals.numSamples ? metalGlobals.numSamples : 1, frameStatsTail(),
+		metalGlobals.numSamples ? metalGlobals.numSamples : 1, atExit ? frameLastStatsTail() : frameStatsTail(),
 		in.normalStreams - statsLog.instance.normalStreams, in.normalPending, in.normalLive, in.normalBytes, uniformRelit.params[0],
-		interval ? (double)(stats.relitDraws - statsLog.relitDraws)/interval : 0.0);
+		interval ? (double)(stats.relitDraws - statsLog.relitDraws)/interval : 0.0,
+		relitSun && uniformRelit.params[3] > 0.0f ? "on" : "off");
 	resetDrawableWaitMax();
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();

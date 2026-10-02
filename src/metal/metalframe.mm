@@ -160,6 +160,7 @@ struct FrameState
 	uint32 taaAllocs = 0, taaLogs = 0, taaRequests = 0;
 	id<MTLTexture> white = nil, testShadow = nil;
 	char tail[512] = "";
+	char lastTail[512] = "";
 };
 
 static FrameState frame;
@@ -333,6 +334,12 @@ frameStatsTail(void)
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
 		prepassEqualLastFrame(), getStateStats().prepassUnkeyed);
 	return frame.tail;
+}
+
+const char*
+frameLastStatsTail(void)
+{
+	return frame.lastTail[0] ? frame.lastTail : " tier none";
 }
 
 uint32
@@ -533,6 +540,7 @@ frameInit(void)
 		[frame.white replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:one bytesPerRow:sizeof(one)];
 		frame.testShadow = nil;
 	}
+	frame.lastTail[0] = '\0';
 	frame.available = frame.compositeBGRA && frame.copyScene && frame.copyPost && frame.grade && frame.black && frame.white;
 	return frame.available;
 }
@@ -641,6 +649,7 @@ reactivePipeline(id<MTLLibrary> lib, NSString *vs, uint32 layout)
 	bool no = false;
 	[off setConstantValue:&no type:MTLDataTypeBool atIndex:6];
 	[off setConstantValue:&no type:MTLDataTypeBool atIndex:7];
+	[off setConstantValue:&no type:MTLDataTypeBool atIndex:8];
 	d.vertexFunction = [lib newFunctionWithName:vs constantValues:off error:&err];
 	d.fragmentFunction = [lib newFunctionWithName:@"reactiveFS" constantValues:off error:&err];
 	d.vertexDescriptor = vd;
@@ -1186,6 +1195,7 @@ void
 beginScene(Camera *cam)
 {
 	frame.emissiveScale = 1.0f;
+	relitSceneBegin();
 	if(getContext() == nil || cam == nil || cam->frameBuffer == nil)
 		return;
 	@autoreleasepool {
@@ -1222,6 +1232,8 @@ endScene(const GradeParams *params)
 		flushPasses();
 		finishPrepassFrame(true);
 		encodeGrade(params);
+		if(frame.internalWidth > 0)
+			snprintf(frame.lastTail, sizeof(frame.lastTail), "%s", frameStatsTail());
 		frame.phase = phaseOnEndScene(frame.phase);
 		PassTarget t = { frame.mainColor, frame.mainDepth };
 		PassClear c = PassClear();
@@ -1295,6 +1307,12 @@ frameShadowTexture(void)
 	return frame.testShadow ? frame.testShadow : frame.white;
 }
 
+bool
+frameShadowSource(void)
+{
+	return frame.testShadow != nil;
+}
+
 void
 setShadowFactorForTest(float32 v)
 {
@@ -1313,6 +1331,7 @@ setShadowFactorForTest(float32 v)
 	for(int i = 0; i < 4; i++)
 		texel[i] = bits;
 	[frame.testShadow replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:texel bytesPerRow:sizeof(texel)];
+	prewarmShadowTwins();
 }
 
 bool

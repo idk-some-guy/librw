@@ -1084,7 +1084,7 @@ static int
 termMetal(void)
 {
 	finishGPUWork();
-	logStats();
+	logStats(1);
 	closeIm3D();
 	closeIm2DUV2();
 	closeSkin();

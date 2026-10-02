@@ -95,6 +95,7 @@ lightingCB(Atomic *atomic)
 		world->enumerateLights(atomic, &lightData);
 	else
 		memset(&lightData, 0, sizeof(lightData));
+	setDrawRelitGeometry(atomic->geometry->flags & rw::Geometry::LIGHT);
 	return setLights(&lightData);
 }
 

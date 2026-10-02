@@ -22,6 +22,10 @@ TestWeight(void)
 	CHECK(relitPrelitScale(0.6f, true) == 0.6f && relitPrelitScale(0.6f, false) == 1.0f);
 	CHECK(Near(relitLiveShare(0.6f, true), 0.4f, 1e-7f) && relitLiveShare(0.6f, false) == 1.0f);
 	CHECK(relitLiveShare(1.0f, true) == 0.0f && relitPrelitScale(1.0f, true) == 1.0f);
+	CHECK(relitSnapWeight(0.9999999f) == 1.0f && relitSnapWeight(nextafterf(1.0f, 0.0f)) == 1.0f);
+	CHECK(relitSnapWeight(0.99999905f) == 1.0f && relitSnapWeight(1.0f) == 1.0f && relitSnapWeight(1.5f) == 1.0f);
+	CHECK(relitSnapWeight(0.999998f) == 0.999998f && relitSnapWeight(0.6f) == 0.6f && relitSnapWeight(-0.5f) == 0.0f);
+	CHECK(relitSnapWeight(NAN) == 1.0f);
 }
 
 static void
@@ -146,6 +150,84 @@ TestSunCos(void)
 	CHECK(relitSunCos(0.7f, false) == 0.7f && relitSunCos(0.7f, true) == 0.7f);
 }
 
+static void
+Cross(const double a[3], const double b[3], double out[3])
+{
+	out[0] = a[1]*b[2] - a[2]*b[1];
+	out[1] = a[2]*b[0] - a[0]*b[2];
+	out[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+static void
+Rotation(double deg, double x, double y, double z, float m[12])
+{
+	double l = sqrt(x*x + y*y + z*z), c = cos(deg*M_PI/180.0), s = sin(deg*M_PI/180.0);
+	x /= l;
+	y /= l;
+	z /= l;
+	double r[9] = {
+		c + x*x*(1-c), y*x*(1-c) + z*s, z*x*(1-c) - y*s,
+		x*y*(1-c) - z*s, c + y*y*(1-c), z*y*(1-c) + x*s,
+		x*z*(1-c) + y*s, y*z*(1-c) - x*s, c + z*z*(1-c),
+	};
+	for(int i = 0; i < 9; i++)
+		m[i] = (float)r[i];
+	m[9] = m[10] = m[11] = 0.0f;
+}
+
+static void
+TestCofactor(void)
+{
+	float ms[6][12] = {
+		{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 },
+		{},
+		{ 2, 0, 0, 0, 0.5f, 0, 0, 0, 3, 0, 0, 0 },
+		{ -1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 },
+		{ 1, 0, 0, 0.7f, 1, 0, -0.3f, 0.4f, 1, 0, 0, 0 },
+		{},
+	};
+	Rotation(30.0, 1, 2, 3, ms[1]);
+	Rotation(-75.0, 0.2, -1, 0.5, ms[5]);
+	ms[5][9] = 2000.0f;
+	ms[5][10] = -2000.0f;
+	ms[5][11] = 2000.0f;
+	const float edges[4][2][3] = {
+		{ { 1, 0, 0 }, { 0, 1, 0 } },
+		{ { 0.3f, -2, 0.5f }, { 1.5f, 0.25f, -0.75f } },
+		{ { 10, 0.01f, 3 }, { -4, 2, 0.002f } },
+		{ { 0.001f, 0.002f, 0 }, { 0, 0.001f, 0.003f } },
+	};
+	for(int i = 0; i < 6; i++){
+		const float *m = ms[i];
+		float k[9];
+		relitCofactor(m, m + 3, m + 6, k);
+		for(int e = 0; e < 4; e++){
+			const float *a = edges[e][0], *b = edges[e][1];
+			double p0[3], p1[3], p2[3], ma[3], mb[3], want[3];
+			for(int r = 0; r < 3; r++){
+				p0[r] = m[9 + r];
+				p1[r] = m[9 + r] + (double)m[r]*a[0] + (double)m[3 + r]*a[1] + (double)m[6 + r]*a[2];
+				p2[r] = m[9 + r] + (double)m[r]*b[0] + (double)m[3 + r]*b[1] + (double)m[6 + r]*b[2];
+				ma[r] = p1[r] - p0[r];
+				mb[r] = p2[r] - p0[r];
+			}
+			Cross(ma, mb, want);
+			float ab[3] = { a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0] };
+			float got[3];
+			for(int r = 0; r < 3; r++)
+				got[r] = k[r]*ab[0] + k[3 + r]*ab[1] + k[6 + r]*ab[2];
+			double lw = sqrt(want[0]*want[0] + want[1]*want[1] + want[2]*want[2]);
+			double lg = sqrt((double)got[0]*got[0] + (double)got[1]*got[1] + (double)got[2]*got[2]);
+			double tol = 1e-5*(lw > lg ? lw : lg);
+			for(int r = 0; r < 3; r++)
+				if(fabs(got[r] - want[r]) > tol){
+					printf("  matrix %d edges %d component %d: %g, want %g\n", i, e, r, got[r], want[r]);
+					failures++;
+				}
+		}
+	}
+}
+
 int
 main(void)
 {
@@ -157,6 +239,7 @@ main(void)
 	TestWeighted();
 	TestSplitAdd();
 	TestSunCos();
+	TestCofactor();
 	if(failures == 0)
 		printf("all relit tests passed\n");
 	return failures != 0;

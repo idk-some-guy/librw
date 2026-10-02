@@ -22,6 +22,7 @@ bool32 frameInit(void);
 void frameTerm(void);
 void frameBuildReactive(void);
 const char *frameStatsTail(void);
+const char *frameLastStatsTail(void);
 void frameTierChanged(void);
 uint32 activeFormatMask(void);
 void applyPendingSettings(void);
@@ -74,6 +75,7 @@ void frameCameraCut(void);
 bool frameModernTier(void);
 bool frameRelitActive(void);
 id<MTLTexture> frameShadowTexture(void);
+bool frameShadowSource(void);
 MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);
 
 }

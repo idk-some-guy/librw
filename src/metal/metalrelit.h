@@ -93,6 +93,29 @@ relitSunCos(float c, bool twoSided)
 	return twoSided ? RL_ABS(c) : RL_MAX(c, 0.0f);
 }
 
+#ifndef __METAL_VERSION__
+static inline float
+relitSnapWeight(float w)
+{
+	float c = relitClampWeight(w);
+	return c > 1.0f - 1e-6f ? 1.0f : c;
+}
+
+static inline void
+relitCofactor(const float c0[3], const float c1[3], const float c2[3], float out[9])
+{
+	out[0] = c1[1]*c2[2] - c1[2]*c2[1];
+	out[1] = c1[2]*c2[0] - c1[0]*c2[2];
+	out[2] = c1[0]*c2[1] - c1[1]*c2[0];
+	out[3] = c2[1]*c0[2] - c2[2]*c0[1];
+	out[4] = c2[2]*c0[0] - c2[0]*c0[2];
+	out[5] = c2[0]*c0[1] - c2[1]*c0[0];
+	out[6] = c0[1]*c1[2] - c0[2]*c1[1];
+	out[7] = c0[2]*c1[0] - c0[0]*c1[2];
+	out[8] = c0[0]*c1[1] - c0[1]*c1[0];
+}
+#endif
+
 static inline RLVec3
 relitFillNormal(RLVec3 n, float valid, RLVec3 g, RLVec3 fallback)
 {
