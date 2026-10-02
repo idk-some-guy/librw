@@ -1,8 +1,10 @@
 all: header_metal.inc im2d_metal.inc im2d_uv2_metal.inc simple_metal.inc default_metal.inc im3d_metal.inc skin_metal.inc matfx_env_metal.inc frame_metal.inc grade_metal.inc emit_metal.inc output_metal.inc bloom_metal.inc bloomh_metal.inc dering_metal.inc deringh_metal.inc fxaa_metal.inc aah_metal.inc prepassh_metal.inc temporalh_metal.inc prepass_metal.inc prepass_skin_metal.inc motion_metal.inc reactive_metal.inc taa_metal.inc
 
-header_metal.inc: header.metal
+header_metal.inc: header.metal ../metalrelit.h
 	(echo 'const char *header_metal_src =';\
-	 sed 's/..*/"&\\n"/' header.metal;\
+	 sed -n '1,2p' header.metal | sed 's/..*/"&\\n"/';\
+	 sed 's/..*/"&\\n"/' ../metalrelit.h;\
+	 sed -n '3,$$p' header.metal | sed 's/..*/"&\\n"/';\
 	 echo ';') >header_metal.inc
 
 im2d_metal.inc: im2d.metal
