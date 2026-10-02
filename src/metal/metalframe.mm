@@ -10,6 +10,7 @@
 #include "metalaa.h"
 #include "metalprepass.h"
 #include "metaltemporal.h"
+#include "metalraytrace.h"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -129,6 +130,7 @@ struct FrameState
 	Raster *prepassRaster = nil;
 	id<MTLTexture> prepassNormal = nil, prepassMotion = nil, prepassNormalMS = nil, prepassMotionMS = nil;
 	bool prepassOpen = false, prepassDone = false, prepassFail = false, prepassReported = false;
+	bool rayWorkDone = false;
 	uint32 prepassPasses = 0;
 	PassTarget prepassReturn = { nil, nil };
 	uint32 prepassDrawsLast = 0;
@@ -1197,6 +1199,7 @@ beginScene(Camera *cam)
 {
 	frame.emissiveScale = 1.0f;
 	relitSceneBegin();
+	rtSceneBegin();
 	if(getContext() == nil || cam == nil || cam->frameBuffer == nil)
 		return;
 	@autoreleasepool {
@@ -1204,6 +1207,7 @@ beginScene(Camera *cam)
 			endScene(nil);
 		frame.prepassOpen = false;
 		frame.prepassDone = false;
+		frame.rayWorkDone = false;
 		frame.prepassPasses = 0;
 		frame.prepassDrawsLast = 0;
 		frame.prevPrepassValid = frame.prepassValid && frame.prepassValidShow + 1 == frame.shows;
@@ -1906,6 +1910,16 @@ beginPrepass(void)
 	return 1;
 }
 
+static void
+frameRayWork(void)
+{
+	MetalContext *ctx = getContext();
+	if(frame.rayWorkDone || frame.dropping || ctx == nil || ctx->encoder != nil || !rtFrameWorkEnabled())
+		return;
+	frame.rayWorkDone = true;
+	rtEncodeFrame(frameCommandBuffer(), true);
+}
+
 void
 endPrepass(void)
 {
@@ -1916,7 +1930,9 @@ endPrepass(void)
 		frame.prepassDone = true;
 		frame.phase = PHASE_SCENE;
 		frame.prepassDrawsLast = endPrepassState();
+		rtEndCasters();
 		resumePassTarget(frame.prepassReturn);
+		frameRayWork();
 	}
 }
 
@@ -1950,6 +1966,8 @@ framePrepassPassEnded(void)
 		frame.prepassValid = true;
 		frame.prepassValidShow = frame.shows;
 	}
+	if(!frame.prepassOpen && frame.prepassDone)
+		frameRayWork();
 }
 
 static bool32

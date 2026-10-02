@@ -372,6 +372,8 @@ struct RayStats
 	uint32 levelsSkipped;
 	uint32 levelsEmpty;
 	float32 scratchMegabytes;
+	uint32 casters, hostCasters, castersCapped, castersWaiting, skinnedCasters, skinnedLevels, skinnedBuilds, rayFrames, castersDropped;
+	float32 skinnedMegabytes, topMegabytes;
 };
 RayStats getRayStats(void);
 
@@ -406,6 +408,9 @@ void setRelitParams(const RelitParams *p);
 RelitParams getRelitParams(void);
 void setSunLight(const Light *light);
 void setRelitDraw(bool32 on);
+enum { SHADOWCASTER_STATIC = 1, SHADOWCASTER_MOVING = 2, SHADOWCASTER_SKINNED = 4 };
+void addShadowCaster(Atomic *atomic, uint32 kind);
+void setShadowCaster(bool32 on);
 void setRelitTwoSided(bool32 on);
 void beginReactive(void);
 void endReactive(void);

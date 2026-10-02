@@ -9,7 +9,10 @@
 #include "metalobjc.h"
 #include "metalstate.h"
 #include "metalnormals.h"
+#include "metalframe.h"
+#include "metalshadow.h"
 #include "metalraytrace.h"
+#include "shaders/raytrace_metal.inc"
 
 namespace rw {
 namespace metal {
@@ -77,12 +80,123 @@ static struct
 	RayStats stats;
 } rt;
 
+enum { RT_MAX_INSTANCES = 8192, RT_MAX_SKINNED = 24, RT_SKIN_REBUILD_FRAMES = 30, RT_SKIN_KEEP_FRAMES = 30 };
+static const float32 RT_SKIN_DISTANCE = 60.0f;
+static const int32 RT_SKIN_MODE = RT_SKIN_REFIT;
+static const char *raytraceHead =
+"#include <metal_stdlib>\n#include <metal_raytracing>\nusing namespace metal;\nusing namespace raytracing;\n";
+
+struct CasterKey
+{
+	const InstanceDataHeader *header;
+	const void *object;
+	bool operator==(const CasterKey &o) const { return header == o.header && object == o.object; }
+};
+
+struct CasterKeyHash
+{
+	size_t operator()(const CasterKey &k) const
+	{
+		return std::hash<const void*>()(k.header) ^ (std::hash<const void*>()(k.object) * 0x9E3779B97F4A7C15ull);
+	}
+};
+
+struct Caster
+{
+	InstanceDataHeader *header;
+	const void *object;
+	RawMatrix world;
+	float32 dist2;
+	uint32 mask;
+	int32 bones;
+};
+
+struct SkinnedLevel
+{
+	const InstanceDataHeader *header;
+	uint32 vertices;
+	MTLAccelerationStructureUsage usage;
+	id<MTLBuffer> positions;
+	MTLPrimitiveAccelerationStructureDescriptor *desc;
+	id<MTLAccelerationStructure> accel;
+	uint64 bytes;
+	NSUInteger buildScratch, refitScratch;
+	uint32 triangles, geometries;
+	uint64 lastUsed, builtFrame;
+	bool built, empty;
+};
+
+struct TopSlot
+{
+	id<MTLAccelerationStructure> accel;
+	id<MTLBuffer> instances;
+	id<MTLBuffer> bones;
+	uint64 bytes;
+	uint64 frame;
+};
+
+struct SkinJobHost
+{
+	uint32 stride, pos, weights, indices, count;
+};
+
+static struct
+{
+	std::vector<Caster> casters;
+	std::unordered_map<CasterKey, uint32, CasterKeyHash> byKey;
+	std::vector<RawMatrix> bones;
+	std::unordered_map<const void*, SkinnedLevel> skinned;
+	TopSlot tops[MAXFRAMESINFLIGHT];
+	uint32 topIndex;
+	uint64 topBytes, skinnedBytes;
+	id<MTLBuffer> topScratch, skinScratch;
+	id<MTLComputePipelineState> skinPipe, tracePipe;
+	float32 eye[3];
+	bool open, workOff;
+	uint32 cap, hostCount;
+	int32 skinModeTest;
+	id<MTLAccelerationStructure> current, last;
+	id<MTLCounterSampleBuffer> timing;
+	uint32 timed;
+	float32 walkMs;
+	MTLTimestamp cpu0, gpu0;
+	std::chrono::steady_clock::time_point wall0;
+	std::vector<id<MTLBuffer>> deferred;
+} rf;
+
+static void
+retireAccel(id<MTLAccelerationStructure> a, uint64 bytes)
+{
+	rt.retired.push_back({ a, rt.frame, bytes });
+}
+
+static std::unordered_map<const void*, SkinnedLevel>::iterator
+retireSkinned(std::unordered_map<const void*, SkinnedLevel>::iterator it)
+{
+	if(it->second.accel){
+		retireAccel(it->second.accel, it->second.bytes);
+		rf.skinnedBytes -= it->second.bytes;
+	}
+	return rf.skinned.erase(it);
+}
+
 bool
 rtInit(void)
 {
 	MetalContext *ctx = getContext();
 	rt.available = ctx && ctx->device.supportsRaytracing;
 	rt.budget = RT_BUDGET;
+	if(rt.available && rf.skinPipe == nil){
+		NSString *src = [[NSString stringWithUTF8String:raytraceHead] stringByAppendingString:
+			[NSString stringWithUTF8String:raytrace_metal_src]];
+		NSError *err = nil;
+		id<MTLLibrary> lib = [ctx->device newLibraryWithSource:src options:nil error:&err];
+		rf.skinPipe = lib ? [ctx->device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"skinPositions"] error:&err] : nil;
+		rf.tracePipe = lib ? [ctx->device newComputePipelineStateWithFunction:[lib newFunctionWithName:@"traceOne"] error:&err] : nil;
+		if(rf.skinPipe == nil || rf.tracePipe == nil)
+			fprintf(stderr, "rw::metal: the shadow caster kernels failed to build; skinned casters are left out: %s\n",
+				err ? err.localizedDescription.UTF8String : "");
+	}
 	return rt.available;
 }
 
@@ -101,6 +215,21 @@ rtTerm(void)
 	rt.usedBytes = 0;
 	rt.scratch = nil;
 	rt.stats.bottomLevels = 0;
+	rf.casters.clear();
+	rf.byKey.clear();
+	rf.bones.clear();
+	rf.skinned.clear();
+	for(TopSlot &t : rf.tops)
+		t = TopSlot();
+	rf.topIndex = 0;
+	rf.topBytes = rf.skinnedBytes = 0;
+	rf.topScratch = rf.skinScratch = nil;
+	rf.current = rf.last = nil;
+	rf.open = false;
+	rf.skinPipe = rf.tracePipe = nil;
+	rf.timing = nil;
+	rf.deferred.clear();
+	rt.stats.instances = rt.stats.skinnedLevels = 0;
 }
 
 bool
@@ -165,10 +294,9 @@ castPosition(const InstanceDataHeader *h)
 }
 
 static MTLPrimitiveAccelerationStructureDescriptor*
-bottomDescriptor(const InstanceDataHeader *h, uint32 *triangles, uint32 *geometries)
+levelDescriptor(const InstanceDataHeader *h, id<MTLBuffer> vertices, uint32 stride, uint32 *triangles, uint32 *geometries)
 {
-	const AttribDesc *pos = castPosition(h);
-	if(pos == nil || h->mtlVertexBuffer == nil || h->indexBuffer == nil)
+	if(vertices == nil || h->indexBuffer == nil)
 		return nil;
 	std::vector<uint32> all, starts, counts;
 	for(uint32 m = 0; m < h->numMeshes; m++){
@@ -193,9 +321,9 @@ bottomDescriptor(const InstanceDataHeader *h, uint32 *triangles, uint32 *geometr
 	*triangles = 0;
 	for(size_t i = 0; i < starts.size(); i++){
 		MTLAccelerationStructureTriangleGeometryDescriptor *g = [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
-		g.vertexBuffer = (__bridge id<MTLBuffer>)h->mtlVertexBuffer;
+		g.vertexBuffer = vertices;
 		g.vertexBufferOffset = 0;
-		g.vertexStride = pos->stride;
+		g.vertexStride = stride;
 		g.vertexFormat = MTLAttributeFormatFloat3;
 		g.indexBuffer = ib;
 		g.indexBufferOffset = (NSUInteger)starts[i]*4;
@@ -211,15 +339,15 @@ bottomDescriptor(const InstanceDataHeader *h, uint32 *triangles, uint32 *geometr
 	return d;
 }
 
-bool
-rtEnsureBottom(InstanceDataHeader *h)
+static int32
+ensureBottomState(InstanceDataHeader *h)
 {
 	if(!rt.available || h == nil)
-		return false;
+		return LEVEL_NONE;
 	auto it = rt.bottoms.find(h);
 	if(it != rt.bottoms.end()){
 		it->second.lastUsed = rt.frame;
-		return it->second.state == LEVEL_BUILT;
+		return it->second.state;
 	}
 	BottomLevel b = {};
 	b.serial = ++rt.serial;
@@ -232,7 +360,13 @@ rtEnsureBottom(InstanceDataHeader *h)
 	rt.bottoms[h] = b;
 	if(b.state == LEVEL_QUEUED)
 		rt.queue.push_back({ h, b.serial });
-	return false;
+	return b.state;
+}
+
+bool
+rtEnsureBottom(InstanceDataHeader *h)
+{
+	return ensureBottomState(h) == LEVEL_BUILT;
 }
 
 static void
@@ -241,7 +375,7 @@ dropLevel(std::unordered_map<const InstanceDataHeader*, BottomLevel>::iterator i
 	if(it->second.state == LEVEL_BUILT){
 		rt.stats.bottomLevels--;
 		if(retire)
-			rt.retired.push_back({ it->second.accel, rt.frame, it->second.bytes });
+			retireAccel(it->second.accel, it->second.bytes);
 		else
 			rt.usedBytes -= it->second.bytes;
 	}
@@ -268,6 +402,13 @@ rtForgetHeader(InstanceDataHeader *h)
 	auto it = rt.bottoms.find(h);
 	if(it != rt.bottoms.end())
 		dropLevel(it, true);
+	for(auto s = rf.skinned.begin(); s != rf.skinned.end();)
+		s = s->second.header == h ? retireSkinned(s) : std::next(s);
+	for(Caster &c : rf.casters)
+		if(c.header == h){
+			rf.byKey.erase({ h, c.object });
+			c.header = nil;
+		}
 }
 
 static bool
@@ -387,7 +528,8 @@ rtEncodeBuilds(id<MTLCommandBuffer> cb)
 		}
 		BottomLevel &b = it->second;
 		if(b.desc == nil){
-			b.desc = bottomDescriptor(e.header, &b.triangles, &b.geometries);
+			b.desc = levelDescriptor(e.header, (__bridge id<MTLBuffer>)e.header->mtlVertexBuffer, castPosition(e.header)->stride,
+				&b.triangles, &b.geometries);
 			if(b.desc == nil){
 				b.state = LEVEL_NONE;
 				rt.stats.levelsEmpty++;
@@ -464,11 +606,460 @@ rtBottomLevel(const InstanceDataHeader *h)
 	return it != rt.bottoms.end() && it->second.state == LEVEL_BUILT ? it->second.accel : nil;
 }
 
+void
+rtBeginCasters(const float32 eye[3])
+{
+	rf.casters.clear();
+	rf.byKey.clear();
+	rf.bones.clear();
+	rf.hostCount = 0;
+	memcpy(rf.eye, eye, sizeof(rf.eye));
+	rf.open = rt.available;
+	rf.current = nil;
+}
+
+void
+rtEndCasters(void)
+{
+	rf.open = false;
+}
+
+bool
+rtCastersOpen(void)
+{
+	return rf.open;
+}
+
+void
+rtSceneBegin(void)
+{
+	rf.current = nil;
+}
+
+bool
+rtFrameWorkEnabled(void)
+{
+	return !rf.workOff;
+}
+
+static Caster*
+addCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, float32 dist2, uint32 mask)
+{
+	CasterKey k = { h, object };
+	auto it = rf.byKey.find(k);
+	if(it != rf.byKey.end()){
+		Caster &c = rf.casters[it->second];
+		c.mask |= mask;
+		c.dist2 = std::min(c.dist2, dist2);
+		return nil;
+	}
+	rf.byKey[k] = (uint32)rf.casters.size();
+	rf.casters.push_back({ h, object, world, dist2, mask, -1 });
+	return &rf.casters.back();
+}
+
+void
+rtAddDrawCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const RawMatrix *bones)
+{
+	if(!rf.open || h == nil || object == nil)
+		return;
+	float32 dx = world.pos.x - rf.eye[0], dy = world.pos.y - rf.eye[1], dz = world.pos.z - rf.eye[2];
+	Caster *c = addCaster(h, world, object, dx*dx + dy*dy + dz*dz, bones ? SHADOWCASTER_SKINNED : SHADOWCASTER_MOVING);
+	if(c && bones){
+		c->bones = (int32)(rf.bones.size()/MAXSKINBONES);
+		rf.bones.insert(rf.bones.end(), bones, bones + MAXSKINBONES);
+	}
+}
+
+bool
+rtAddHostCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const float32 sphere[4], uint32 mask)
+{
+	if(!rf.open || h == nil || object == nil)
+		return false;
+	float32 dx = sphere[0] - rf.eye[0], dy = sphere[1] - rf.eye[1], dz = sphere[2] - rf.eye[2];
+	float32 d = std::max(sqrtf(dx*dx + dy*dy + dz*dz) - sphere[3], 0.0f);
+	addCaster(h, world, object, d*d, mask);
+	rf.hostCount++;
+	return true;
+}
+
+static int32
+skinMode(void)
+{
+	return rf.skinModeTest ? rf.skinModeTest : RT_SKIN_MODE;
+}
+
+static bool
+skinJob(const InstanceDataHeader *h, SkinJobHost *j)
+{
+	const AttribDesc *pos = castPosition(h);
+	if(pos == nil || rf.skinPipe == nil || h->mtlVertexBuffer == nil)
+		return false;
+	int32 found = 0;
+	j->stride = pos->stride;
+	j->pos = 0;
+	j->count = h->totalNumVertex;
+	for(int32 i = 0; i < h->numAttribs; i++){
+		const AttribDesc &a = h->attribDesc[i];
+		if(a.index == ATTRIB_WEIGHTS && a.format == ATTRIBFMT_FLOAT4){
+			j->weights = a.offset;
+			found |= 1;
+		}else if(a.index == ATTRIB_INDICES && a.format == ATTRIBFMT_UCHAR4){
+			j->indices = a.offset;
+			found |= 2;
+		}
+	}
+	return found == 3;
+}
+
+static void
+chooseCasters(std::vector<uint32> *chosen)
+{
+	uint32 n = (uint32)rf.casters.size();
+	std::vector<float32> d2(n);
+	std::vector<uint32> order(n);
+	uint32 dropped = 0;
+	for(uint32 i = 0; i < n; i++){
+		d2[i] = rf.casters[i].dist2;
+		dropped += rf.casters[i].header == nil;
+	}
+	shCapByDistance(d2.data(), n, n, order.data());
+	uint32 cap = rf.cap ? rf.cap : (uint32)RT_MAX_INSTANCES, skinned = 0, k = 0;
+	SkinJobHost j;
+	for(; k < n && chosen->size() < cap; k++){
+		Caster &c = rf.casters[order[k]];
+		if(c.header == nil)
+			continue;
+		if(c.bones >= 0){
+			if(skinned == RT_MAX_SKINNED || c.dist2 > RT_SKIN_DISTANCE*RT_SKIN_DISTANCE || !skinJob(c.header, &j))
+				continue;
+			skinned++;
+		}else if(ensureBottomState(c.header) == LEVEL_NONE)
+			continue;
+		chosen->push_back(order[k]);
+	}
+	rt.stats.casters = n;
+	rt.stats.hostCasters = rf.hostCount;
+	rt.stats.castersCapped = n - k;
+	rt.stats.castersDropped = dropped;
+	rt.stats.skinnedCasters = skinned;
+}
+
+static MTLInstanceAccelerationStructureDescriptor*
+topDescriptor(const TopSlot &t, uint32 count)
+{
+	MTLInstanceAccelerationStructureDescriptor *d = [MTLInstanceAccelerationStructureDescriptor descriptor];
+	d.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+	d.instanceDescriptorBuffer = t.instances;
+	d.instanceDescriptorStride = sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+	d.instanceCount = count;
+	d.usage = MTLAccelerationStructureUsagePreferFastBuild;
+	return d;
+}
+
+static bool
+ensureTopSlot(id<MTLCommandBuffer> cb, TopSlot &t)
+{
+	id<MTLDevice> dev = getContext()->device;
+	if(t.accel){
+		if(t.frame + MAXFRAMESINFLIGHT <= getFrameId())
+			return true;
+		id<MTLBuffer> instances = [dev newBufferWithLength:t.instances.length options:MTLResourceStorageModeShared];
+		id<MTLBuffer> bones = [dev newBufferWithLength:t.bones.length options:MTLResourceStorageModeShared];
+		if(instances == nil || bones == nil)
+			return false;
+		id<MTLBuffer> oldInstances = t.instances, oldBones = t.bones;
+		[cb addCompletedHandler:^(id<MTLCommandBuffer>){
+			(void)oldInstances;
+			(void)oldBones;
+		}];
+		t.instances = instances;
+		t.bones = bones;
+		return true;
+	}
+	t.instances = [dev newBufferWithLength:RT_MAX_INSTANCES*sizeof(MTLIndirectAccelerationStructureInstanceDescriptor)
+		options:MTLResourceStorageModeShared];
+	t.bones = [dev newBufferWithLength:RT_MAX_SKINNED*MAXSKINBONES*sizeof(RawMatrix) options:MTLResourceStorageModeShared];
+	if(t.instances == nil || t.bones == nil){
+		t.instances = t.bones = nil;
+		return false;
+	}
+	MTLAccelerationStructureSizes sz = [dev accelerationStructureSizesWithDescriptor:topDescriptor(t, RT_MAX_INSTANCES)];
+	if(rf.topScratch == nil || rf.topScratch.length < sz.buildScratchBufferSize)
+		rf.topScratch = [dev newBufferWithLength:std::max<NSUInteger>(sz.buildScratchBufferSize, 256)
+			options:MTLResourceStorageModePrivate];
+	MTLSizeAndAlign sa = [dev heapAccelerationStructureSizeAndAlignWithSize:sz.accelerationStructureSize];
+	int32 cause = REFUSE_BUDGET;
+	id<MTLAccelerationStructure> a = rf.topScratch ? allocAccel(sa, &cause) : nil;
+	if(a == nil){
+		t.instances = t.bones = nil;
+		rt.stats.budgetFull++;
+		return false;
+	}
+	t.accel = a;
+	t.bytes = sa.size;
+	rt.usedBytes += sa.size;
+	rf.topBytes += sa.size;
+	return true;
+}
+
+static SkinnedLevel*
+skinnedLevel(const Caster &c)
+{
+	MTLAccelerationStructureUsage usage = skinMode() == RT_SKIN_REBUILD ? MTLAccelerationStructureUsagePreferFastBuild :
+		MTLAccelerationStructureUsageRefit;
+	auto it = rf.skinned.find(c.object);
+	if(it != rf.skinned.end()){
+		SkinnedLevel &s = it->second;
+		if(s.header == c.header && s.vertices == c.header->totalNumVertex && (s.empty || s.usage == usage))
+			return s.empty ? nil : &s;
+		retireSkinned(it);
+	}
+	id<MTLDevice> dev = getContext()->device;
+	SkinnedLevel s = {};
+	s.header = c.header;
+	s.vertices = c.header->totalNumVertex;
+	s.usage = usage;
+	s.lastUsed = rt.frame;
+	s.positions = [dev newBufferWithLength:(NSUInteger)s.vertices*12 options:MTLResourceStorageModePrivate];
+	s.desc = s.positions ? levelDescriptor(c.header, s.positions, 12, &s.triangles, &s.geometries) : nil;
+	if(s.desc == nil){
+		s.empty = true;
+		s.positions = nil;
+		rf.skinned[c.object] = s;
+		return nil;
+	}
+	s.desc.usage = usage;
+	MTLAccelerationStructureSizes sz = [dev accelerationStructureSizesWithDescriptor:s.desc];
+	MTLSizeAndAlign sa = [dev heapAccelerationStructureSizeAndAlignWithSize:sz.accelerationStructureSize];
+	int32 cause = REFUSE_BUDGET;
+	s.accel = sa.size <= RT_HEAP_SIZE ? allocAccel(sa, &cause) : nil;
+	if(s.accel == nil){
+		rt.stats.budgetFull++;
+		return nil;
+	}
+	s.bytes = sa.size;
+	s.buildScratch = sz.buildScratchBufferSize;
+	s.refitScratch = sz.refitScratchBufferSize;
+	rt.usedBytes += sa.size;
+	rf.skinnedBytes += sa.size;
+	return &(rf.skinned[c.object] = s);
+}
+
+static id<MTLComputeCommandEncoder>
+timedCompute(id<MTLCommandBuffer> cb, uint32 first)
+{
+	if(rf.timing == nil)
+		return [cb computeCommandEncoder];
+	MTLComputePassDescriptor *d = [MTLComputePassDescriptor computePassDescriptor];
+	d.sampleBufferAttachments[0].sampleBuffer = rf.timing;
+	d.sampleBufferAttachments[0].startOfEncoderSampleIndex = first;
+	d.sampleBufferAttachments[0].endOfEncoderSampleIndex = first + 1;
+	rf.timed |= 1u << first;
+	return [cb computeCommandEncoderWithDescriptor:d];
+}
+
+static id<MTLAccelerationStructureCommandEncoder>
+timedBuild(id<MTLCommandBuffer> cb, uint32 first)
+{
+	if(rf.timing == nil)
+		return [cb accelerationStructureCommandEncoder];
+	MTLAccelerationStructurePassDescriptor *d = [MTLAccelerationStructurePassDescriptor accelerationStructurePassDescriptor];
+	d.sampleBufferAttachments[0].sampleBuffer = rf.timing;
+	d.sampleBufferAttachments[0].startOfEncoderSampleIndex = first;
+	d.sampleBufferAttachments[0].endOfEncoderSampleIndex = first + 1;
+	rf.timed |= 1u << first;
+	return [cb accelerationStructureCommandEncoderWithDescriptor:d];
+}
+
+struct SkinWork
+{
+	SkinnedLevel *s;
+	uint32 slot;
+	bool build;
+	NSUInteger offset;
+	SkinJobHost job;
+};
+
+static void
+encodeSkinned(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopSlot &t)
+{
+	std::vector<SkinWork> work;
+	NSUInteger scratch = 0;
+	for(uint32 i : chosen){
+		if(work.size() == RT_MAX_SKINNED)
+			break;
+		Caster &c = rf.casters[i];
+		SkinWork w = {};
+		if(c.bones < 0 || !skinJob(c.header, &w.job))
+			continue;
+		w.s = skinnedLevel(c);
+		if(w.s == nil)
+			continue;
+		w.slot = (uint32)work.size();
+		memcpy((uint8*)t.bones.contents + (size_t)w.slot*MAXSKINBONES*sizeof(RawMatrix),
+			&rf.bones[(size_t)c.bones*MAXSKINBONES], MAXSKINBONES*sizeof(RawMatrix));
+		w.build = !w.s->built || skinMode() == RT_SKIN_REBUILD || rt.cutFrame ||
+			rt.frame >= w.s->builtFrame + RT_SKIN_REBUILD_FRAMES;
+		w.offset = scratch;
+		scratch += std::max<NSUInteger>(((w.build ? w.s->buildScratch : w.s->refitScratch) + 255) & ~(NSUInteger)255, 256);
+		work.push_back(w);
+	}
+	if(work.empty())
+		return;
+	if(rf.skinScratch == nil || rf.skinScratch.length < scratch || rt.scratchFail){
+		rf.skinScratch = rt.scratchFail ? nil : [getContext()->device newBufferWithLength:scratch options:MTLResourceStorageModePrivate];
+		rt.scratchFail = false;
+	}
+	if(rf.skinScratch == nil)
+		return;
+	id<MTLComputeCommandEncoder> ce = timedCompute(cb, 0);
+	[ce setComputePipelineState:rf.skinPipe];
+	for(SkinWork &w : work){
+		[ce setBuffer:(__bridge id<MTLBuffer>)w.s->header->mtlVertexBuffer offset:0 atIndex:0];
+		[ce setBytes:&w.job length:sizeof(w.job) atIndex:1];
+		[ce setBuffer:t.bones offset:(NSUInteger)w.slot*MAXSKINBONES*sizeof(RawMatrix) atIndex:2];
+		[ce setBuffer:w.s->positions offset:0 atIndex:3];
+		[ce dispatchThreads:MTLSizeMake(w.job.count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	}
+	[ce endEncoding];
+	NSMutableArray *descs = [NSMutableArray array];
+	id<MTLAccelerationStructureCommandEncoder> ae = timedBuild(cb, 2);
+	for(SkinWork &w : work){
+		SkinnedLevel *s = w.s;
+		[descs addObject:s->desc];
+		if(w.build){
+			[ae buildAccelerationStructure:s->accel descriptor:s->desc scratchBuffer:rf.skinScratch scratchBufferOffset:w.offset];
+			s->built = true;
+			s->builtFrame = rt.frame;
+			rt.stats.skinnedBuilds++;
+		}else{
+			[ae refitAccelerationStructure:s->accel descriptor:s->desc destination:nil scratchBuffer:rf.skinScratch
+				scratchBufferOffset:w.offset];
+			rt.stats.refits++;
+		}
+		s->lastUsed = rt.frame;
+	}
+	[ae endEncoding];
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>){
+		(void)descs;
+	}];
+}
+
+static MTLPackedFloat4x3
+packed(const RawMatrix &m)
+{
+	MTLPackedFloat4x3 p;
+	p.columns[0] = MTLPackedFloat3Make(m.right.x, m.right.y, m.right.z);
+	p.columns[1] = MTLPackedFloat3Make(m.up.x, m.up.y, m.up.z);
+	p.columns[2] = MTLPackedFloat3Make(m.at.x, m.at.y, m.at.z);
+	p.columns[3] = MTLPackedFloat3Make(m.pos.x, m.pos.y, m.pos.z);
+	return p;
+}
+
+static void
+encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopSlot &t)
+{
+	MTLIndirectAccelerationStructureInstanceDescriptor *di =
+		(MTLIndirectAccelerationStructureInstanceDescriptor*)t.instances.contents;
+	uint32 count = 0, waiting = 0;
+	for(uint32 i : chosen){
+		Caster &c = rf.casters[i];
+		id<MTLAccelerationStructure> as = nil;
+		if(c.bones >= 0){
+			auto it = rf.skinned.find(c.object);
+			if(it != rf.skinned.end() && it->second.built && it->second.lastUsed == rt.frame)
+				as = it->second.accel;
+		}else
+			as = rtBottomLevel(c.header);
+		if(as == nil){
+			waiting++;
+			continue;
+		}
+		di[count].transformationMatrix = packed(c.world);
+		di[count].options = MTLAccelerationStructureInstanceOptionDisableTriangleCulling;
+		di[count].mask = c.mask;
+		di[count].intersectionFunctionTableOffset = 0;
+		di[count].userID = count;
+		di[count].accelerationStructureID = as.gpuResourceID;
+		count++;
+	}
+	rt.stats.instances = count;
+	rt.stats.castersWaiting = waiting;
+	if(count == 0)
+		return;
+	id<MTLAccelerationStructureCommandEncoder> enc = timedBuild(cb, 4);
+	rtUseHeapsForBuild(enc);
+	[enc buildAccelerationStructure:t.accel descriptor:topDescriptor(t, count) scratchBuffer:rf.topScratch scratchBufferOffset:0];
+	[enc endEncoding];
+	rf.current = rf.last = t.accel;
+}
+
+static void
+ageSkinned(void)
+{
+	for(auto it = rf.skinned.begin(); it != rf.skinned.end();)
+		it = it->second.lastUsed + RT_SKIN_KEEP_FRAMES < rt.frame ? retireSkinned(it) : std::next(it);
+}
+
+void
+rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters)
+{
+	rf.open = false;
+	rf.current = rf.last = nil;
+	if(!rt.available)
+		return;
+	rt.stats.rayFrames++;
+	rf.timed = 0;
+	auto t0 = std::chrono::steady_clock::now();
+	std::vector<uint32> chosen;
+	if(casters)
+		chooseCasters(&chosen);
+	rtEncodeBuilds(cb);
+	if(casters){
+		TopSlot &t = rf.tops[rf.topIndex];
+		rf.topIndex = (rf.topIndex + 1) % MAXFRAMESINFLIGHT;
+		if(ensureTopSlot(cb, t)){
+			t.frame = getFrameId();
+			encodeSkinned(cb, chosen, t);
+			encodeInstances(cb, chosen, t);
+		}
+		ageSkinned();
+	}
+	rf.casters.clear();
+	rf.byKey.clear();
+	rf.bones.clear();
+	rf.walkMs = (float32)std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+id<MTLAccelerationStructure>
+rtInstanceLevel(void)
+{
+	return rf.current;
+}
+
+void
+rtUseHeaps(id<MTLComputeCommandEncoder> e)
+{
+	for(id<MTLHeap> h : rt.heaps)
+		[e useHeap:h];
+}
+
+void
+rtUseHeapsForBuild(id<MTLAccelerationStructureCommandEncoder> e)
+{
+	for(id<MTLHeap> h : rt.heaps)
+		[e useHeap:h];
+}
+
 RayStats
 getRayStats(void)
 {
 	RayStats s = rt.stats;
-	s.bottomMegabytes = (float32)(rt.usedBytes/1048576.0);
+	s.bottomMegabytes = (float32)((rt.usedBytes - rf.topBytes - rf.skinnedBytes)/1048576.0);
+	s.skinnedMegabytes = (float32)(rf.skinnedBytes/1048576.0);
+	s.topMegabytes = (float32)(rf.topBytes/1048576.0);
+	s.skinnedLevels = (uint32)rf.skinned.size();
 	s.scratchMegabytes = rt.scratch ? (float32)(rt.scratch.length/1048576.0) : 0.0f;
 	return s;
 }
@@ -825,6 +1416,160 @@ rtMeasureBuildsForTest(RtBuildTiming *t)
 			t->instanceBytes[c] = (uint32)sz.accelerationStructureSize;
 		}
 	}
+	return 1;
+}
+
+static id<MTLBuffer>
+encodeTrace(id<MTLAccelerationStructure> level, const float32 origin[3], const float32 dir[3], float32 maxDistance, uint32 mask)
+{
+	flushPasses();
+	id<MTLBuffer> out = [getContext()->device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+	float32 r[8] = { origin[0], origin[1], origin[2], maxDistance, dir[0], dir[1], dir[2], 0.0f };
+	id<MTLComputeCommandEncoder> e = [frameCommandBuffer() computeCommandEncoder];
+	[e setComputePipelineState:rf.tracePipe];
+	[e setAccelerationStructure:level atBufferIndex:0];
+	[e setBytes:r length:sizeof(r) atIndex:1];
+	[e setBytes:&mask length:4 atIndex:2];
+	[e setBuffer:out offset:0 atIndex:3];
+	rtUseHeaps(e);
+	[e dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+	[e endEncoding];
+	return out;
+}
+
+bool32
+rtTraceForTest(const float32 origin[3], const float32 dir[3], float32 maxDistance, uint32 mask)
+{
+	if(getContext() == nil || rf.last == nil || rf.tracePipe == nil)
+		return 0;
+	@autoreleasepool {
+		id<MTLBuffer> out = encodeTrace(rf.last, origin, dir, maxDistance, mask);
+		if(!commitAndWait(frameCommandBuffer()))
+			return 0;
+		return *(const uint32*)out.contents != 0;
+	}
+}
+
+uint32
+rtTraceDeferredForTest(const float32 origin[3], const float32 dir[3], float32 maxDistance, uint32 mask)
+{
+	if(getContext() == nil || rf.current == nil || rf.tracePipe == nil)
+		return ~0u;
+	@autoreleasepool {
+		rf.deferred.push_back(encodeTrace(rf.current, origin, dir, maxDistance, mask));
+		return (uint32)rf.deferred.size() - 1;
+	}
+}
+
+bool32
+rtDeferredHitForTest(uint32 index)
+{
+	return index < rf.deferred.size() && *(const uint32*)rf.deferred[index].contents != 0;
+}
+
+const void*
+rtInstanceLevelForTest(void)
+{
+	return (__bridge const void*)rf.current;
+}
+
+void
+rtWaitForTest(void)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil)
+		return;
+	@autoreleasepool {
+		flushPasses();
+		if(ctx->commandBuffer)
+			commitAndWait(ctx->commandBuffer);
+		id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+		dispatch_semaphore_t done = dispatch_semaphore_create(0);
+		[cb addCompletedHandler:^(id<MTLCommandBuffer>){
+			dispatch_semaphore_signal(done);
+		}];
+		[cb commit];
+		dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+	}
+}
+
+void
+rtResetForTest(void)
+{
+	rtWaitForTest();
+	rtTerm();
+	rt.frame = 0;
+	rt.completed.store(0);
+	rt.stats = RayStats();
+	rtInit();
+}
+
+void
+setRtInstanceCapForTest(uint32 cap)
+{
+	rf.cap = cap;
+}
+
+void
+setRtFrameWorkForTest(bool32 on)
+{
+	rf.workOff = !on;
+}
+
+void
+setRtSkinModeForTest(int32 mode)
+{
+	rf.skinModeTest = mode;
+}
+
+bool32
+rtSkinnedForTest(const void *object)
+{
+	auto it = rf.skinned.find(object);
+	return it != rf.skinned.end() && it->second.built && it->second.lastUsed == rt.frame;
+}
+
+void
+setRtTimingForTest(bool32 on)
+{
+	MetalContext *ctx = getContext();
+	rf.timing = nil;
+	if(!on || ctx == nil || ![ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+		return;
+	id<MTLCounterSet> timestamps = nil;
+	for(id<MTLCounterSet> s in ctx->device.counterSets)
+		if([s.name isEqualToString:MTLCommonCounterSetTimestamp])
+			timestamps = s;
+	if(timestamps == nil)
+		return;
+	MTLCounterSampleBufferDescriptor *sd = [MTLCounterSampleBufferDescriptor new];
+	sd.counterSet = timestamps;
+	sd.storageMode = MTLStorageModeShared;
+	sd.sampleCount = 6;
+	rf.timing = [ctx->device newCounterSampleBufferWithDescriptor:sd error:nil];
+	[ctx->device sampleTimestamps:&rf.cpu0 gpuTimestamp:&rf.gpu0];
+	rf.wall0 = std::chrono::steady_clock::now();
+}
+
+bool32
+rtFrameTimingForTest(RtFrameTiming *t)
+{
+	memset(t, 0, sizeof(*t));
+	MetalContext *ctx = getContext();
+	if(ctx == nil || rf.timing == nil)
+		return 0;
+	rtWaitForTest();
+	MTLTimestamp cpu1, gpu1;
+	[ctx->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+	double wall = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - rf.wall0).count();
+	double nsPerTick = gpu1 > rf.gpu0 ? wall/(double)(gpu1 - rf.gpu0) : 1.0;
+	float32 *ms[3] = { &t->skinMs, &t->skinnedMs, &t->instanceMs };
+	for(uint32 i = 0; i < 3; i++)
+		if(rf.timed & (1u << 2*i))
+			*ms[i] = (float32)(tickSpan(rf.timing, 2*i, 2*i + 1)*nsPerTick/1e6);
+	t->walkMs = rf.walkMs;
+	t->instances = rt.stats.instances;
+	t->skinned = rt.stats.skinnedCasters;
 	return 1;
 }
 

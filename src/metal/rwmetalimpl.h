@@ -121,6 +121,25 @@ struct RtBuildTiming
 };
 bool32 rtMeasureBuildsForTest(RtBuildTiming *t);
 
+enum { RT_SKIN_DEFAULT, RT_SKIN_REBUILD, RT_SKIN_REFIT };
+struct RtFrameTiming
+{
+	float32 skinMs, skinnedMs, instanceMs, walkMs;
+	uint32 instances, skinned;
+};
+bool32 rtTraceForTest(const float32 origin[3], const float32 dir[3], float32 maxDistance, uint32 mask);
+uint32 rtTraceDeferredForTest(const float32 origin[3], const float32 dir[3], float32 maxDistance, uint32 mask);
+bool32 rtDeferredHitForTest(uint32 index);
+const void *rtInstanceLevelForTest(void);
+void setRtInstanceCapForTest(uint32 cap);
+void setRtFrameWorkForTest(bool32 on);
+void setRtSkinModeForTest(int32 mode);
+bool32 rtSkinnedForTest(const void *object);
+void rtWaitForTest(void);
+void rtResetForTest(void);
+void setRtTimingForTest(bool32 on);
+bool32 rtFrameTimingForTest(RtFrameTiming *t);
+
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);
 void encodeMipmapGeneration(void *texture);

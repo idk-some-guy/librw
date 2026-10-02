@@ -224,6 +224,26 @@ render(rw::ObjPipeline *rwpipe, Atomic *atomic)
 		pipe->renderCB(atomic, (InstanceDataHeader*)geo->instData);
 }
 
+void
+addShadowCaster(Atomic *atomic, uint32 kind)
+{
+	if(atomic == nil || atomic->geometry == nil || (kind != SHADOWCASTER_STATIC && kind != SHADOWCASTER_MOVING) || !rtAvailable() ||
+	   !rtCastersOpen())
+		return;
+	Geometry *geo = atomic->geometry;
+	if(skinGlobals.geoOffset > 0 && Skin::get(geo) != nil)
+		return;
+	atomic->getPipeline()->instance(atomic);
+	InstanceDataHeader *h = (InstanceDataHeader*)geo->instData;
+	if(h == nil || h->platform != PLATFORM_METAL)
+		return;
+	RawMatrix world;
+	convMatrix(&world, atomic->getFrame()->getLTM());
+	Sphere *s = atomic->getWorldBoundingSphere();
+	float32 sphere[4] = { s->center.x, s->center.y, s->center.z, s->radius };
+	rtAddHostCaster(h, world, atomic, sphere, kind);
+}
+
 bool32
 drawIndexed(InstanceDataHeader *header, InstanceData *inst)
 {

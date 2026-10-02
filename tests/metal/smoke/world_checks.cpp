@@ -3588,6 +3588,25 @@ SkinAtomic(Geometry *geo)
 	return atomic;
 }
 
+void
+PoseSkin(Atomic *atomic, int32 numBones)
+{
+	Matrix bones[64];
+	for(int32 i = 0; i < numBones; i++)
+		bones[i] = *atomic->getFrame()->getLTM();
+	HAnimHierarchy *old = Skin::getHierarchy(atomic);
+	Skin::setHierarchy(atomic, MakeHierarchy(numBones, bones, 0));
+	if(old)
+		old->destroy();
+}
+
+void
+MoveSkinBone(Atomic *atomic, int32 bone, float dx)
+{
+	V3d d = { dx, 0.0f, 0.0f };
+	Skin::getHierarchy(atomic)->matrices[bone].translate(&d, COMBINEPOSTCONCAT);
+}
+
 static const uint8 skinQuadIndices[4][4] = { { 0, 3, 1, 2 }, { 1, 2, 1, 2 }, { 2, 1, 1, 2 }, { 3, 0, 1, 2 } };
 static const float skinQuadWeights[4][4] = {
 	{ 0.5f, 0.25f, 0.125f, 0.125f }, { 0.5f, 0.25f, 0.125f, 0.125f },

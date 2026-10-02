@@ -181,6 +181,7 @@ static bool relitFetch = true;
 static bool relitAtFullWeight;
 static bool relitFaceSkip = true;
 static bool relitHostDraw = true;
+static bool shadowCasterHost = true;
 static bool relitHostTwoSided;
 static bool relitGeometryDraw = true;
 
@@ -409,6 +410,11 @@ beginPrepassState(bool continuous)
 	normalCutFrame = normalCutPending;
 	normalCutPending = false;
 	rtBeginFrame();
+	const float32 *v = uniformScene.view;
+	float32 eye[3];
+	for(int i = 0; i < 3; i++)
+		eye[i] = -(v[i*4]*v[12] + v[i*4 + 1]*v[13] + v[i*4 + 2]*v[14]);
+	rtBeginCasters(eye);
 	drainNormalQueue();
 	prepassKeys.clear();
 	prepassFrame = true;
@@ -1861,6 +1867,12 @@ setRelitDraw(bool32 on)
 }
 
 void
+setShadowCaster(bool32 on)
+{
+	shadowCasterHost = on != 0;
+}
+
+void
 setRelitTwoSided(bool32 on)
 {
 	relitHostTwoSided = on != 0;
@@ -1923,6 +1935,7 @@ void
 relitSceneBegin(void)
 {
 	relitHostDraw = true;
+	shadowCasterHost = true;
 	relitHostTwoSided = false;
 	relitGeometryDraw = true;
 	refreshRelitSun();
@@ -2357,6 +2370,8 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 		stats.prepassUnkeyed++;
 	prepassDrawsThisFrame++;
 	stats.prepassDraws++;
+	if(shadowCasterHost)
+		rtAddDrawCaster(currentDrawHeader, uniformObject.world, currentObject, skinned ? uniformSkin.bones : nil);
 	return 1;
 }
 
@@ -3157,6 +3172,7 @@ termState(void)
 	warmedFormats = 0;
 	drawEmissive = 1.0f;
 	relitHostDraw = true;
+	shadowCasterHost = true;
 	relitHostTwoSided = false;
 	relitGeometryDraw = true;
 	hostRecords.clear();

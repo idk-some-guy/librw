@@ -22,3 +22,5 @@ rw::Skin *AttachSkin(rw::Geometry *geo, rw::int32 numBones, const rw::Matrix *in
                      const rw::uint8 (*indices)[4], const float (*weights)[4]);
 rw::Atomic *SkinAtomic(rw::Geometry *geo);
 void DestroySkinAtomic(rw::Atomic *atomic);
+void PoseSkin(rw::Atomic *atomic, rw::int32 numBones);
+void MoveSkinBone(rw::Atomic *atomic, rw::int32 bone, float dx);
