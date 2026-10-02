@@ -40,6 +40,15 @@ enum
 
 enum
 {
+	SHADOWQUALITY_OFF = 0,
+	SHADOWQUALITY_LOW,
+	SHADOWQUALITY_MEDIUM,
+	SHADOWQUALITY_HIGH,
+	NUMSHADOWQUALITIES
+};
+
+enum
+{
 	TIERREASON_NONE = 0,
 	TIERREASON_NOAPPLEGPU,
 	TIERREASON_NORAYTRACING
@@ -115,6 +124,17 @@ antiAliasName(int32_t aa)
 	case ANTIALIAS_FXAA: return "fxaa";
 	case ANTIALIAS_TAA: return "taa";
 	case ANTIALIAS_TEMPORAL: return "temporal";
+	}
+	return "off";
+}
+
+inline const char*
+shadowQualityName(int32_t q)
+{
+	switch(q){
+	case SHADOWQUALITY_LOW: return "low";
+	case SHADOWQUALITY_MEDIUM: return "medium";
+	case SHADOWQUALITY_HIGH: return "high";
 	}
 	return "off";
 }

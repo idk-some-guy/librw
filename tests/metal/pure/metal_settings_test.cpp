@@ -96,6 +96,17 @@ TestAntiAliasNames(void)
 	CHECK(UPSCALER_TEMPORAL == UPSCALER_SPATIAL + 1 && ANTIALIAS_TEMPORAL == ANTIALIAS_TAA + 1);
 }
 
+static void
+TestShadowQualityNames(void)
+{
+	CHECK(SHADOWQUALITY_OFF == 0 && SHADOWQUALITY_LOW == 1 && SHADOWQUALITY_MEDIUM == 2 && SHADOWQUALITY_HIGH == 3 && NUMSHADOWQUALITIES == 4);
+	CHECK(strcmp(shadowQualityName(SHADOWQUALITY_OFF), "off") == 0);
+	CHECK(strcmp(shadowQualityName(SHADOWQUALITY_LOW), "low") == 0);
+	CHECK(strcmp(shadowQualityName(SHADOWQUALITY_MEDIUM), "medium") == 0);
+	CHECK(strcmp(shadowQualityName(SHADOWQUALITY_HIGH), "high") == 0);
+	CHECK(strcmp(shadowQualityName(NUMSHADOWQUALITIES), "off") == 0 && strcmp(shadowQualityName(-1), "off") == 0);
+}
+
 int
 main(void)
 {
@@ -105,6 +116,7 @@ main(void)
 	TestUpscale();
 	TestClamp();
 	TestAntiAliasNames();
+	TestShadowQualityNames();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;

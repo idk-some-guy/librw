@@ -436,6 +436,7 @@ if os.istarget("macosx") then
 	metalpuretest("metal_temporal_test", nil)
 	metalpuretest("metal_relit_test", nil)
 	metalpuretest("metal_normals_test", "metalnormals.cpp")
+	metalpuretest("metal_shadow_test", nil)
 
 	project "metal_smoke"
 		kind "ConsoleApp"
