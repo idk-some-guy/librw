@@ -84,6 +84,42 @@ void setFaceSkipForTest(bool32 on);
 void setRelitAtFullWeightForTest(bool32 on);
 uint32 lightsBlockForTest(void *dst, uint32 size);
 double lastFrameGpuMsForTest(void);
+void setRtBudgetForTest(uint64 bytes);
+void setRtBuildBudgetForTest(uint32 triangles);
+void setRtFrameForTest(uint64 frame);
+void rtFlushForTest(void);
+bool32 rtBottomForTest(InstanceDataHeader *h, uint32 *triangles, uint32 *geometries);
+uint32 rtQueuedForTest(void);
+uint32 rtBudgetLogsForTest(void);
+const char *rtRefusalLogForTest(void);
+uint32 rtRetiredForTest(void);
+uint64 rtLastUsedForTest(InstanceDataHeader *h);
+void setRtScratchFailForTest(bool32 fail);
+
+enum { RT_TIMING_USAGES = 4 };
+struct RtBuildTiming
+{
+	uint32 rounds;
+	uint32 levels;
+	uint32 triangles;
+	uint32 usages;
+	const char *usageName[RT_TIMING_USAGES];
+	float32 batchMs[RT_TIMING_USAGES];
+	uint64 bytes[RT_TIMING_USAGES];
+	float32 tinyMs;
+	float32 splitMs;
+	float32 fixedUs;
+	float32 perTriangleNs;
+	uint32 compactedLevels;
+	uint32 sampleBytes;
+	uint32 compactedBytes;
+	uint32 instanceCounts[3];
+	float32 instanceMs[3];
+	uint32 instanceBytes[3];
+	float32 nsPerTick;
+	float32 bufferMs;
+};
+bool32 rtMeasureBuildsForTest(RtBuildTiming *t);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);

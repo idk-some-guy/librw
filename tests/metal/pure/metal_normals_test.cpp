@@ -51,6 +51,24 @@ TestStripRestart(void)
 	CHECK(stripToList(edge, 5, out) == 3 && out[0] == 0 && out[1] == 1 && out[2] == 2);
 }
 
+static void
+TestMeshList(void)
+{
+	std::vector<uint32_t> list = { 9, 9, 9 };
+	uint16_t s[] = { 0, 1, 2, 3, 0xFFFF, 4, 5, 6 };
+	CHECK(appendMeshList(s, 8, true, &list) == 9);
+	CHECK(list.size() == 12 && list[0] == 9 && list[3] == 0 && list[6] == 2 && list[7] == 1 && list[8] == 3);
+	CHECK(list[9] == 4 && list[10] == 5 && list[11] == 6);
+	uint16_t l[] = { 0, 1, 2, 3, 3, 4, 5, 6 };
+	CHECK(appendMeshList(l, 8, false, &list) == 3);
+	CHECK(list.size() == 15 && list[12] == 0 && list[14] == 2);
+	CHECK(appendMeshList(s, 2, true, &list) == 0 && list.size() == 15);
+	uint16_t big[600];
+	for(int i = 0; i < 600; i++)
+		big[i] = (uint16_t)i;
+	CHECK(appendMeshList(big, 600, true, &list) == 598*3 && list.size() == 15 + 598*3);
+}
+
 struct V { float x, y, z; float u, v; };
 
 static const float PI = 3.14159265f;
@@ -557,6 +575,7 @@ main(void)
 {
 	TestStrip();
 	TestStripRestart();
+	TestMeshList();
 	TestQuadNormals();
 	TestRidge();
 	TestRidgeSplit();

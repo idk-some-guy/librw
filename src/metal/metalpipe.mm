@@ -6,6 +6,7 @@
 #include "../rwplugins.h"
 #include "metalstate.h"
 #include "metalinst.h"
+#include "metalraytrace.h"
 #include "rwmetalplg.h"
 
 #define PLUGIN_ID 0
@@ -100,6 +101,7 @@ freeInstanceData(Geometry *geometry)
 		return;
 	InstanceDataHeader *header = (InstanceDataHeader*)geometry->instData;
 	geometry->instData = nil;
+	rtForgetHeader(header);
 	releaseBuffer(&header->mtlIndexBuffer);
 	releaseBuffer(&header->mtlVertexBuffer);
 	dropQueuedNormalStream(header);
@@ -339,6 +341,7 @@ uploadInstanceVertices(InstanceDataHeader *header)
 	header->mtlVertexBuffer = newBuffer(header->vertexBuffer, header->totalNumVertex*header->attribDesc[0].stride);
 	releaseBuffer(&old);
 	releaseNormalStream(header);
+	rtForgetHeader(header);
 }
 
 void

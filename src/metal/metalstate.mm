@@ -14,6 +14,7 @@
 #include "metalprepasskeys.h"
 #include "metalnormals.h"
 #include "metalrelit.h"
+#include "metalraytrace.h"
 
 #define PLUGIN_ID 0
 
@@ -407,6 +408,7 @@ beginPrepassState(bool continuous)
 		normalCutBacklog = normalQueueUsed;
 	normalCutFrame = normalCutPending;
 	normalCutPending = false;
+	rtBeginFrame();
 	drainNormalQueue();
 	prepassKeys.clear();
 	prepassFrame = true;
@@ -505,6 +507,7 @@ cameraCut(void)
 	normalCutPending = true;
 	haveLastViewProj = false;
 	frameCameraCut();
+	rtCameraCut();
 }
 
 void
@@ -903,12 +906,8 @@ ensureNormalStream(InstanceDataHeader *h)
 	std::vector<uint32_t> list;
 	for(uint32 m = 0; m < h->numMeshes; m++){
 		const InstanceData *inst = &h->inst[m];
-		const uint16 *idx = (const uint16*)((const uint8*)h->indexBuffer + inst->offset);
-		size_t at = list.size();
-		list.resize(at + (inst->numIndex > 2 ? (inst->numIndex - 2)*3 : 0) + inst->numIndex);
-		uint32 n = h->primType == MTLPrimitiveTypeTriangleStrip ? stripToList(idx, inst->numIndex, &list[at]) :
-			listToList(idx, inst->numIndex, &list[at]);
-		list.resize(at + n);
+		appendMeshList((const uint16*)((const uint8*)h->indexBuffer + inst->offset), inst->numIndex,
+			h->primType == MTLPrimitiveTypeTriangleStrip, &list);
 	}
 	std::vector<float> normals((size_t)h->totalNumVertex*3);
 	deriveNormals(h->vertexBuffer, pos->stride, pos->offset, h->totalNumVertex, list.data(), (uint32)list.size(),

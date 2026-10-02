@@ -49,6 +49,17 @@ listToList(const uint16_t *l, uint32_t n, uint32_t *out)
 	return k;
 }
 
+uint32_t
+appendMeshList(const uint16_t *indices, uint32_t numIndices, bool strip, std::vector<uint32_t> *out)
+{
+	size_t at = out->size();
+	out->resize(at + (numIndices > 2 ? (numIndices - 2)*3 : 0) + numIndices);
+	uint32_t *dst = out->data() + at;
+	uint32_t n = strip ? stripToList(indices, numIndices, dst) : listToList(indices, numIndices, dst);
+	out->resize(at + n);
+	return n;
+}
+
 static void
 position(const uint8_t *v, uint32_t stride, uint32_t posOffset, uint32_t i, float p[3])
 {

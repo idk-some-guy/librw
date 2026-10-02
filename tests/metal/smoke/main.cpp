@@ -16,6 +16,7 @@
 #include "msaa_checks.h"
 #include "frame_checks.h"
 #include "modern_checks.h"
+#include "raytrace_checks.h"
 #include "late_pipelines.h"
 #ifdef LIBRW_COCOA
 #include <src/metal/metaldrawable.h>
@@ -5004,6 +5005,7 @@ main(void)
 	CheckSurfaceNotVisible();
 	failures += RunFrameChecks(ctx.camera);
 	failures += RunModernChecks(ctx.camera);
+	failures += RunRaytraceChecks(ctx.camera);
 	failures += RunWorldChecks(ctx.camera);
 	failures += RunSkinChecks(ctx.camera);
 	failures += RunMatFXChecks(ctx.camera);

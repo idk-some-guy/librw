@@ -6,6 +6,7 @@
 #include "metalstate.h"
 #include "metalkeys.h"
 #include "metalframe.h"
+#include "metalraytrace.h"
 #include "rwmetalshader.h"
 
 #import <Cocoa/Cocoa.h>
@@ -178,6 +179,7 @@ createContext(void)
 
 	metalGlobals.context = ctx;
 	frameInit();
+	rtInit();
 	return 1;
 }
 
@@ -1048,6 +1050,7 @@ stopDevice(void)
 	MetalContext *ctx = getContext();
 
 	finishGPUWork();
+	rtTerm();
 	@autoreleasepool {
 		if(ctx){
 			ctx->encoder = nil;

@@ -359,6 +359,22 @@ RenderSettings getRenderSettings(void);
 int32 getSupportedTier(void);
 FrameInfo getFrameInfo(void);
 
+struct RayStats
+{
+	uint32 bottomLevels;
+	float32 bottomMegabytes;
+	uint32 instances;
+	uint32 raysPerFrame;
+	float32 passMs;
+	uint32 builds;
+	uint32 refits;
+	uint32 budgetFull;
+	uint32 levelsSkipped;
+	uint32 levelsEmpty;
+	float32 scratchMegabytes;
+};
+RayStats getRayStats(void);
+
 enum { MAXGRADECONSTANTS = 16 };
 
 struct GradeParams
