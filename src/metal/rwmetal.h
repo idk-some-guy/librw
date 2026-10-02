@@ -70,6 +70,7 @@ enum AttribFormat
 	ATTRIBFMT_FLOAT4,
 	ATTRIBFMT_UCHAR4,
 	ATTRIBFMT_UCHAR4_NORM,
+	ATTRIBFMT_CHAR4_NORM,
 };
 
 struct AttribDesc
@@ -123,6 +124,8 @@ struct InstanceDataHeader : rw::InstanceDataHeader
 	uint32      vertexLayout;
 	void       *mtlIndexBuffer;
 	void       *mtlVertexBuffer;
+	void       *mtlNormalBuffer;
+	int32       normalSlot;
 
 	InstanceData *inst;
 };

@@ -4,6 +4,7 @@ namespace rw {
 namespace metal {
 
 struct Shader;
+struct InstanceDataHeader;
 
 #define MAXNUMSTAGES 8
 enum { MAXSKINBONES = 64 };
@@ -115,6 +116,11 @@ struct PipelineBlendInfo
 PipelineBlendInfo pipelineBlendInfo(uint64 key);
 void setDrawEmissiveScale(float32 s);
 void setDrawInstance(const void *inst);
+void setDrawHeader(InstanceDataHeader *header);
+void noteNormalStream(uint32 bytes);
+void queueNormalStream(InstanceDataHeader *header);
+void dropQueuedNormalStream(InstanceDataHeader *header);
+uint32 normalStreamsPending(void);
 bool prepassShadersReady(void);
 void beginPrepassState(bool continuous);
 struct PrepassMatrices

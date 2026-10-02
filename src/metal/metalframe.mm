@@ -1269,6 +1269,12 @@ frameCameraCut(void)
 }
 
 bool
+frameModernTier(void)
+{
+	return frame.activeTier == TIER_MODERN;
+}
+
+bool
 frameTemporalActive(void)
 {
 	return (frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS) && temporalConsumer();

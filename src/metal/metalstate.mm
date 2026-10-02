@@ -12,6 +12,7 @@
 #include "metalframe.h"
 #include "metalprepass.h"
 #include "metalprepasskeys.h"
+#include "metalnormals.h"
 
 #define PLUGIN_ID 0
 
@@ -223,8 +224,20 @@ struct VertexLayout
 	AttribDesc attribs[MAXATTRIBS];
 	int32 numAttribs;
 	MTLVertexDescriptor *desc;
+	bool derived;
 };
 static std::vector<VertexLayout> vertexLayouts;
+static std::unordered_map<uint32, uint32> derivedLayouts;
+static InstanceDataHeader *currentDrawHeader;
+enum { NORMAL_QUEUE = 4096 };
+static const double normalBudgetMs = 1.0;
+static double normalBudgetTest = -1.0;
+static InstanceDataHeader *normalQueue[NORMAL_QUEUE];
+static uint32 normalQueueHead, normalQueueUsed, normalPending;
+static double normalSpentMs;
+static bool normalUnlimited, normalCutPending;
+
+static void drainNormalQueue(void);
 
 struct PipelineEntry
 {
@@ -269,7 +282,7 @@ im2DLayout(uint32 layout)
 }
 static StateStats stats;
 
-Shader *prepassShader, *prepassSkinShader;
+Shader *prepassShader, *prepassSkinShader, *prepassFaceShader;
 static const void *currentDrawInst;
 static const void *currentObject;
 enum { PREPASS_KEYS = 8192 };
@@ -324,7 +337,7 @@ layoutHasAttrib(uint32 layout, uint32 index)
 bool
 prepassShadersReady(void)
 {
-	return prepassShader != nil && prepassSkinShader != nil;
+	return prepassShader != nil && prepassSkinShader != nil && prepassFaceShader != nil;
 }
 
 static void
@@ -345,6 +358,10 @@ beginPrepassState(bool continuous)
 		bonesPrev.reserve(PREV_PALETTES);
 		bonesCur.reserve(PREV_PALETTES);
 	}
+	normalSpentMs = 0.0;
+	normalUnlimited = normalCutPending;
+	normalCutPending = false;
+	drainNormalQueue();
 	prepassKeys.clear();
 	prepassFrame = true;
 	prepassFrameBound = false;
@@ -431,8 +448,15 @@ setDrawInstance(const void *inst)
 }
 
 void
+setDrawHeader(InstanceDataHeader *header)
+{
+	currentDrawHeader = header;
+}
+
+void
 cameraCut(void)
 {
+	normalCutPending = true;
 	haveLastViewProj = false;
 	frameCameraCut();
 }
@@ -674,7 +698,8 @@ static MTLVertexFormat attribFormatMap[] = {
 	MTLVertexFormatFloat3,
 	MTLVertexFormatFloat4,
 	MTLVertexFormatUChar4,
-	MTLVertexFormatUChar4Normalized
+	MTLVertexFormatUChar4Normalized,
+	MTLVertexFormatChar4Normalized
 };
 
 uint32
@@ -689,7 +714,7 @@ registerVertexLayout(const AttribDesc *attribs, int32 numAttribs)
 	if(vertexLayouts.empty())
 		vertexLayouts.push_back(VertexLayout());
 	for(i = 1; i < vertexLayouts.size(); i++)
-		if(vertexLayouts[i].numAttribs == numAttribs &&
+		if(!vertexLayouts[i].derived && vertexLayouts[i].numAttribs == numAttribs &&
 		   memcmp(vertexLayouts[i].attribs, attribs, numAttribs*sizeof(AttribDesc)) == 0)
 			return i;
 	if(vertexLayouts.size() >= (1<<PIPEKEY_LAYOUTBITS))
@@ -698,6 +723,7 @@ registerVertexLayout(const AttribDesc *attribs, int32 numAttribs)
 	memset(l.attribs, 0, sizeof(l.attribs));
 	memcpy(l.attribs, attribs, numAttribs*sizeof(AttribDesc));
 	l.numAttribs = numAttribs;
+	l.derived = false;
 	l.desc = [MTLVertexDescriptor vertexDescriptor];
 	for(j = 0; j < numAttribs; j++){
 		l.desc.attributes[attribs[j].index].format = attribFormatMap[attribs[j].format];
@@ -713,6 +739,143 @@ void
 setVertexLayout(uint32 layout)
 {
 	currentLayout = layout;
+}
+
+void
+setNormalBudgetForTest(float32 ms)
+{
+	normalBudgetTest = ms;
+}
+
+uint32
+normalStreamsPending(void)
+{
+	return normalPending;
+}
+
+static bool
+normalBudgetLeft(void)
+{
+	return normalUnlimited || normalSpentMs < (normalBudgetTest >= 0.0 ? normalBudgetTest : normalBudgetMs);
+}
+
+static uint32
+derivedNormalLayout(uint32 layout)
+{
+	auto it = derivedLayouts.find(layout);
+	if(it != derivedLayouts.end())
+		return it->second;
+	if(layout == 0 || layout >= vertexLayouts.size() || vertexLayouts[layout].numAttribs >= MAXATTRIBS ||
+	   vertexLayouts.size() >= (1<<PIPEKEY_LAYOUTBITS))
+		return 0;
+	VertexLayout l = vertexLayouts[layout];
+	MTLVertexDescriptor *vd = [l.desc copy];
+	vd.attributes[ATTRIB_NORMAL].format = MTLVertexFormatChar4Normalized;
+	vd.attributes[ATTRIB_NORMAL].offset = 0;
+	vd.attributes[ATTRIB_NORMAL].bufferIndex = BUFFER_NORMALSTREAM;
+	vd.layouts[BUFFER_NORMALSTREAM].stride = 4;
+	vd.layouts[BUFFER_NORMALSTREAM].stepFunction = MTLVertexStepFunctionPerVertex;
+	l.attribs[l.numAttribs].index = ATTRIB_NORMAL;
+	l.attribs[l.numAttribs].format = ATTRIBFMT_CHAR4_NORM;
+	l.attribs[l.numAttribs].stride = 4;
+	l.attribs[l.numAttribs].offset = 0;
+	l.numAttribs++;
+	l.desc = vd;
+	l.derived = true;
+	uint32 id = (uint32)vertexLayouts.size();
+	vertexLayouts.push_back(l);
+	derivedLayouts[layout] = id;
+	return id;
+}
+
+static bool
+wantsNormalStream(uint32 layout)
+{
+	return currentDrawHeader && layout == currentDrawHeader->vertexLayout && !layoutHasAttrib(layout, ATTRIB_NORMAL) &&
+		!layoutHasAttrib(layout, ATTRIB_WEIGHTS);
+}
+
+static const AttribDesc*
+normalStreamSource(const InstanceDataHeader *h)
+{
+	if(h->vertexBuffer == nil || h->attribDesc == nil || h->indexBuffer == nil || h->totalNumVertex == 0 ||
+	   layoutHasAttrib(h->vertexLayout, ATTRIB_NORMAL) || layoutHasAttrib(h->vertexLayout, ATTRIB_WEIGHTS))
+		return nil;
+	const AttribDesc *pos = nil;
+	for(int32 i = 0; i < h->numAttribs; i++)
+		if(h->attribDesc[i].index == ATTRIB_POS)
+			pos = &h->attribDesc[i];
+	return pos && pos->format == ATTRIBFMT_FLOAT3 ? pos : nil;
+}
+
+void
+queueNormalStream(InstanceDataHeader *h)
+{
+	if(h->mtlNormalBuffer || h->normalSlot >= 0 || normalQueueUsed == NORMAL_QUEUE || !frameModernTier() ||
+	   normalStreamSource(h) == nil)
+		return;
+	uint32 slot = (normalQueueHead + normalQueueUsed) % NORMAL_QUEUE;
+	normalQueue[slot] = h;
+	h->normalSlot = (int32)slot;
+	normalQueueUsed++;
+	normalPending++;
+}
+
+void
+dropQueuedNormalStream(InstanceDataHeader *h)
+{
+	if(h->normalSlot < 0)
+		return;
+	normalQueue[h->normalSlot] = nil;
+	h->normalSlot = -1;
+	normalPending--;
+}
+
+static id<MTLBuffer>
+ensureNormalStream(InstanceDataHeader *h)
+{
+	if(h->mtlNormalBuffer)
+		return (__bridge id<MTLBuffer>)h->mtlNormalBuffer;
+	const AttribDesc *pos = normalStreamSource(h);
+	if(pos == nil || !normalBudgetLeft())
+		return nil;
+	auto start = std::chrono::steady_clock::now();
+	dropQueuedNormalStream(h);
+	std::vector<uint32_t> list;
+	for(uint32 m = 0; m < h->numMeshes; m++){
+		const InstanceData *inst = &h->inst[m];
+		const uint16 *idx = (const uint16*)((const uint8*)h->indexBuffer + inst->offset);
+		size_t at = list.size();
+		list.resize(at + (inst->numIndex > 2 ? (inst->numIndex - 2)*3 : 0) + inst->numIndex);
+		uint32 n = h->primType == MTLPrimitiveTypeTriangleStrip ? stripToList(idx, inst->numIndex, &list[at]) :
+			listToList(idx, inst->numIndex, &list[at]);
+		list.resize(at + n);
+	}
+	std::vector<float> normals((size_t)h->totalNumVertex*3);
+	deriveNormals(h->vertexBuffer, pos->stride, pos->offset, h->totalNumVertex, list.data(), (uint32)list.size(),
+		normals.data());
+	std::vector<int8_t> packed((size_t)h->totalNumVertex*4);
+	packNormals(normals.data(), h->totalNumVertex, packed.data());
+	id<MTLBuffer> buf = [getContext()->device newBufferWithBytes:packed.data() length:packed.size()
+		options:MTLResourceStorageModeShared];
+	normalSpentMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	if(buf == nil)
+		return nil;
+	h->mtlNormalBuffer = (__bridge_retained void*)buf;
+	noteNormalStream((uint32)packed.size());
+	return buf;
+}
+
+static void
+drainNormalQueue(void)
+{
+	while(normalQueueUsed > 0 && normalBudgetLeft()){
+		InstanceDataHeader *h = normalQueue[normalQueueHead];
+		normalQueueHead = (normalQueueHead + 1) % NORMAL_QUEUE;
+		normalQueueUsed--;
+		if(h)
+			ensureNormalStream(h);
+	}
 }
 
 MTLVertexDescriptor*
@@ -1880,15 +2043,59 @@ bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
 	return true;
 }
 
+struct PrepassFaceBlock
+{
+	float32 cols[3][4];
+	uint32 stride;
+	uint32 posOffset;
+	uint32 firstIndex;
+	uint32 strip;
+	uint32 numVertices;
+	uint32 pad[3];
+};
+
+static void
+bindFaceFetch(id<MTLRenderCommandEncoder> e)
+{
+	const InstanceDataHeader *h = currentDrawHeader;
+	PrepassFaceBlock b = {};
+	for(int32 i = 0; i < h->numAttribs; i++)
+		if(h->attribDesc[i].index == ATTRIB_POS){
+			b.stride = h->attribDesc[i].stride;
+			b.posOffset = h->attribDesc[i].offset;
+		}
+	b.firstIndex = ((const InstanceData*)currentDrawInst)->offset/sizeof(uint16);
+	b.strip = h->primType == MTLPrimitiveTypeTriangleStrip;
+	b.numVertices = h->totalNumVertex;
+	float32 vw[16];
+	mul44(vw, uniformScene.view, (const float32*)&uniformObject.world);
+	for(int c = 0; c < 3; c++)
+		for(int r = 0; r < 3; r++)
+			b.cols[c][r] = vw[c*4 + r];
+	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlIndexBuffer offset:0 atIndex:BUFFER_FACEINDICES];
+	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlVertexBuffer offset:0 atIndex:BUFFER_FACEVERTICES];
+	[e setFragmentBytes:&b length:sizeof(b) atIndex:BUFFER_FACELAYOUT];
+}
+
 static bool32
 flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 {
 	bool skinned = layoutHasAttrib(currentLayout, ATTRIB_WEIGHTS);
 	Shader *sh = skinned ? prepassSkinShader : prepassShader;
+	uint32 layout = currentLayout;
+	id<MTLBuffer> stream = nil;
+	if(wantsNormalStream(currentLayout)){
+		uint32 derived = derivedNormalLayout(currentLayout);
+		if(derived && (stream = ensureNormalStream(currentDrawHeader))){
+			layout = derived;
+			sh = prepassFaceShader;
+		}else
+			queueNormalStream(currentDrawHeader);
+	}
 	PipelineDesc pd = {};
 	pd.shader = sh->shaderId;
 	pd.variant = 0;
-	pd.vertexLayout = currentLayout;
+	pd.vertexLayout = layout;
 	pd.blendEnable = false;
 	pd.writeMask = MTLColorWriteMaskAll;
 	pd.colorFormat = COLORFMT_PREPASS;
@@ -1917,6 +2124,10 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 	if(skinned && !bindPreviousBones(e, currentObject)){
 		countDroppedDraw(DROP_NORINGSPACE, currentShader);
 		return 0;
+	}
+	if(stream){
+		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
+		bindFaceFetch(e);
 	}
 	if(!encodeDraw(ctx, e, pipe, false))
 		return 0;
@@ -2232,6 +2443,11 @@ prewarmPrepassLayout(uint32 layout, uint32 samples)
 {
 	prewarm(layoutHasAttrib(layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader, layout, 0, BLEND_OFF, DEPTHFMT_D32S8,
 		samples, COLORFMT_PREPASS);
+	if(!layoutHasAttrib(layout, ATTRIB_NORMAL) && !layoutHasAttrib(layout, ATTRIB_WEIGHTS)){
+		uint32 derived = derivedNormalLayout(layout);
+		if(derived)
+			prewarm(prepassFaceShader, derived, 0, BLEND_OFF, DEPTHFMT_D32S8, samples, COLORFMT_PREPASS);
+	}
 }
 
 static void
@@ -2263,8 +2479,10 @@ hostPrewarmPrepass(const HostPrewarmRecord &r)
 
 	if(r.blend || !r.depth || im2DLayout(r.layout) || !prepassShadersReady())
 		return 1;
+	bool skinned = layoutHasAttrib(r.layout, ATTRIB_WEIGHTS);
+	uint32 derived = skinned || layoutHasAttrib(r.layout, ATTRIB_NORMAL) ? 0 : derivedNormalLayout(r.layout);
 	for(i = 0; i < n; i++){
-		Shader *sh = layoutHasAttrib(r.layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader;
+		Shader *sh = skinned ? prepassSkinShader : prepassShader;
 		PipelineDesc d = {};
 		d.shader = sh->shaderId;
 		d.vertexLayout = r.layout;
@@ -2274,6 +2492,12 @@ hostPrewarmPrepass(const HostPrewarmRecord &r)
 		d.sampleCount = counts[i];
 		if(getPipeline(sh, d, pipelineKey(d)) == nil)
 			ok = 0;
+		if(derived){
+			d.shader = prepassFaceShader->shaderId;
+			d.vertexLayout = derived;
+			if(getPipeline(prepassFaceShader, d, pipelineKey(d)) == nil)
+				ok = 0;
+		}
 	}
 	return ok;
 }
@@ -2440,8 +2664,9 @@ openPrepass(void)
 	@autoreleasepool {
 		prepassShader = Shader::create(ppSrc, "prepassVS", "prepassFS", 0);
 		prepassSkinShader = Shader::create(ppSkinSrc, "prepassSkinVS", "prepassFS", 0);
+		prepassFaceShader = Shader::create(ppSrc, "prepassVS", "prepassFaceFS", 0);
 	}
-	if(prepassShader == nil || prepassSkinShader == nil)
+	if(!prepassShadersReady())
 		fprintf(stderr, "rw::metal: prepass shaders failed to build; modern frames draw without the prepass\n");
 }
 
@@ -2509,6 +2734,9 @@ termState(void)
 	if(prepassSkinShader)
 		prepassSkinShader->destroy();
 	prepassSkinShader = nil;
+	if(prepassFaceShader)
+		prepassFaceShader->destroy();
+	prepassFaceShader = nil;
 	prepassKeys = PrepassKeySet();
 	prepassFrame = false;
 	forceEqualNext = false;
@@ -2695,7 +2923,7 @@ logStats(void)
 		"late pipelines %u host pipelines %u skinned unrouted %u strip restarts %u staged uploads %u direct uploads %u "
 		"mipmap blits %u gpu waits %u block mismatches %u dropped draws %u passes/frame %.1f copies/frame %.1f "
 		"custom uploads/frame %.1f material uploads/frame %.1f frames without drawable %u drawable wait max %.1f ms "
-		"host prewarm %.1f ms samples %u%s\n",
+		"host prewarm %.1f ms samples %u%s normals built %u pending %u live %u bytes %u\n",
 		frames - statsLog.framesAtStart,
 		interval ? (double)(stats.draws - statsLog.draws)/interval : 0.0,
 		(peak + 1023)/1024, stats.ringGrows, stats.pipelinesLate, stats.pipelinesHost, stats.skinnedUnrouted,
@@ -2709,7 +2937,8 @@ logStats(void)
 		interval ? (double)(stats.blockUploads[BUFFER_MATERIAL] - statsLog.materialUploads)/interval : 0.0,
 		interval - (f.drawablesAcquired - statsLog.drawablesAcquired),
 		f.drawableWaitMaxUs/1000.0, stats.hostPrewarmUs/1000.0,
-		metalGlobals.numSamples ? metalGlobals.numSamples : 1, frameStatsTail());
+		metalGlobals.numSamples ? metalGlobals.numSamples : 1, frameStatsTail(),
+		in.normalStreams - statsLog.instance.normalStreams, in.normalPending, in.normalLive, in.normalBytes);
 	resetDrawableWaitMax();
 	fprintf(stderr, "%s", statsLine);
 	statsLog.time = std::chrono::steady_clock::now();

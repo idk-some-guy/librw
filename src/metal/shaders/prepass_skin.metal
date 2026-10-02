@@ -1,7 +1,7 @@
 struct PrepassSkinIn
 {
 	float3 pos [[attribute(ATTRIB_POS)]];
-	float3 normal [[attribute(ATTRIB_NORMAL)]];
+	float4 normal [[attribute(ATTRIB_NORMAL)]];
 	float4 weights [[attribute(ATTRIB_WEIGHTS)]];
 	uchar4 indices [[attribute(ATTRIB_INDICES)]];
 };
@@ -23,12 +23,13 @@ prepassSkinVS(PrepassSkinIn in [[stage_in]],
 		uint b = min(uint(in.indices[i]), uint(MAX_BONES-1));
 		float4x4 bone = skin.bones[b];
 		SkinVertex += (bone * float4(in.pos, 1.0)).xyz * in.weights[i];
-		SkinNormal += (bone * float4(in.normal, 0.0)).xyz * in.weights[i];
+		SkinNormal += (bone * float4(in.normal.xyz, 0.0)).xyz * in.weights[i];
 		PrevVertex += (prevSkin.bones[b] * float4(in.pos, 1.0)).xyz * in.weights[i];
 	}
 	float4 V = object.world * float4(SkinVertex, 1.0);
 	out.position = scene.proj * scene.view * V;
 	out.viewNormal = (scene.view * float4((object.world * float4(SkinNormal, 0.0)).xyz, 0.0)).xyz;
+	out.valid = in.normal.w;
 	out.viewPos = (scene.view * V).xyz;
 	out.curClip = pf.viewProj * V;
 	out.prevClip = pf.prevViewProj * (po.prevWorld * float4(PrevVertex, 1.0));

@@ -70,8 +70,13 @@ RasterStats getRasterStats(void);
 struct InstanceStats
 {
 	uint32 stripRestartMeshes;
+	uint32 normalStreams;
+	uint32 normalPending;
+	uint32 normalLive;
+	uint32 normalBytes;
 };
 InstanceStats getInstanceStats(void);
+void setNormalBudgetForTest(float32 ms);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);

@@ -50,7 +50,17 @@ static InstanceStats instanceStats;
 InstanceStats
 getInstanceStats(void)
 {
-	return instanceStats;
+	InstanceStats s = instanceStats;
+	s.normalPending = normalStreamsPending();
+	return s;
+}
+
+void
+noteNormalStream(uint32 bytes)
+{
+	instanceStats.normalStreams++;
+	instanceStats.normalLive++;
+	instanceStats.normalBytes += bytes;
 }
 
 static void
@@ -60,6 +70,16 @@ releaseBuffer(void **buffer)
 		CFBridgingRelease(*buffer);
 		*buffer = nil;
 	}
+}
+
+static void
+releaseNormalStream(InstanceDataHeader *header)
+{
+	if(header->mtlNormalBuffer == nil)
+		return;
+	instanceStats.normalLive--;
+	instanceStats.normalBytes -= (uint32)[(__bridge id<MTLBuffer>)header->mtlNormalBuffer length];
+	releaseBuffer(&header->mtlNormalBuffer);
 }
 
 static void*
@@ -82,6 +102,8 @@ freeInstanceData(Geometry *geometry)
 	geometry->instData = nil;
 	releaseBuffer(&header->mtlIndexBuffer);
 	releaseBuffer(&header->mtlVertexBuffer);
+	dropQueuedNormalStream(header);
+	releaseNormalStream(header);
 	rwFree(header->indexBuffer);
 	rwFree(header->vertexBuffer);
 	rwFree(header->attribDesc);
@@ -143,6 +165,8 @@ instanceMesh(Geometry *geo)
 	header->attribDesc = nil;
 	header->vertexLayout = 0;
 	header->mtlVertexBuffer = nil;
+	header->mtlNormalBuffer = nil;
+	header->normalSlot = -1;
 	header->mtlIndexBuffer = newBuffer(header->indexBuffer, indexBytes);
 
 	return header;
@@ -166,8 +190,11 @@ instance(rw::ObjPipeline *rwpipe, Atomic *atomic)
 	if(geo->instData == nil){
 		geo->instData = instanceMesh(geo);
 		pipe->instanceCB(geo, (InstanceDataHeader*)geo->instData, 0);
-	}else if(geo->lockedSinceInst)
+		queueNormalStream((InstanceDataHeader*)geo->instData);
+	}else if(geo->lockedSinceInst){
 		pipe->instanceCB(geo, (InstanceDataHeader*)geo->instData, 1);
+		queueNormalStream((InstanceDataHeader*)geo->instData);
+	}
 
 	geo->lockedSinceInst = 0;
 }
@@ -202,7 +229,9 @@ drawIndexed(InstanceDataHeader *header, InstanceData *inst)
 		if(!beginDraw())
 			return 0;
 		setDrawInstance(inst);
+		setDrawHeader(header);
 		bool32 ok = flushCache();
+		setDrawHeader(nil);
 		setDrawInstance(nil);
 		if(!ok)
 			return 0;
@@ -306,6 +335,7 @@ uploadInstanceVertices(InstanceDataHeader *header)
 	void *old = header->mtlVertexBuffer;
 	header->mtlVertexBuffer = newBuffer(header->vertexBuffer, header->totalNumVertex*header->attribDesc[0].stride);
 	releaseBuffer(&old);
+	releaseNormalStream(header);
 }
 
 void

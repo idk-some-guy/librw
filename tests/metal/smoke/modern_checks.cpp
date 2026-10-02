@@ -2534,6 +2534,476 @@ FringeEdgeSwing(Atomic *back, Atomic *front, bool fringe, int *jittered)
 	return swing;
 }
 
+static const RGBA GREY = { 128, 128, 128, 255 };
+
+static Geometry*
+MeshGeometry(const float (*p)[3], int numVerts, const uint16 (*t)[3], int numTris, bool strips)
+{
+	Geometry *geo = Geometry::create(numVerts, numTris, Geometry::POSITIONS | Geometry::PRELIT |
+		(strips ? Geometry::TRISTRIP : 0));
+	V3d *v = geo->morphTargets[0].vertices;
+	for(int i = 0; i < numVerts; i++){
+		v[i].set(p[i][0], p[i][1], p[i][2]);
+		geo->colors[i] = GREY;
+	}
+	Material *mat = Material::create();
+	geo->matList.appendMaterial(mat);
+	mat->destroy();
+	for(int i = 0; i < numTris; i++){
+		geo->triangles[i].v[0] = t[i][0];
+		geo->triangles[i].v[1] = t[i][1];
+		geo->triangles[i].v[2] = t[i][2];
+		geo->triangles[i].matId = 0;
+	}
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static Geometry*
+RidgeGeometry(void)
+{
+	static const float p[6][3] = { { -1, -1, 10 }, { -1, 1, 10 }, { 0, -1, 9 }, { 0, 1, 9 }, { 1, -1, 10 }, { 1, 1, 10 } };
+	static const uint16 t[4][3] = { { 0, 1, 3 }, { 0, 3, 2 }, { 2, 3, 5 }, { 2, 5, 4 } };
+	return MeshGeometry(p, 6, t, 4, false);
+}
+
+static Geometry*
+BoxGeometry(float cx, float cy, float cz)
+{
+	float p[8][3];
+	for(int i = 0; i < 8; i++){
+		p[i][0] = cx + (i & 1 ? 1.0f : -1.0f);
+		p[i][1] = cy + (i & 2 ? 1.0f : -1.0f);
+		p[i][2] = cz + (i & 4 ? 1.0f : -1.0f);
+	}
+	static const uint16 t[12][3] = {
+		{ 0, 2, 3 }, { 0, 3, 1 }, { 4, 5, 7 }, { 4, 7, 6 }, { 0, 4, 6 }, { 0, 6, 2 },
+		{ 1, 3, 7 }, { 1, 7, 5 }, { 0, 1, 5 }, { 0, 5, 4 }, { 2, 6, 7 }, { 2, 7, 3 } };
+	return MeshGeometry(p, 8, t, 12, false);
+}
+
+static Geometry*
+CylinderGeometry(float r, float cz, bool cap)
+{
+	enum { SIDES = 8, COLS = SIDES + 1 };
+	float p[2*COLS + 1][3];
+	for(int ring = 0; ring < 2; ring++)
+		for(int j = 0; j < COLS; j++){
+			float a = 2.0f*3.14159265f*(j % SIDES)/SIDES;
+			p[ring*COLS + j][0] = r*sinf(a);
+			p[ring*COLS + j][1] = ring ? r : -r;
+			p[ring*COLS + j][2] = cz - r*cosf(a);
+		}
+	p[2*COLS][0] = 0.0f;
+	p[2*COLS][1] = r;
+	p[2*COLS][2] = cz;
+	uint16 t[3*SIDES][3];
+	for(int j = 0; j < SIDES; j++){
+		t[2*j][0] = j; t[2*j][1] = COLS + j + 1; t[2*j][2] = j + 1;
+		t[2*j+1][0] = j; t[2*j+1][1] = COLS + j; t[2*j+1][2] = COLS + j + 1;
+		t[2*SIDES + j][0] = 2*COLS; t[2*SIDES + j][1] = COLS + j + 1; t[2*SIDES + j][2] = COLS + j;
+	}
+	return MeshGeometry(p, cap ? 2*COLS + 1 : 2*COLS, t, cap ? 3*SIDES : 2*SIDES, true);
+}
+
+static void
+DerivedFrame(Atomic *a)
+{
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		SetRenderState(VERTEXALPHA, 0);
+		a->render();
+		metal::endPrepass();
+	}
+	a->render();
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static bool
+ReadNormal(float x, float y, float z, float n[3])
+{
+	float m[2], d;
+	return metal::readPrepassForTest(PX(x, z), PY(y, z), n, m, &d);
+}
+
+static bool
+NearNormal(const float *n, float x, float y, float z, float tol)
+{
+	return fabsf(n[0] - x) < tol && fabsf(n[1] - y) < tol && fabsf(n[2] - z) < tol;
+}
+
+static bool
+CheckDerivedBox(void)
+{
+	const char *name = "a box with shared corners reads its face normal in the prepass everywhere, corners included";
+	Geometry *geo = BoxGeometry(2.5f, 0.0f, 10.0f);
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::StateStats before = metal::getStateStats();
+	DerivedFrame(a);
+	metal::StateStats after = metal::getStateStats();
+	int bad = 0, read = 0;
+	float worst[3] = { 0, 0, 0 }, at[3] = { 0, 0, 0 };
+	for(int i = 0; i < 5; i++)
+		for(int j = 0; j < 5; j++){
+			float n[3];
+			float x = 1.55f + 1.9f*i/4, y = -0.95f + 1.9f*j/4;
+			if(!ReadNormal(x, y, 9.0f, n))
+				continue;
+			read++;
+			if(!NearNormal(n, 0.0f, 0.0f, -1.0f, 0.02f)){
+				bad++;
+				memcpy(worst, n, sizeof(worst));
+				at[0] = x; at[1] = y; at[2] = 9.0f;
+			}
+		}
+	for(int i = 0; i < 3; i++)
+		for(int j = 0; j < 3; j++){
+			float n[3];
+			float z = 9.1f + 1.8f*i/2, y = -0.9f + 1.8f*j/2;
+			if(!ReadNormal(1.5f, y, z, n))
+				continue;
+			read++;
+			if(!NearNormal(n, -1.0f, 0.0f, 0.0f, 0.02f) && !NearNormal(n, 1.0f, 0.0f, 0.0f, 0.02f)){
+				bad++;
+				memcpy(worst, n, sizeof(worst));
+				at[0] = 1.5f; at[1] = y; at[2] = z;
+			}
+		}
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	uint32 draws = after.prepassDraws - before.prepassDraws, equal = after.prepassEqual - before.prepassEqual;
+	bool ok = read == 34 && bad == 0 && draws == 1 && equal == draws;
+	if(!ok)
+		Detail("  %d of %d samples off the face normal, e.g. %.3f,%.3f,%.3f at %.2f,%.2f,%.2f; prepass %u equal %u\n", bad, read,
+			worst[0], worst[1], worst[2], at[0], at[1], at[2], draws, equal);
+	return Report(ok, name);
+}
+
+static bool
+CheckDerivedCrease(void)
+{
+	const char *name = "both pixels beside a crease edge shared by two triangles read their own face normal";
+	Geometry *geo = BoxGeometry(2.5f, 0.0f, 10.0f);
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	int bad = 0, read = 0, at = -1;
+	float worst[3] = { 0, 0, 0 };
+	int front = PX(1.5f, 9.0f);
+	for(int y = PY(0.9f, 9.0f); y <= PY(-0.9f, 9.0f); y++)
+		for(int side = 0; side < 2; side++){
+			float n[3], m[2], d;
+			if(!metal::readPrepassForTest(front + side, y, n, m, &d))
+				continue;
+			read++;
+			if(side ? !NearNormal(n, 1.0f, 0.0f, 0.0f, 0.02f) : !NearNormal(n, 0.0f, 0.0f, -1.0f, 0.02f)){
+				bad++;
+				memcpy(worst, n, sizeof(worst));
+				at = y*1000 + front + side;
+			}
+		}
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	bool ok = read > 100 && bad == 0;
+	if(!ok)
+		Detail("  %d of %d pixels off their face normal, e.g. %.3f,%.3f,%.3f at %d,%d\n", bad, read, worst[0], worst[1], worst[2],
+			at % 1000, at / 1000);
+	return Report(ok, name);
+}
+
+static bool
+CheckSmoothInterpolated(void)
+{
+	const char *name = "a quad with valid vertex normals reads the normalised interpolated normal, no face normal mixed in";
+	Geometry *geo = Geometry::create(4, 2, Geometry::POSITIONS | Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED);
+	float s = sinf(30.0f*3.14159265f/180.0f), c = cosf(30.0f*3.14159265f/180.0f);
+	for(int i = 0; i < 4; i++){
+		float x = i & 1 ? 1.0f : -1.0f;
+		geo->morphTargets[0].vertices[i].set(x, i & 2 ? 1.0f : -1.0f, 10.0f);
+		geo->morphTargets[0].normals[i].set(x*s, 0.0f, -c);
+		geo->colors[i] = GREY;
+	}
+	Material *mat = Material::create();
+	geo->matList.appendMaterial(mat);
+	mat->destroy();
+	static const uint16 t[2][3] = { { 0, 2, 3 }, { 0, 3, 1 } };
+	for(int i = 0; i < 2; i++){
+		for(int k = 0; k < 3; k++)
+			geo->triangles[i].v[k] = t[i][k];
+		geo->triangles[i].matId = 0;
+	}
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	float n[3] = {};
+	bool read = ReadNormal(-0.5f, 0.0f, 10.0f, n);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	float at = 0.5f*(1.0f + 10.0f*(1.0f - (PX(-0.5f, 10.0f) + 0.5f)/320.0f));
+	float ix = (1.0f - 2.0f*at)*s, iz = c, il = sqrtf(ix*ix + iz*iz);
+	bool ok = read && fabsf(fabsf(n[0]) - ix/il) < 0.005f && fabsf(fabsf(n[2]) - iz/il) < 0.005f;
+	if(!ok)
+		Detail("  read %.4f,%.4f,%.4f; the interpolated normal is |x| %.4f |z| %.4f\n", n[0], n[1], n[2], ix/il, iz/il);
+	return Report(ok, name);
+}
+
+static bool
+CheckDerivedCylinder(const char *name, float scale)
+{
+	Geometry *geo = CylinderGeometry(1.5f/scale, 10.0f/scale, false);
+	Atomic *a = MakeAtomic(geo);
+	V3d s = { scale, scale, scale };
+	a->getFrame()->scale(&s, COMBINEREPLACE);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	float l[3] = {}, r[3] = {}, m[2], d;
+	bool read = metal::readPrepassForTest(317, 240, l, m, &d) && metal::readPrepassForTest(323, 240, r, m, &d);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	bool ok = read && fabsf(l[0] - r[0]) < 0.15f && l[2] < -0.9f && r[2] < -0.9f;
+	if(!ok)
+		Detail("  left of the seam %.3f,%.3f,%.3f right %.3f,%.3f,%.3f (flat facets would differ by 0.77 in x)\n", l[0], l[1], l[2],
+			r[0], r[1], r[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDerivedRim(void)
+{
+	const char *name = "a cylinder whose rim is shared with its cap shades its side toward the flat facet at the rim";
+	Geometry *geo = CylinderGeometry(1.5f, 10.0f, true);
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	float s = sinf(10.0f*3.14159265f/180.0f), c = cosf(10.0f*3.14159265f/180.0f);
+	float top[3] = {}, low[3] = {};
+	bool read = ReadNormal(1.5f*s, 1.45f, 10.0f - 1.5f*c, top) && ReadNormal(1.5f*s, -1.2f, 10.0f - 1.5f*c, low);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	float facet = sinf(22.5f*3.14159265f/180.0f);
+	bool ok = read && fabsf(fabsf(top[0]) - facet) < 0.03f && fabsf(fabsf(low[0]) - facet) > 0.1f;
+	if(!ok)
+		Detail("  by the rim %.3f,%.3f,%.3f lower down %.3f,%.3f,%.3f (the facet is |x| %.3f)\n", top[0], top[1], top[2],
+			low[0], low[1], low[2], facet);
+	return Report(ok, name);
+}
+
+static bool
+CheckDerivedRidge(void)
+{
+	const char *name = "a ridge between two slopes keeps both slope normals up to the ridge in the prepass";
+	Geometry *geo = RidgeGeometry();
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	float half[3] = {}, l[3] = {}, r[3] = {};
+	bool read = ReadNormal(-0.5f, 0.0f, 9.5f, half) && ReadNormal(-0.05f, 0.0f, 9.05f, l) && ReadNormal(0.05f, 0.0f, 9.05f, r);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	bool ok = read && NearNormal(l, half[0], half[1], half[2], 0.02f) && fabsf(l[0]) > 0.69f && l[2] < -0.69f &&
+		NearNormal(r, -l[0], l[1], l[2], 0.02f);
+	if(!ok)
+		Detail("  halfway %.3f,%.3f,%.3f by the ridge %.3f,%.3f,%.3f and %.3f,%.3f,%.3f (slopes are |x| 0.707)\n", half[0], half[1],
+			half[2], l[0], l[1], l[2], r[0], r[1], r[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckNormalStreamModernOnly(void)
+{
+	const char *name = "classic and enhanced frames never build the derived normal stream; the first modern prepass builds it once";
+	Geometry *geo = RidgeGeometry();
+	Atomic *a = MakeAtomic(geo);
+	uint32 start = metal::getInstanceStats().normalStreams;
+	EnhancedOn();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	a->render();
+	metal::endScene(nil);
+	WorldEnd();
+	SetSettings(metal::TIER_CLASSIC, metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	WorldBegin(SKY);
+	a->render();
+	WorldEnd();
+	uint32 afterOld = metal::getInstanceStats().normalStreams;
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	DerivedFrame(a);
+	uint32 afterModern = metal::getInstanceStats().normalStreams;
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	bool ok = afterOld == start && afterModern == start + 1;
+	if(!ok)
+		Detail("  streams %u -> %u (classic and enhanced) -> %u (two modern frames)\n", start, afterOld, afterModern);
+	return Report(ok, name);
+}
+
+static bool
+CheckNormalStreamRebuilt(void)
+{
+	const char *name = "a vertex change drops the derived normal stream and the next modern prepass rebuilds it from the new positions";
+	Geometry *geo = RidgeGeometry();
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DerivedFrame(a);
+	uint32 built = metal::getInstanceStats().normalStreams;
+	geo->lock(Geometry::LOCKVERTICES);
+	geo->morphTargets[0].vertices[2].z = 10.0f;
+	geo->morphTargets[0].vertices[3].z = 10.0f;
+	geo->unlock();
+	DerivedFrame(a);
+	uint32 rebuilt = metal::getInstanceStats().normalStreams;
+	float n[3] = {};
+	bool read = ReadNormal(-0.5f, 0.0f, 10.0f, n);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+	bool ok = read && rebuilt == built + 1 && NearNormal(n, 0.0f, 0.0f, -1.0f, 0.02f);
+	if(!ok)
+		Detail("  streams %u -> %u; normal after the change %.3f,%.3f,%.3f\n", built, rebuilt, n[0], n[1], n[2]);
+	return Report(ok, name);
+}
+
+static bool
+SeamReads(float l[3], float r[3])
+{
+	float m[2], d;
+	return metal::readPrepassForTest(317, 240, l, m, &d) && metal::readPrepassForTest(323, 240, r, m, &d);
+}
+
+static void
+CheckNormalBudget(void)
+{
+	const char *flat = "with the derivation budget at zero an instance without a stream draws flat and builds nothing";
+	const char *later = "restoring the budget builds the waiting stream in the next modern frame, which then reads smooth";
+	Geometry *geo = CylinderGeometry(1.5f, 10.0f, false);
+	Atomic *a = MakeAtomic(geo);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setNormalBudgetForTest(0.0f);
+	metal::InstanceStats s0 = metal::getInstanceStats();
+	metal::StateStats p0 = metal::getStateStats();
+	DerivedFrame(a);
+	metal::InstanceStats s1 = metal::getInstanceStats();
+	metal::StateStats p1 = metal::getStateStats();
+	float l[3] = {}, r[3] = {};
+	bool read = SeamReads(l, r);
+	float facet = sinf(22.5f*3.14159265f/180.0f);
+	uint32 draws = p1.prepassDraws - p0.prepassDraws, equal = p1.prepassEqual - p0.prepassEqual;
+	bool ok = read && s1.normalStreams == s0.normalStreams && s1.normalPending == s0.normalPending + 1 &&
+		fabsf(fabsf(l[0]) - facet) < 0.02f && fabsf(fabsf(r[0]) - facet) < 0.02f && l[0]*r[0] < 0.0f && draws == 1 && equal == 1;
+	if(!ok)
+		Detail("  built %u -> %u pending %u -> %u; seam %.3f,%.3f,%.3f | %.3f,%.3f,%.3f (facets |x| %.3f); prepass %u equal %u\n",
+			s0.normalStreams, s1.normalStreams, s0.normalPending, s1.normalPending, l[0], l[1], l[2], r[0], r[1], r[2], facet,
+			draws, equal);
+	Report(ok, flat);
+	metal::setNormalBudgetForTest(-1.0f);
+	DerivedFrame(a);
+	metal::InstanceStats s2 = metal::getInstanceStats();
+	read = SeamReads(l, r);
+	ok = read && s2.normalStreams == s1.normalStreams + 1 && s2.normalPending == s0.normalPending &&
+		fabsf(l[0] - r[0]) < 0.15f && l[2] < -0.9f && r[2] < -0.9f;
+	if(!ok)
+		Detail("  built %u -> %u pending %u; seam %.3f,%.3f,%.3f | %.3f,%.3f,%.3f\n", s1.normalStreams, s2.normalStreams,
+			s2.normalPending, l[0], l[1], l[2], r[0], r[1], r[2]);
+	Report(ok, later);
+	TiersOff();
+	DestroyAtomic(a);
+	geo->destroy();
+}
+
+static bool
+CheckNormalBudgetCut(void)
+{
+	const char *name = "a reported camera cut builds every waiting stream in that frame, whatever the budget";
+	Geometry *geos[3] = { RidgeGeometry(), BoxGeometry(2.5f, 0.0f, 10.0f), CylinderGeometry(1.5f, 10.0f, true) };
+	Atomic *as[3];
+	for(int i = 0; i < 3; i++)
+		as[i] = MakeAtomic(geos[i]);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setNormalBudgetForTest(0.0f);
+	metal::InstanceStats s0 = metal::getInstanceStats();
+	for(int i = 0; i < 3; i++)
+		DerivedFrame(as[i]);
+	metal::InstanceStats s1 = metal::getInstanceStats();
+	metal::cameraCut();
+	DerivedFrame(as[0]);
+	metal::InstanceStats s2 = metal::getInstanceStats();
+	DerivedFrame(as[1]);
+	metal::InstanceStats s3 = metal::getInstanceStats();
+	metal::setNormalBudgetForTest(-1.0f);
+	TiersOff();
+	for(int i = 0; i < 3; i++){
+		DestroyAtomic(as[i]);
+		geos[i]->destroy();
+	}
+	bool ok = s1.normalStreams == s0.normalStreams && s1.normalPending == s0.normalPending + 3 &&
+		s2.normalStreams == s0.normalStreams + 3 && s2.normalPending == s0.normalPending && s3.normalStreams == s2.normalStreams;
+	if(!ok)
+		Detail("  built %u -> %u -> %u (cut) -> %u; pending %u -> %u -> %u\n", s0.normalStreams, s1.normalStreams, s2.normalStreams,
+			s3.normalStreams, s0.normalPending, s1.normalPending, s2.normalPending);
+	return Report(ok, name);
+}
+
+static bool
+CheckNormalQueueFree(void)
+{
+	const char *name = "a waiting instance freed before its build leaves the queue, and a built stream leaves the live count with its instance";
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setNormalBudgetForTest(0.0f);
+	Geometry *geo = RidgeGeometry();
+	Atomic *a = MakeAtomic(geo);
+	metal::InstanceStats s0 = metal::getInstanceStats();
+	DerivedFrame(a);
+	metal::InstanceStats s1 = metal::getInstanceStats();
+	DestroyAtomic(a);
+	geo->destroy();
+	metal::InstanceStats s2 = metal::getInstanceStats();
+	metal::setNormalBudgetForTest(-1.0f);
+	geo = RidgeGeometry();
+	a = MakeAtomic(geo);
+	DerivedFrame(a);
+	metal::InstanceStats s3 = metal::getInstanceStats();
+	DestroyAtomic(a);
+	geo->destroy();
+	metal::InstanceStats s4 = metal::getInstanceStats();
+	TiersOff();
+	bool ok = s1.normalPending == s0.normalPending + 1 && s2.normalPending == s0.normalPending &&
+		s3.normalLive == s0.normalLive + 1 && s3.normalBytes == s0.normalBytes + 6*4 &&
+		s4.normalLive == s0.normalLive && s4.normalBytes == s0.normalBytes;
+	if(!ok)
+		Detail("  pending %u -> %u -> %u (freed); live %u -> %u -> %u, bytes %u -> %u -> %u\n", s0.normalPending, s1.normalPending,
+			s2.normalPending, s0.normalLive, s3.normalLive, s4.normalLive, s0.normalBytes, s3.normalBytes, s4.normalBytes);
+	return Report(ok, name);
+}
+
+static bool
+CheckNormalStatsLine(void)
+{
+	const char *name = "the stats line shows normal stream builds, the waiting queue, live streams and their bytes";
+	metal::InstanceStats s = metal::getInstanceStats();
+	metal::logStats();
+	const char *tail = strstr(metal::getStatsLine(), " normals built ");
+	unsigned built = 0, pending = 0, live = 0, bytes = 0;
+	bool ok = tail && sscanf(tail, " normals built %u pending %u live %u bytes %u", &built, &pending, &live, &bytes) == 4 &&
+		pending == s.normalPending && live == s.normalLive && bytes == s.normalBytes;
+	if(!ok)
+		Detail("  got \"%s\"; pending %u live %u bytes %u\n", metal::getStatsLine(), s.normalPending, s.normalLive, s.normalBytes);
+	return Report(ok, name);
+}
+
 static bool
 CheckTaaFaintReactive(void)
 {
@@ -2623,6 +3093,19 @@ RunModernChecks(Camera *camera)
 	CheckTaaOffscreen();
 	CheckTaaHighlight();
 	CheckTaaFaintReactive();
+	CheckDerivedBox();
+	CheckDerivedCrease();
+	CheckSmoothInterpolated();
+	CheckDerivedCylinder("a cylinder split at a seam reads a continuous normal across the seam in the prepass", 1.0f);
+	CheckDerivedCylinder("a cylinder drawn at half scale still reads a continuous normal across its seam", 0.5f);
+	CheckDerivedRim();
+	CheckDerivedRidge();
+	CheckNormalStreamModernOnly();
+	CheckNormalStreamRebuilt();
+	CheckNormalBudget();
+	CheckNormalBudgetCut();
+	CheckNormalQueueFree();
+	CheckNormalStatsLine();
 	WorldClose();
 	return failures;
 }

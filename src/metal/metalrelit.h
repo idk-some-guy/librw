@@ -4,15 +4,19 @@
 #ifdef __METAL_VERSION__
 #define RL_MIN fmin
 #define RL_MAX fmax
+#define RL_SQRT sqrt
 #else
 #include <math.h>
 #define RL_MIN fminf
 #define RL_MAX fmaxf
+#define RL_SQRT sqrtf
 #endif
 
 struct RLColor { float r, g, b; };
+struct RLVec3 { float x, y, z; };
 struct RLSplit { float full, sun; };
 
+// Shader fast math folds this NaN test away (fmax(NaN, 0) is 0, fully live): clamp the weight on the CPU.
 static inline float
 relitClampWeight(float w)
 {
@@ -62,6 +66,37 @@ static inline float
 relitShadowed(float full, float sunPart, float shadow)
 {
 	return full - (1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f))*sunPart;
+}
+
+static inline RLVec3
+relitFillNormal(RLVec3 n, float valid, RLVec3 g, RLVec3 fallback)
+{
+	float gg = g.x*g.x + g.y*g.y + g.z*g.z;
+	if(gg < 1e-30f)
+		g = fallback;
+	else{
+		float gl = RL_SQRT(gg);
+		g.x /= gl;
+		g.y /= gl;
+		g.z /= gl;
+	}
+	if(n.x*g.x + n.y*g.y + n.z*g.z < 0.0f){
+		n.x = -n.x;
+		n.y = -n.y;
+		n.z = -n.z;
+	}
+	float v = RL_MIN(RL_MAX(valid, 0.0f), 1.0f);
+	float nn = n.x*n.x + n.y*n.y + n.z*n.z;
+	float d = nn > 1e-30f ? v/RL_SQRT(nn) : 0.0f;
+	RLVec3 r = { n.x*d + g.x*(1.0f - v), n.y*d + g.y*(1.0f - v), n.z*d + g.z*(1.0f - v) };
+	float rr = r.x*r.x + r.y*r.y + r.z*r.z;
+	if(rr < 1e-12f)
+		return g;
+	float rl = RL_SQRT(rr);
+	r.x /= rl;
+	r.y /= rl;
+	r.z /= rl;
+	return r;
 }
 
 #endif

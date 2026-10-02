@@ -71,6 +71,7 @@ void frameAddReactive(const ReactiveDraw &r);
 void frameJitterProjection(Camera *cam, float32 *proj);
 bool frameJitterIm2D(Camera *cam, float32 *nx, float32 *ny);
 void frameCameraCut(void);
+bool frameModernTier(void);
 MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);
 
 }
