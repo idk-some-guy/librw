@@ -1,7 +1,7 @@
 static float3
 hdrAt(texture2d<float> scene, sampler smp, float2 uv)
 {
-	return scene.sample(smp, uv, level(0)).rgb;
+	return clamp(scene.sample(smp, uv, level(0)).rgb, 0.0, 65504.0);
 }
 
 kernel void
@@ -40,7 +40,7 @@ bloomDownFirst(texture2d<float> scene [[texture(0)]],
 			s += tap[n]*w;
 			ws += w;
 		}
-		o = s/ws;
+		o = s/max(ws, 1e-6);
 	}else
 		o = e*0.125 + (a + c + g + i)*0.03125 + (b + d + f + h)*0.0625 + (j + k + l + m)*0.125;
 	dst.write(float4(o, 1.0), gid);

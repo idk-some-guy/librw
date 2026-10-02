@@ -2053,6 +2053,80 @@ NearPixel(const float *a, const float *b, float tol)
 	return fabsf(a[0] - b[0]) < tol && fabsf(a[1] - b[1]) < tol && fabsf(a[2] - b[2]) < tol;
 }
 
+static const char *nanTaaSrc =
+"fragment float4\n"
+"nanTaaFS(FragmentIn in [[stage_in]])\n"
+"{\n"
+"	return float4(sqrt(-1.0 - in.color.r), 0.5, 0.5, 1.0);\n"
+"}\n";
+
+static bool
+CheckTaaNanHistory(void)
+{
+	const char *name = "coverage: the TAA history after an invalid scene pixel stays finite in that frame and in the frames after it";
+	enum { FRAMES = 5 };
+	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, nanTaaSrc, nil };
+	RGBA white = { 255, 255, 255, 255 };
+	Scene3D s;
+	MakeScene(&s);
+	metal::Shader *sh = metal::Shader::create(src, "im2dVS", "nanTaaFS", 0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
+	bool warm = sh && metal::prewarmIm2DShader(sh, 0, 0, BLENDONE, BLENDZERO, 1);
+	SteadyFrames(&s);
+	metal::StateStats before = metal::getStateStats();
+	float scene[4] = {}, o[FRAMES][4] = {};
+	bool read = true, taa = true;
+	for(int f = 0; f < FRAMES; f++){
+		metal::beginScene(cam);
+		WorldBegin(SKY);
+		if(metal::beginPrepass()){
+			DrawOpaque(&s);
+			metal::endPrepass();
+		}
+		DrawAll(&s);
+		if(f == 0){
+			metal::Im2DVertex v[4];
+			Vertex2D(&v[0], 96.0f, 96.0f, white);
+			Vertex2D(&v[1], 96.0f, 104.0f, white);
+			Vertex2D(&v[2], 104.0f, 104.0f, white);
+			Vertex2D(&v[3], 104.0f, 96.0f, white);
+			SetRenderStatePtr(TEXTURERASTER, nil);
+			SetRenderState(ZTESTENABLE, 0);
+			SetRenderState(ZWRITEENABLE, 0);
+			SetRenderState(VERTEXALPHA, 0);
+			metal::im2dOverrideShader = sh;
+			metal::setDrawEmissiveScale(3.0f);
+			im2d::RenderIndexedPrimitive(PRIMTYPETRILIST, v, 4, quadIndex, 6);
+			metal::setDrawEmissiveScale(1.0f);
+			metal::im2dOverrideShader = nil;
+			OpaqueMode();
+		}
+		metal::endScene(nil);
+		if(f == 0)
+			read = metal::readScenePixel(100, 100, scene) && read;
+		read = metal::readFrameOutput(100, 100, o[f]) && read;
+		taa = taa && metal::getFrameInfo().antiAliasing == metal::ANTIALIAS_TAA;
+		WorldEnd();
+	}
+	metal::StateStats after = metal::getStateStats();
+	TiersOff();
+	FreeScene(&s);
+	if(sh)
+		sh->destroy();
+	bool ok = warm && read && taa && std::isnan(scene[0]);
+	for(int f = 0; f < FRAMES; f++){
+		ok = ok && std::isfinite(o[f][0]) && std::isfinite(o[f][1]) && std::isfinite(o[f][2]);
+		Detail("  frame %d output %.4f,%.4f,%.4f\n", f, o[f][0], o[f][1], o[f][2]);
+	}
+	if(!warm || !read || !taa || !std::isnan(scene[0]))
+		Detail("  shader %d warm %d read %d taa %d scene red %f\n", sh != nil, warm, read, taa, scene[0]);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
 static bool
 CheckTaaMoving(void)
 {
@@ -4957,6 +5031,7 @@ RunModernChecks(Camera *camera)
 	CheckTaaStill();
 	CheckTaaMovingEdge();
 	CheckTaaMoving();
+	CheckTaaNanHistory();
 	CheckTemporalMotion("a camera panning over a textured wall through TAA at native matches the native frame as a still one does (reprojection)",
 		metal::UPSCALE_NATIVE, 0.0f, 0.04f);
 	CheckTaaReactive();

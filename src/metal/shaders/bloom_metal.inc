@@ -2,7 +2,7 @@ const char *bloom_metal_src =
 "static float3\n"
 "hdrAt(texture2d<float> scene, sampler smp, float2 uv)\n"
 "{\n"
-"	return scene.sample(smp, uv, level(0)).rgb;\n"
+"	return clamp(scene.sample(smp, uv, level(0)).rgb, 0.0, 65504.0);\n"
 "}\n"
 
 "kernel void\n"
@@ -41,7 +41,7 @@ const char *bloom_metal_src =
 "			s += tap[n]*w;\n"
 "			ws += w;\n"
 "		}\n"
-"		o = s/ws;\n"
+"		o = s/max(ws, 1e-6);\n"
 "	}else\n"
 "		o = e*0.125 + (a + c + g + i)*0.03125 + (b + d + f + h)*0.0625 + (j + k + l + m)*0.125;\n"
 "	dst.write(float4(o, 1.0), gid);\n"

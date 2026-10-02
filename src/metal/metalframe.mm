@@ -40,6 +40,7 @@ extern const char *im2d_metal_src;
 
 #define JITTER_SIGN 1.0f
 enum { REACTIVE_DRAWS = 4096 };
+enum FrameMath { MATH_FAST, MATH_RELAXED, MATH_SAFE };
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -368,17 +369,17 @@ newTexture(MTLPixelFormat format, int32 w, int32 h, MTLTextureUsage usage, uint3
 }
 
 static id<MTLLibrary>
-frameLibrary(const char **parts, NSString **error, bool safeMath = false)
+frameLibrary(const char **parts, NSString **error, FrameMath math = MATH_FAST)
 {
 	NSMutableString *all = [NSMutableString string];
 	NSError *err = nil;
 	MTLCompileOptions *opts = nil;
 	for(int i = 0; parts[i]; i++)
 		[all appendString:[NSString stringWithUTF8String:parts[i]]];
-	if(safeMath){
+	if(math != MATH_FAST){
 		opts = [MTLCompileOptions new];
 		if(@available(macOS 15.0, *))
-			opts.mathMode = MTLMathModeSafe;
+			opts.mathMode = math == MATH_SAFE ? MTLMathModeSafe : MTLMathModeRelaxed;
 		else
 			opts.fastMathEnabled = NO;
 	}
@@ -394,7 +395,7 @@ buildGrade(const char *host, NSString **error)
 	const char *parts[] = { frameHead, host, grade_metal_src, nil };
 	NSError *err = nil;
 	frame.gradeBuilds++;
-	id<MTLLibrary> lib = frameLibrary(parts, error);
+	id<MTLLibrary> lib = frameLibrary(parts, error, MATH_RELAXED);
 	if(lib == nil)
 		return nil;
 	id<MTLFunction> fn = [lib newFunctionWithName:@"gradeKernel"];
@@ -479,7 +480,7 @@ frameInit(void)
 		if(frame.grade == nil)
 			fprintf(stderr, "rw::metal: grade kernel failed to build: %s\n", err ? err.UTF8String : "");
 		const char *bloomParts[] = { frameHead, bloomh_metal_src, bloom_metal_src, nil };
-		id<MTLLibrary> bloomLib = frameLibrary(bloomParts, &err);
+		id<MTLLibrary> bloomLib = frameLibrary(bloomParts, &err, MATH_RELAXED);
 		if(bloomLib){
 			NSError *perr = nil;
 			id<MTLDevice> dev = getContext()->device;
@@ -491,7 +492,7 @@ frameInit(void)
 			fprintf(stderr, "rw::metal: bloom shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		}
 		const char *deringParts[] = { frameHead, deringh_metal_src, dering_metal_src, nil };
-		id<MTLLibrary> deringLib = frameLibrary(deringParts, &err, true);
+		id<MTLLibrary> deringLib = frameLibrary(deringParts, &err, MATH_SAFE);
 		if(deringLib){
 			NSError *perr = nil;
 			id<MTLDevice> dev = getContext()->device;

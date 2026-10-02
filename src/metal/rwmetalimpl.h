@@ -118,6 +118,7 @@ bool32 compositeCameraPixels(Raster *raster, uint8 *dst);
 bool32 compositeCameraPixelsHalf(Raster *raster, uint16 *dst);
 void setTierCapsForTest(const TierCaps *caps);
 uint32 gradeBuildsForTest(void);
+uint32 hostPrewarmRecordsForTest(void);
 void setBloomKarisForTest(bool32 on);
 void setScalerFailForTest(bool32 fail);
 void setDeringCopyForTest(bool32 copy);

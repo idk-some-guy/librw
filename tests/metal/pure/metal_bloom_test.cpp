@@ -21,6 +21,9 @@ TestKaris(void)
 		CHECK(x*w < 1.0f);
 		prev = w;
 	}
+	CHECK(bloomKarisWeight(INFINITY, 0, 0) > 0.0f && std::isfinite(bloomKarisWeight(NAN, 1, 1)));
+	CHECK(bloomKarisWeight(-5.0f, -5.0f, -5.0f) == 1.0f);
+	CHECK(fabsf(bloomKarisWeight(INFINITY, INFINITY, INFINITY) - 1.0f/65505.0f) < 1e-9f);
 }
 
 static void

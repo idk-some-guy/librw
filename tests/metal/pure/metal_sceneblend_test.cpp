@@ -90,6 +90,13 @@ TestRefused(void)
 	CHECK(!ok && out == "untouched");
 }
 
+static void
+TestBrightFactors(void)
+{
+	std::string prelude = sceneBlendPrelude;
+	CHECK(prelude.find("\tbool inv = f == 3 || f == 5 || f == 7 || f == 9 || f == 10;\n") != std::string::npos);
+}
+
 int
 main(void)
 {
@@ -98,6 +105,7 @@ main(void)
 	TestExactName();
 	TestReturnWord();
 	TestRefused();
+	TestBrightFactors();
 	if(failures){
 		printf("%d failures\n", failures);
 		return 1;

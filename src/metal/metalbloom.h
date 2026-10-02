@@ -3,10 +3,17 @@
 
 #define BLOOM_LEVELS 6
 
+#ifdef __METAL_VERSION__
+#define BLOOM_CLAMP(x) clamp(x, 0.0f, 65504.0f)
+#else
+#include <math.h>
+#define BLOOM_CLAMP(x) fminf(fmaxf(x, 0.0f), 65504.0f)
+#endif
+
 static inline float
 bloomKarisWeight(float r, float g, float b)
 {
-	return 1.0f/(1.0f + 0.2126f*r + 0.7152f*g + 0.0722f*b);
+	return 1.0f/(1.0f + 0.2126f*BLOOM_CLAMP(r) + 0.7152f*BLOOM_CLAMP(g) + 0.0722f*BLOOM_CLAMP(b));
 }
 
 static inline float

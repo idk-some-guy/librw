@@ -4,10 +4,17 @@ const char *bloomh_metal_src =
 
 "#define BLOOM_LEVELS 6\n"
 
+"#ifdef __METAL_VERSION__\n"
+"#define BLOOM_CLAMP(x) clamp(x, 0.0f, 65504.0f)\n"
+"#else\n"
+"#include <math.h>\n"
+"#define BLOOM_CLAMP(x) fminf(fmaxf(x, 0.0f), 65504.0f)\n"
+"#endif\n"
+
 "static inline float\n"
 "bloomKarisWeight(float r, float g, float b)\n"
 "{\n"
-"	return 1.0f/(1.0f + 0.2126f*r + 0.7152f*g + 0.0722f*b);\n"
+"	return 1.0f/(1.0f + 0.2126f*BLOOM_CLAMP(r) + 0.7152f*BLOOM_CLAMP(g) + 0.0722f*BLOOM_CLAMP(b));\n"
 "}\n"
 
 "static inline float\n"

@@ -114,6 +114,20 @@ Quad(float x0, float y0, float x1, float y1, RGBA c, int mode)
 }
 
 static void
+BlendQuad(float x0, float y0, float x1, float y1, RGBA c, int32 src, int32 dst)
+{
+	metal::Im2DVertex v[4];
+	Vertex(&v[0], x0, y0, c);
+	Vertex(&v[1], x0, y1, c);
+	Vertex(&v[2], x1, y1, c);
+	Vertex(&v[3], x1, y0, c);
+	DrawMode(DRAW_ALPHA);
+	SetRenderState(SRCBLEND, src);
+	SetRenderState(DESTBLEND, dst);
+	im2d::RenderIndexedPrimitive(PRIMTYPETRILIST, v, 4, quadIndex, 6);
+}
+
+static void
 Tri(float x0, float y0, float x1, float y1, float x2, float y2, RGBA c, int mode)
 {
 	metal::Im2DVertex v[3];
@@ -455,32 +469,40 @@ CheckSceneEmission(void)
 static bool
 CheckSceneEmitterExcess(void)
 {
-	const char *name = "a plain alpha blend over an emitter keeps the emitter's excess by one minus its alpha";
+	const char *name = "a plain alpha or additive blend over an emitter keeps the emitter's excess and an emissive one-minus blend over it stays in range";
 	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, emitTestSrc, nil };
 	RGBA glow = { 200, 60, 160, 255 };
 	RGBA black = { 0, 0, 0, 255 };
+	RGBA inv = { 100, 20, 40, 255 };
 	uint8 alphas[3] = { 0, 255, 128 };
-	float xs[3] = { 10, 70, 130 };
+	float xs[5] = { 10, 70, 130, 190, 250 };
 	metal::Shader *emit = metal::Shader::create(src, "im2dVS", "emitTestFS", 0);
 	EnhancedOn();
-	bool warm = emit && metal::prewarmIm2DShader(emit, 0, 1, BLENDONE, BLENDONE, 1);
+	bool warm = emit && metal::prewarmIm2DShader(emit, 0, 1, BLENDONE, BLENDONE, 1) &&
+		metal::prewarmIm2DShader(emit, 0, 1, BLENDONE, BLENDINVSRCCOLOR, 1);
 	metal::StateStats before = metal::getStateStats();
 	uint32 func = GetRenderState(ALPHATESTFUNC);
 	metal::beginScene(cam);
 	Begin(black);
 	metal::im2dOverrideShader = emit;
 	metal::setDrawEmissiveScale(3.0f);
-	Quad(10, 10, 180, 60, glow, DRAW_ADD);
+	Quad(10, 10, 300, 60, glow, DRAW_ADD);
 	metal::setDrawEmissiveScale(1.0f);
 	metal::im2dOverrideShader = nil;
 	SetRenderState(ALPHATESTFUNC, ALPHAALWAYS);
 	for(int i = 0; i < 3; i++)
 		Quad(xs[i], 10, xs[i]+50, 60, RGBA{ 40, 220, 90, alphas[i] }, DRAW_ALPHA);
 	SetRenderState(ALPHATESTFUNC, func);
+	Quad(xs[3], 10, xs[3]+50, 60, RGBA{ 40, 220, 90, 255 }, DRAW_ADD);
+	metal::im2dOverrideShader = emit;
+	metal::setDrawEmissiveScale(3.0f);
+	BlendQuad(xs[4], 10, xs[4]+50, 60, inv, BLENDONE, BLENDINVSRCCOLOR);
+	metal::setDrawEmissiveScale(1.0f);
+	metal::im2dOverrideShader = nil;
 	cam->endUpdate();
-	float got[3][4];
+	float got[5][4];
 	bool read = true;
-	for(int i = 0; i < 3; i++)
+	for(int i = 0; i < 5; i++)
 		read = metal::readScenePixel(xs[i]+25, 35, got[i]) && read;
 	metal::endScene(nil);
 	cam->showRaster(0);
@@ -490,16 +512,55 @@ CheckSceneEmitterExcess(void)
 		emit->destroy();
 	float e[3] = { 600/255.0f, 180/255.0f, 480/255.0f };
 	float q[3] = { 40/255.0f, 220/255.0f, 90/255.0f };
-	const char *what[3] = { "the alpha 0 quad", "the alpha 1 quad", "the alpha 0.5 quad" };
+	float sv[3] = { 300/255.0f, 60/255.0f, 120/255.0f };
+	const char *what[5] = { "the alpha 0 quad", "the alpha 1 quad", "the alpha 0.5 quad", "the additive quad",
+		"the emissive one-minus-source quad" };
 	bool ok = warm && read;
-	for(int i = 0; i < 3; i++){
-		float a = alphas[i]/255.0f, want[3];
+	for(int i = 0; i < 5; i++){
+		float a = i < 3 ? alphas[i]/255.0f : 1.0f, want[3];
 		for(int c = 0; c < 3; c++)
-			want[c] = q[c]*a + e[c]*(1.0f - a);
+			if(i < 3)
+				want[c] = q[c]*a + e[c]*(1.0f - a);
+			else if(i == 3)
+				want[c] = std::min(q[c] + std::min(e[c], 1.0f), 1.0f) + std::max(e[c] - 1.0f, 0.0f);
+			else
+				want[c] = sv[c] + e[c]*(1.0f - std::min(sv[c], 1.0f));
 		ok = read && SceneNear(got[i], want, 0.004f, what[i]) && ok;
 	}
 	if(!warm || !read)
 		Detail("  shader %d warm %d read %d\n", emit != nil, warm, read);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
+static bool
+CheckEmitterTargetBlends(void)
+{
+	const char *name = "an emissive im2D draw with an invert, replace or modulate blend uses a prewarmed pipeline";
+	static const int32 blends[3][2] = { { BLENDINVDESTCOLOR, BLENDZERO }, { BLENDONE, BLENDZERO }, { BLENDZERO, BLENDSRCCOLOR } };
+	RGBA c = { 120, 80, 40, 255 };
+	EnhancedOn();
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	Begin(SKY);
+	metal::setEmissiveScale(3.0f);
+	for(int i = 0; i < 3; i++)
+		BlendQuad(10 + 60*i, 10, 60 + 60*i, 60, c, blends[i][0], blends[i][1]);
+	metal::setEmissiveScale(1.0f);
+	cam->endUpdate();
+	float px[4];
+	bool read = metal::readScenePixel(95, 35, px);
+	metal::endScene(nil);
+	cam->showRaster(0);
+	metal::StateStats after = metal::getStateStats();
+	EnhancedOff();
+	float want[3] = { 360/255.0f, 240/255.0f, 120/255.0f };
+	bool ok = read && SceneNear(px, want, 0.004f, "the emissive replace quad");
+	if(!read)
+		Detail("  read %d\n", read);
 	if(after.pipelinesLate != before.pipelinesLate){
 		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
 		ok = false;
@@ -785,6 +846,78 @@ CheckGradeAboveWhite(void)
 	return Report(ok, name);
 }
 
+static const char *negTestSrc =
+"fragment float4\n"
+"negTestFS(FragmentIn in [[stage_in]])\n"
+"{\n"
+"	return float4(-2.0, 0.5, 0.5, 1.0);\n"
+"}\n";
+
+static const char *squareGrade =
+"static float4\n"
+"hostGrade(float4 c, constant float4 *params)\n"
+"{\n"
+"	return float4(c.rgb*c.rgb*params[0].rgb, 1.0);\n"
+"}\n";
+
+static bool
+CheckGradeNegative(void)
+{
+	const char *name = "a negative scene value grades as zero";
+	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, negTestSrc, nil };
+	float32 k[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
+	metal::GradeParams on = { 1, k, 1, 0.0f };
+	RGBA white = { 255, 255, 255, 255 };
+	metal::Shader *sh = metal::Shader::create(src, "im2dVS", "negTestFS", 0);
+	bool graded = metal::setGradeShader(squareGrade) != 0;
+	EnhancedOn();
+	bool warm = sh && metal::prewarmIm2DShader(sh, 0, 0, BLENDONE, BLENDZERO, 1);
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	Begin(BLUE);
+	metal::im2dOverrideShader = sh;
+	metal::setDrawEmissiveScale(3.0f);
+	Quad(10, 10, 60, 60, white, DRAW_OPAQUE);
+	metal::setDrawEmissiveScale(1.0f);
+	metal::im2dOverrideShader = nil;
+	cam->endUpdate();
+	float s[4], o[4];
+	bool read = metal::readScenePixel(30, 30, s);
+	metal::endScene(&on);
+	read = metal::readFrameOutput(30, 30, o) && read;
+	cam->showRaster(0);
+	metal::StateStats after = metal::getStateStats();
+	EnhancedOff();
+	metal::setGradeShader(nil);
+	if(sh)
+		sh->destroy();
+	bool ok = graded && warm && read && s[0] < -1.9f && o[0] == 0.0f && NearF(o[1], 64/255.0f, 0.002f);
+	Detail("  scene %.3f,%.3f,%.3f output %.4f,%.4f,%.4f\n", s[0], s[1], s[2], o[0], o[1], o[2]);
+	if(!graded || !warm || !read)
+		Detail("  shader %d graded %d warm %d read %d\n", sh != nil, graded, warm, read);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
+static bool
+CheckHostRecordsDeduped(void)
+{
+	const char *name = "prewarming the same host pipeline twice keeps one record";
+	uint32 start = metal::hostPrewarmRecordsForTest();
+	bool a = metal::prewarmIm2DShader(metal::im2dShader, 0, 1, BLENDDESTCOLOR, BLENDINVDESTALPHA, 1) != 0;
+	uint32 once = metal::hostPrewarmRecordsForTest();
+	bool b = metal::prewarmIm2DShader(metal::im2dShader, 0, 1, BLENDDESTCOLOR, BLENDINVDESTALPHA, 1) != 0;
+	uint32 twice = metal::hostPrewarmRecordsForTest();
+	bool c = metal::prewarmIm2DShader(metal::im2dShader, 0, 1, BLENDDESTCOLOR, BLENDINVDESTALPHA, 0) != 0;
+	uint32 other = metal::hostPrewarmRecordsForTest();
+	bool ok = a && b && c && once == start + 1 && twice == once && other == once + 1;
+	Detail("  host records %u, %u after one prewarm, %u after the same again, %u with depth off\n", start, once, twice, other);
+	return Report(ok, name);
+}
+
 static bool
 CheckGradeCompileFailure(void)
 {
@@ -923,6 +1056,112 @@ CheckBloomFirefly(void)
 	bool ok = r1 && r2 && off[0] > 0.0f && on[0] < 0.25f*off[0];
 	if(!ok)
 		Detail("  6 px from the pixel: %.5f with the Karis average, %.5f without\n", on[0], off[0]);
+	return Report(ok, name);
+}
+
+static const char *nanTestSrc =
+"fragment float4\n"
+"nanTestFS(FragmentIn in [[stage_in]])\n"
+"{\n"
+"	return float4(sqrt(-1.0 - in.color.r), 0.5, 0.5, 1.0);\n"
+"}\n";
+
+static metal::Shader*
+NanShader(void)
+{
+	const char *src[] = { metal::header_metal_src, metal::im2d_metal_src, nanTestSrc, nil };
+	return metal::Shader::create(src, "im2dVS", "nanTestFS", 0);
+}
+
+static bool
+NanFrame(metal::Shader *sh, float weight, float scene[4], float at[4], float near[4])
+{
+	metal::GradeParams p = { 0, nil, 0, weight };
+	RGBA grey = { 102, 102, 102, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::im2dOverrideShader = sh;
+	metal::setDrawEmissiveScale(3.0f);
+	Quad(320, 240, 321, 241, white, DRAW_OPAQUE);
+	metal::setDrawEmissiveScale(1.0f);
+	metal::im2dOverrideShader = nil;
+	cam->endUpdate();
+	bool read = metal::readScenePixel(320, 240, scene);
+	metal::endScene(&p);
+	read = metal::readFrameOutput(320, 240, at) && metal::readFrameOutput(328, 240, near) && read;
+	cam->showRaster(0);
+	return read;
+}
+
+static bool
+Finite3(const float *c)
+{
+	return std::isfinite(c[0]) && std::isfinite(c[1]) && std::isfinite(c[2]);
+}
+
+static bool
+CheckBloomNan(void)
+{
+	const char *name = "a NaN in the scene leaves the bloomed output finite, with and without the Karis average";
+	float v = 102/255.0f;
+	float scene[2][4], at[2][4], near[2][4];
+	metal::Shader *sh = NanShader();
+	EnhancedOn();
+	bool warm = sh && metal::prewarmIm2DShader(sh, 0, 0, BLENDONE, BLENDZERO, 1);
+	metal::StateStats before = metal::getStateStats();
+	bool read = true;
+	for(int karis = 1; karis >= 0; karis--){
+		metal::setBloomKarisForTest(karis);
+		read = NanFrame(sh, 1.0f, scene[karis], at[karis], near[karis]) && read;
+	}
+	metal::setBloomKarisForTest(1);
+	metal::StateStats after = metal::getStateStats();
+	EnhancedOff();
+	if(sh)
+		sh->destroy();
+	bool ok = warm && read;
+	for(int karis = 0; karis < 2; karis++){
+		ok = ok && std::isnan(scene[karis][0]) && Finite3(at[karis]) && Finite3(near[karis]);
+		for(int i = 0; i < 3; i++)
+			ok = ok && NearF(near[karis][i], v, 0.05f);
+		Detail("  karis %d: scene red %f; output %.4f,%.4f,%.4f at the pixel, %.4f,%.4f,%.4f 8 px away\n", karis,
+			scene[karis][0], at[karis][0], at[karis][1], at[karis][2], near[karis][0], near[karis][1], near[karis][2]);
+	}
+	if(!warm || !read)
+		Detail("  shader %d warm %d read %d\n", sh != nil, warm, read);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
+	return Report(ok, name);
+}
+
+static bool
+CheckGradeNan(void)
+{
+	const char *name = "a NaN in the scene grades as zero with bloom off and mixes as zero with half bloom";
+	float scene[4], at[4], half[4], near[4];
+	metal::Shader *sh = NanShader();
+	EnhancedOn();
+	bool warm = sh && metal::prewarmIm2DShader(sh, 0, 0, BLENDONE, BLENDZERO, 1);
+	metal::StateStats before = metal::getStateStats();
+	bool read = NanFrame(sh, 0.0f, scene, at, near);
+	read = NanFrame(sh, 0.5f, scene, half, near) && read;
+	metal::StateStats after = metal::getStateStats();
+	EnhancedOff();
+	if(sh)
+		sh->destroy();
+	bool ok = warm && read && std::isnan(scene[0]) && Finite3(at) && at[0] == 0.0f && NearF(at[1], 128/255.0f, 0.002f);
+	ok = ok && Finite3(half) && half[0] > 0.1f && half[0] < 0.3f;
+	Detail("  scene red %f; output %.4f,%.4f,%.4f, with half bloom %.4f,%.4f,%.4f\n", scene[0], at[0], at[1], at[2], half[0],
+		half[1], half[2]);
+	if(!warm || !read)
+		Detail("  shader %d warm %d read %d\n", sh != nil, warm, read);
+	if(after.pipelinesLate != before.pipelinesLate){
+		Detail("  late pipelines %u -> %u\n", before.pipelinesLate, after.pipelinesLate);
+		ok = false;
+	}
 	return Report(ok, name);
 }
 
@@ -2098,6 +2337,7 @@ RunFrameChecks(Camera *camera)
 	CheckSceneBlendInShader();
 	CheckSceneEmission();
 	CheckSceneEmitterExcess();
+	CheckEmitterTargetBlends();
 	CheckSceneOpaqueClamp();
 	CheckSceneSourceSaturates();
 	CheckSceneResize();
@@ -2106,12 +2346,15 @@ RunFrameChecks(Camera *camera)
 	CheckShoulder();
 	CheckHostGrade();
 	CheckGradeAboveWhite();
+	CheckGradeNegative();
 	CheckGradeCompileFailure();
 	CheckBloomWeight();
 	CheckStatsBloomClassic();
 	CheckBloomSpread();
 	CheckBloomFlat();
 	CheckBloomFirefly();
+	CheckBloomNan();
+	CheckGradeNan();
 	CheckEdrLayer();
 	CheckEdrComposite();
 	CheckEdrShoulder();
@@ -2136,6 +2379,7 @@ RunFrameChecks(Camera *camera)
 	CheckGradeSourceCached();
 	CheckGradeConstantsPadded();
 	CheckEmissiveReset();
+	CheckHostRecordsDeduped();
 	SetTier(metal::TIER_CLASSIC);
 	return failures;
 }

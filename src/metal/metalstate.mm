@@ -2650,6 +2650,9 @@ prewarmEngineLayouts(uint32 samples, uint32 fmt)
 			for(i = 0; i < (int32)nelem(im2dBlends); i++)
 				prewarm(im2dEmitShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dBlends[i],
 					depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE, samples, fmt);
+	if(fmt == COLORFMT_SCENE && im2dEmitShader)
+		for(i = 0; i < (int32)nelem(im2dTargetBlends); i++)
+			prewarm(im2dEmitShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dTargetBlends[i], DEPTHFMT_D32S8, samples, fmt);
 	for(i = 0; i < (int32)nelem(im2dTargetBlends); i++)
 		prewarm(im2dShader, im2dVertexLayout, VARIANT_ALPHATEST, im2dTargetBlends[i], DEPTHFMT_D32S8, samples, fmt);
 	for(i = 0; i < (int32)nelem(worldLayouts); i++){
@@ -2979,7 +2982,16 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 	uint32 fmt;
 	bool32 ok = 1;
 
-	hostRecords.push_back(r);
+	bool known = false;
+	for(HostPrewarmRecord &h : hostRecords)
+		if(h.shader == shader && h.layout == layout && h.variant == variant && h.blend == blend &&
+		   h.srcBlend == srcBlend && h.destBlend == destBlend && h.depth == depth){
+			h.formats |= mask;
+			known = true;
+			break;
+		}
+	if(!known)
+		hostRecords.push_back(r);
 	auto start = std::chrono::steady_clock::now();
 	hostPrewarming = true;
 	@autoreleasepool {
@@ -2991,6 +3003,12 @@ hostPrewarm(Shader *shader, uint32 layout, uint32 variant, bool32 blend, int32 s
 	hostPrewarming = false;
 	stats.hostPrewarmUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
 	return ok;
+}
+
+uint32
+hostPrewarmRecordsForTest(void)
+{
+	return (uint32)hostRecords.size();
 }
 
 bool32
