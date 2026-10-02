@@ -12,6 +12,8 @@
 #define PP_SQRT sqrtf
 #endif
 
+#define PP_MOTION_OFFSCREEN 2.0f
+
 struct PPVec2 { float x, y; };
 struct PPVec3 { float x, y, z; };
 
@@ -67,8 +69,8 @@ ppMotion(float cx, float cy, float cw, float px, float py, float pw)
 {
 	PPVec2 m;
 	if(!(cw > 0.0f) || !(pw > 0.0f)){
-		m.x = 0.0f;
-		m.y = 0.0f;
+		m.x = PP_MOTION_OFFSCREEN;
+		m.y = PP_MOTION_OFFSCREEN;
 		return m;
 	}
 	m.x = 0.5f*(px/pw - cx/cw);

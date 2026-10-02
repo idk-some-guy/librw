@@ -131,10 +131,17 @@ tmHistoryWeight(float reactive, bool valid)
 
 #ifndef __METAL_VERSION__
 inline void
+tmJitterNdc(float jx, float jy, int width, int height, float *nx, float *ny)
+{
+	*nx = 2.0f*jx/(float)width;
+	*ny = -2.0f*jy/(float)height;
+}
+
+inline void
 tmJitterProjection(float proj[16], float jx, float jy, int width, int height)
 {
-	float nx = 2.0f*jx/(float)width;
-	float ny = -2.0f*jy/(float)height;
+	float nx, ny;
+	tmJitterNdc(jx, jy, width, height, &nx, &ny);
 	for(int c = 0; c < 4; c++){
 		proj[c*4+0] += nx*proj[c*4+3];
 		proj[c*4+1] += ny*proj[c*4+3];

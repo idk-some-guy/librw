@@ -14,6 +14,7 @@
 #include "rwmetal.h"
 
 #include "rwmetalimpl.h"
+#include "metalstate.h"
 
 namespace rw {
 namespace metal {
@@ -44,11 +45,19 @@ driverClose(void *o, int32, int32)
 	return o;
 }
 
+static void*
+destroyAtomicHistory(void *object, int32, int32)
+{
+	forgetObjectHistory(object);
+	return object;
+}
+
 void
 registerPlatformPlugins(void)
 {
 	Driver::registerPlugin(PLATFORM_METAL, 0, PLATFORM_METAL,
 	                       driverOpen, driverClose);
+	Atomic::registerPlugin(0, MAKEPLUGINID(VEND_DRIVER, PLATFORM_METAL), nil, destroyAtomicHistory, nil);
 	registerNativeRaster();
 }
 

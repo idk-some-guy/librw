@@ -620,9 +620,10 @@ CheckCameraMotion(void)
 	Scene3D s;
 	MakeScene(&s);
 	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	float yaw = 2.0f;
 	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
 	SceneFrame(&s, true);
-	PlaceCamera(2.0f, 0.0f, 0.0f, 0.0f);
+	PlaceCamera(yaw, 0.0f, 0.0f, 0.0f);
 	SceneFrame(&s, true);
 	float onQuad[2] = {}, far[2] = {};
 	bool read = PrepassMotionAt(320, 240, onQuad) && PrepassMotionAt(20, 20, far);
@@ -630,9 +631,10 @@ CheckCameraMotion(void)
 	metal::cameraCut();
 	TiersOff();
 	FreeScene(&s);
-	float sign = onQuad[0] < 0.0f ? -1.0f : 1.0f, wantQuad[2], wantFar[2];
-	TurnMotion(320, 240, sign, 2.0f, wantQuad);
-	TurnMotion(20, 20, sign, 2.0f, wantFar);
+	// A positive yaw turns the view toward +x, which this projection draws on the left: the scene moves right.
+	float sign = yaw > 0.0f ? -1.0f : 1.0f, wantQuad[2], wantFar[2];
+	TurnMotion(320, 240, sign, yaw, wantQuad);
+	TurnMotion(20, 20, sign, yaw, wantFar);
 	bool ok = read && fabsf(onQuad[0]) > 0.01f && fabsf(onQuad[0] - wantQuad[0]) < 0.0015f &&
 		fabsf(onQuad[1] - wantQuad[1]) < 0.001f && fabsf(far[0] - wantFar[0]) < 0.0015f && fabsf(far[1] - wantFar[1]) < 0.0015f;
 	if(!ok)
@@ -775,6 +777,1053 @@ CheckSkinnedMotion(void)
 	return Report(ok, name);
 }
 
+static bool
+SplitPrepassFrame(Scene3D *s, int x, int y, float n[3], float m[2])
+{
+	float d;
+	bool began = false;
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	SetRenderState(VERTEXALPHA, 0);
+	if(metal::beginPrepass()){
+		began = true;
+		s->front->render();
+		metal::readPrepassForTest(x, y, n, m, &d);
+		s->back->render();
+		metal::endPrepass();
+	}
+	DrawOpaque(s);
+	metal::endScene(nil);
+	WorldEnd();
+	return began && metal::readPrepassForTest(x, y, n, m, &d);
+}
+
+static bool
+CheckPrepassSplit(const char *name)
+{
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::cameraCut();
+	int x = PX(0.5f, 10.0f), y = PY(1.25f, 10.0f);
+	float n[3] = {}, m[2] = {};
+	bool read = SplitPrepassFrame(&s, x, y, n, m);
+	V3d up = { 0.0f, 1.0f, 0.0f };
+	s.front->getFrame()->translate(&up, COMBINEPOSTCONCAT);
+	s.front->getFrame()->updateObjects();
+	read = read && SplitPrepassFrame(&s, x, y, n, m);
+	TiersOff();
+	FreeScene(&s);
+	float want = 240.0f/(0.75f*10.0f)/480.0f;
+	bool ok = read && fabsf(n[0]) < 0.01f && fabsf(n[1]) < 0.01f && fabsf(n[2] + 1.0f) < 0.01f && fabsf(m[0]) < 1e-3f &&
+		fabsf(m[1] - want) < 0.002f;
+	if(!ok)
+		Detail("  read %d; first segment's pixel normal %.3f,%.3f,%.3f motion %.5f,%.5f, expected y %.5f\n", read, n[0], n[1],
+			n[2], m[0], m[1], want);
+	return Report(ok, name);
+}
+
+static uint16 quadIndex[6] = { 0, 1, 2, 0, 2, 3 };
+
+static void
+Vertex2D(metal::Im2DVertex *v, float x, float y, RGBA c)
+{
+	v->setScreenX(x);
+	v->setScreenY(y);
+	v->setScreenZ(im2d::GetNearZ());
+	v->setCameraZ(cam->nearPlane);
+	v->setRecipCameraZ(1.0f/cam->nearPlane);
+	v->setU(0.0f, 1.0f/cam->nearPlane);
+	v->setV(0.0f, 1.0f/cam->nearPlane);
+	v->setColor(c.red, c.green, c.blue, c.alpha);
+}
+
+static void
+BlendMode(bool additive)
+{
+	SetRenderStatePtr(TEXTURERASTER, nil);
+	SetRenderState(ZTESTENABLE, 0);
+	SetRenderState(ZWRITEENABLE, 0);
+	SetRenderState(VERTEXALPHA, 1);
+	SetRenderState(SRCBLEND, additive ? BLENDONE : BLENDSRCALPHA);
+	SetRenderState(DESTBLEND, additive ? BLENDONE : BLENDINVSRCALPHA);
+}
+
+static void
+OpaqueMode(void)
+{
+	SetRenderState(ZTESTENABLE, 1);
+	SetRenderState(ZWRITEENABLE, 1);
+	SetRenderState(VERTEXALPHA, 0);
+	SetRenderState(SRCBLEND, BLENDSRCALPHA);
+	SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
+}
+
+static void
+Quad2D(float x0, float y0, float x1, float y1, RGBA c, bool additive)
+{
+	metal::Im2DVertex v[4];
+	Vertex2D(&v[0], x0, y0, c);
+	Vertex2D(&v[1], x0, y1, c);
+	Vertex2D(&v[2], x1, y1, c);
+	Vertex2D(&v[3], x1, y0, c);
+	BlendMode(additive);
+	im2d::RenderIndexedPrimitive(PRIMTYPETRILIST, v, 4, quadIndex, 6);
+	OpaqueMode();
+}
+
+static void
+Quad3DImmediate(float x0, float y0, float x1, float y1, float z, RGBA c)
+{
+	const float xy[4][2] = { { x0, y1 }, { x1, y1 }, { x1, y0 }, { x0, y0 } };
+	metal::Im3DVertex v[4];
+	for(int i = 0; i < 4; i++){
+		v[i].setX(xy[i][0]); v[i].setY(xy[i][1]); v[i].setZ(z);
+		v[i].setNormalX(0.0f); v[i].setNormalY(0.0f); v[i].setNormalZ(-1.0f);
+		v[i].setColor(c.red, c.green, c.blue, c.alpha);
+		v[i].setU(0.0f); v[i].setV(0.0f);
+	}
+	BlendMode(false);
+	im3d::Transform(v, 4, nil, 0);
+	im3d::RenderIndexedPrimitive(PRIMTYPETRILIST, quadIndex, 6);
+	im3d::End();
+	OpaqueMode();
+}
+
+static void
+Frames(Scene3D *s, int n)
+{
+	for(int i = 0; i < n; i++)
+		SceneFrame(s, true);
+}
+
+static Camera*
+OtherCamera(void)
+{
+	Camera *other = Camera::create();
+	other->setFrame(Frame::create());
+	other->frameBuffer = Raster::create(64, 64, 0, Raster::CAMERATEXTURE);
+	other->zBuffer = Raster::create(64, 64, 0, Raster::ZBUFFER);
+	return other;
+}
+
+static void
+FreeOtherCamera(Camera *other)
+{
+	Frame *f = other->getFrame();
+	Raster *fb = other->frameBuffer, *z = other->zBuffer;
+	other->destroy();
+	f->destroy();
+	fb->destroy();
+	z->destroy();
+}
+
+static bool
+CheckJitter(void)
+{
+	const char *name = "the scene camera's projection is jittered through eight phases and an off-scene camera's is not";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 3);
+	float seen[8][2];
+	bool ok = true;
+	for(int f = 0; f < 9; f++){
+		SceneFrame(&s, true);
+		metal::FrameInfo fi = metal::getFrameInfo();
+		float proj[16];
+		metal::sceneProjectionForTest(proj);
+		float wantX = 2.0f*fi.jitterX/fi.internalWidth, wantY = -2.0f*fi.jitterY/fi.internalHeight;
+		ok = ok && fabsf(proj[8] - wantX) < 1e-6f && fabsf(proj[9] - wantY) < 1e-6f && fabsf(fi.jitterX) < 0.5f &&
+			fabsf(fi.jitterY) < 0.5f && (fi.jitterX != 0.0f || fi.jitterY != 0.0f);
+		if(f < 8){
+			seen[f][0] = fi.jitterX;
+			seen[f][1] = fi.jitterY;
+			for(int g = 0; g < f; g++)
+				ok = ok && (seen[g][0] != fi.jitterX || seen[g][1] != fi.jitterY);
+		}else
+			ok = ok && fi.jitterX == seen[0][0] && fi.jitterY == seen[0][1];
+		if(!ok){
+			Detail("  frame %d jitter %g,%g proj[8] %g proj[9] %g\n", f, fi.jitterX, fi.jitterY, proj[8], proj[9]);
+			break;
+		}
+	}
+	Camera *other = OtherCamera();
+	float otherProj[16] = {};
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	cam->endUpdate();
+	other->beginUpdate();
+	metal::sceneProjectionForTest(otherProj);
+	other->endUpdate();
+	cam->beginUpdate();
+	metal::endScene(nil);
+	WorldEnd();
+	FreeOtherCamera(other);
+	bool otherOk = otherProj[8] == 0.0f && otherProj[9] == 0.0f;
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_FXAA);
+	SceneFrame(&s, true);
+	float spatialProj[16];
+	metal::sceneProjectionForTest(spatialProj);
+	metal::FrameInfo sf = metal::getFrameInfo();
+	bool spatialOk = spatialProj[8] == 0.0f && spatialProj[9] == 0.0f && sf.jitterX == 0.0f && sf.jitterY == 0.0f;
+	TiersOff();
+	FreeScene(&s);
+	if(!otherOk)
+		Detail("  other camera proj[8] %g proj[9] %g\n", otherProj[8], otherProj[9]);
+	if(!spatialOk)
+		Detail("  spatial frame proj[8] %g proj[9] %g jitter %g,%g\n", spatialProj[8], spatialProj[9], sf.jitterX, sf.jitterY);
+	return Report(ok && otherOk && spatialOk, name);
+}
+
+static bool
+CheckJitterKeyed(void)
+{
+	const char *name = "with the jitter on, an off-scene camera between the prepass and the forward pass leaves the keyed draws testing equal";
+	Scene3D s;
+	MakeScene(&s);
+	Camera *other = OtherCamera();
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 3);
+	metal::StateStats before = metal::getStateStats();
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	bool began = metal::beginPrepass();
+	if(began){
+		DrawAll(&s);
+		metal::endPrepass();
+	}
+	cam->endUpdate();
+	other->beginUpdate();
+	other->endUpdate();
+	cam->beginUpdate();
+	DrawAll(&s);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	float sx = (float)fi.internalWidth/fi.outputWidth, sy = (float)fi.internalHeight/fi.outputHeight;
+	float px[4] = {}, sky[4] = {};
+	bool read = metal::readScenePixel((int)(PX(0.5f, 10.0f)*sx), (int)(PY(0.25f, 10.0f)*sy), px) &&
+		metal::readScenePixel(5, 5, sky);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats after = metal::getStateStats();
+	TiersOff();
+	FreeOtherCamera(other);
+	FreeScene(&s);
+	uint32 draws = after.prepassDraws - before.prepassDraws, equal = after.prepassEqual - before.prepassEqual;
+	bool jittered = fi.jitterX != 0.0f || fi.jitterY != 0.0f;
+	bool ok = began && read && jittered && draws == 2 && equal == 2 && after.prepassOrphans == before.prepassOrphans &&
+		Red(px, sky);
+	if(!ok)
+		Detail("  prepass %d read %d jitter %g,%g; prepass draws %u equal %u orphans %u; front %.3f,%.3f,%.3f\n", began, read,
+			fi.jitterX, fi.jitterY, draws, equal, after.prepassOrphans - before.prepassOrphans, px[0], px[1], px[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckTemporalScaler(void)
+{
+	const char *name = "modern at the quality factor runs the temporal scaler for taa and the spatial one for fxaa, and falls back to spatial";
+	Scene3D s;
+	MakeScene(&s);
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	metal::FrameInfo a = metal::getFrameInfo();
+	metal::logStats();
+	bool stats = strstr(metal::getStatsLine(), "upscaler temporal") && strstr(metal::getStatsLine(), " aa temporal");
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_QUALITY, metal::ANTIALIAS_FXAA);
+	Frames(&s, 1);
+	metal::FrameInfo c = metal::getFrameInfo();
+	metal::setTemporalFailForTest(1);
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_BALANCED, metal::ANTIALIAS_TAA);
+	Frames(&s, 1);
+	metal::FrameInfo b = metal::getFrameInfo();
+	metal::setTemporalFailForTest(0);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = a.upscaler == metal::UPSCALER_TEMPORAL && a.antiAliasing == metal::ANTIALIAS_TEMPORAL &&
+		a.internalWidth == metal::internalSpan(w, metal::UPSCALE_QUALITY) && a.outputHeight == h && stats &&
+		c.upscaler == metal::UPSCALER_SPATIAL && c.antiAliasing == metal::ANTIALIAS_FXAA &&
+		b.upscaler == metal::UPSCALER_SPATIAL && b.antiAliasing == metal::ANTIALIAS_FXAA;
+	if(!ok)
+		Detail("  taa: upscaler %d aa %d internal %d; stats %d; fxaa: upscaler %d aa %d; fallback upscaler %d aa %d\n",
+			a.upscaler, a.antiAliasing, a.internalWidth, stats, c.upscaler, c.antiAliasing, b.upscaler, b.antiAliasing);
+	return Report(ok, name);
+}
+
+static bool
+CheckTemporalAboveWhite(void)
+{
+	const char *name = "the temporal scaler keeps values above white";
+	RGBA black = { 0, 0, 0, 255 }, white = { 255, 255, 255, 255 };
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	float in[4] = {}, out[4] = {};
+	bool read = false;
+	for(int f = 0; f < 12; f++){
+		metal::beginScene(cam);
+		WorldBegin(black);
+		metal::beginPrepass();
+		metal::endPrepass();
+		metal::setEmissiveScale(5.0f);
+		Quad2D(240, 160, 400, 320, white, true);
+		metal::setEmissiveScale(1.0f);
+		metal::endScene(nil);
+		read = metal::readFrameOutput(320, 240, in) && metal::readFrameOutput(10, 10, out);
+		WorldEnd();
+	}
+	TiersOff();
+	bool ok = read && in[0] > 4.5f && in[0] < 5.5f && out[0] < 0.02f;
+	if(!ok)
+		Detail("  block centre %.3f corner %.4f\n", in[0], out[0]);
+	return Report(ok, name);
+}
+
+static void
+OutputRun(bool across, int fixed, int first, int n, float *red)
+{
+	for(int i = 0; i < n; i++){
+		float px[4] = {};
+		if(across)
+			metal::readFrameOutput(first + i, fixed, px);
+		else
+			metal::readFrameOutput(fixed, first + i, px);
+		red[i] = px[0];
+	}
+}
+
+static float
+Crossing(const float *v, int n, int first)
+{
+	float mid = 0.5f*(v[0] + v[n-1]);
+	for(int i = 0; i + 1 < n; i++)
+		if(v[i] != v[i+1] && (v[i] - mid)*(v[i+1] - mid) <= 0.0f)
+			return first + i + 0.5f + (mid - v[i])/(v[i+1] - v[i]);
+	return -100.0f;
+}
+
+enum { RUN = 12 };
+
+struct EdgeProbe
+{
+	float row[RUN], col[RUN];
+	float x, y;
+};
+
+static void
+ProbeEdges(EdgeProbe *e, int rowY, int rowX0, int colX, int colY0)
+{
+	OutputRun(true, rowY, rowX0, RUN, e->row);
+	OutputRun(false, colX, colY0, RUN, e->col);
+	e->x = Crossing(e->row, RUN, rowX0);
+	e->y = Crossing(e->col, RUN, colY0);
+}
+
+static bool
+CheckTemporalConverges(void)
+{
+	const char *name = "a still scene through the temporal scaler converges on the true edges and holds them (jitter sign)";
+	Scene3D s;
+	MakeScene(&s);
+	float cy = 0.04f;
+	float wantX = 320.0f*(1.0f + 1.0f/10.0f), wantY = 240.0f*(1.0f - (1.5f - cy)/7.5f);
+	int rowY = PY(0.25f - cy, 10.0f), rowX0 = (int)wantX - RUN/2, colX = PX(0.5f, 10.0f), colY0 = (int)wantY - RUN/2;
+	EdgeProbe native, single, temporal, last;
+	PlaceCamera(0.0f, 0.0f, cy, 0.0f);
+	metal::cameraCut();
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	Frames(&s, 2);
+	ProbeEdges(&native, rowY, rowX0, colX, colY0);
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	ProbeEdges(&single, rowY, rowX0, colX, colY0);
+	float drift = 0.0f;
+	for(int f = 0; f < 32; f++){
+		Frames(&s, 1);
+		ProbeEdges(&temporal, rowY, rowX0, colX, colY0);
+		if(f >= 24)
+			drift = std::max(drift, std::max(fabsf(temporal.x - last.x), fabsf(temporal.y - last.y)));
+		last = temporal;
+	}
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	TiersOff();
+	FreeScene(&s);
+	float dx = fabsf(temporal.x - wantX), dy = fabsf(temporal.y - wantY);
+	bool flat = true;
+	for(int i = 0; i < RUN; i++)
+		if(i < RUN/2 - 3 || i > RUN/2 + 2)
+			flat = flat && fabsf(temporal.row[i] - native.row[i]) < 0.03f && fabsf(temporal.col[i] - native.col[i]) < 0.03f;
+	bool ok = dx < 0.12f && dy < 0.12f && drift < 0.3f && flat;
+	Detail("  edges at x %.3f y %.3f: native x %.3f y %.3f, one frame x %.3f y %.3f, converged x %.3f y %.3f, drift %.3f\n",
+		wantX, wantY, native.x, native.y, single.x, single.y, temporal.x, temporal.y, drift);
+	if(!ok && (dx >= 0.12f || dy >= 0.12f || drift >= 0.3f))
+		Detail("  the 0.12 px and 0.3 drift limits depend on Apple's MetalFX; an OS update may have shifted its behaviour "
+			"(measured errors x %.3f y %.3f, drift %.3f)\n", dx, dy, drift);
+	if(!ok)
+		for(int i = 0; i < RUN; i++)
+			Detail("  %d: row native %.3f temporal %.3f; column native %.3f temporal %.3f\n", i, native.row[i],
+				temporal.row[i], native.col[i], temporal.col[i]);
+	return Report(ok, name);
+}
+
+static void
+DrawOne(Atomic *a)
+{
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	SetRenderState(VERTEXALPHA, 0);
+	if(metal::beginPrepass()){
+		a->render();
+		metal::endPrepass();
+	}
+	a->render();
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static float
+PatchDiff(const uint8 *a, const uint8 *b, int w, int cx, int cy, int half)
+{
+	float sum = 0.0f;
+	for(int y = cy - half; y < cy + half; y++)
+		for(int x = cx - half; x < cx + half; x++)
+			sum += abs(a[(y*w + x)*4] - b[(y*w + x)*4])/255.0f;
+	return sum/(4*half*half);
+}
+
+static float
+PanAgainstNative(Atomic *wall, float stepX, float stepY)
+{
+	enum { STEPS = 24 };
+	int w = cam->frameBuffer->width;
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	DrawOne(wall);
+	metal::cameraCut();
+	for(int f = 0; f < STEPS; f++){
+		PlaceCamera(0.0f, stepX*f, stepY*f, 0.0f);
+		DrawOne(wall);
+	}
+	uint8 *temporal = CompositeNow();
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	DrawOne(wall);
+	DrawOne(wall);
+	uint8 *native = CompositeNow();
+	float d = temporal && native ? PatchDiff(temporal, native, w, 320, 240, 32) : 1.0f;
+	delete[] temporal;
+	delete[] native;
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	return d;
+}
+
+static bool
+CheckTemporalMotion(void)
+{
+	const char *name = "a camera panning over a textured wall through the temporal scaler matches the native frame as a still one does (motion sign)";
+	static const RGBA texels[4] = { { 255, 255, 255, 255 }, { 0, 0, 0, 255 }, { 0, 0, 0, 255 }, { 255, 255, 255, 255 } };
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { 24.0f, 0.0f }, { 24.0f, 16.0f }, { 0.0f, 16.0f } };
+	Texture *tex = MakeTexture(2, 2, texels, Texture::LINEAR, Texture::WRAP, Texture::WRAP);
+	Material *mat = Material::create();
+	mat->setTexture(tex);
+	Geometry *g = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::PRELIT | Geometry::NORMALS,
+		3.0f, 2.0f, -3.0f, -2.0f, 10.0f, col, uv, mat);
+	Atomic *wall = MakeAtomic(g);
+	float still = PanAgainstNative(wall, 0.0f, 0.0f);
+	float moving = PanAgainstNative(wall, -0.06f, 0.04f);
+	TiersOff();
+	DestroyAtomic(wall);
+	g->destroy();
+	mat->destroy();
+	tex->destroy();
+	bool ok = moving < 2.5f*still;
+	Detail("  mean red difference from the native frame: still %.4f, panning %.4f\n", still, moving);
+	return Report(ok, name);
+}
+
+static bool
+CheckReactiveMask(void)
+{
+	const char *name = "the reactive mask marks im2D and im3D draws in the bracket and emitters, and nothing else";
+	Scene3D s;
+	MakeScene(&s);
+	RGBA white = { 255, 255, 255, 255 }, half = { 255, 255, 255, 128 };
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 1);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawOpaque(&s);
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	metal::beginReactive();
+	Quad2D(20, 20, 60, 60, white, true);
+	Quad2D(100, 20, 140, 60, half, false);
+	Quad3DImmediate(5.0f, -2.0f, 4.0f, -3.0f, 10.0f, white);
+	metal::endReactive();
+	metal::setEmissiveScale(3.0f);
+	Quad2D(560, 20, 600, 60, white, true);
+	metal::setEmissiveScale(1.0f);
+	Quad2D(560, 400, 600, 440, white, true);
+	Quad3DImmediate(-4.0f, -2.0f, -5.0f, -3.0f, 10.0f, white);
+	metal::endScene(nil);
+	WorldEnd();
+	float in = -1, partial = -1, im3 = -1, emit = -1, plain = -1, plain3 = -1, quad = -1;
+	metal::FrameInfo fi = metal::getFrameInfo();
+	float sx = (float)fi.internalWidth/fi.outputWidth, sy = (float)fi.internalHeight/fi.outputHeight;
+	bool read = metal::readReactiveForTest((int)(40*sx), (int)(40*sy), &in) &&
+		metal::readReactiveForTest((int)(120*sx), (int)(40*sy), &partial) &&
+		metal::readReactiveForTest((int)(PX(4.5f, 10.0f)*sx), (int)(PY(-2.5f, 10.0f)*sy), &im3) &&
+		metal::readReactiveForTest((int)(580*sx), (int)(40*sy), &emit) &&
+		metal::readReactiveForTest((int)(580*sx), (int)(420*sy), &plain) &&
+		metal::readReactiveForTest((int)(PX(-4.5f, 10.0f)*sx), (int)(PY(-2.5f, 10.0f)*sy), &plain3) &&
+		metal::readReactiveForTest((int)(320*sx), (int)(240*sy), &quad);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && in > 0.99f && fabsf(partial - 128.0f/255.0f) < 0.01f && im3 > 0.99f && emit > 0.99f &&
+		plain == 0.0f && plain3 == 0.0f && quad == 0.0f;
+	if(!ok)
+		Detail("  read %d; bracket %.3f half alpha %.3f im3D %.3f emitter %.3f plain %.3f plain im3D %.3f opaque %.3f\n", read,
+			in, partial, im3, emit, plain, plain3, quad);
+	return Report(ok, name);
+}
+
+enum { PREPASS_NONE, PREPASS_EMPTY, PREPASS_BLENDED, PREPASS_ALL };
+
+static void
+HistoryFrames(Scene3D *s, const int *frames, int n, metal::FrameInfo *out)
+{
+	for(int i = 0; i < n; i++){
+		metal::beginScene(cam);
+		WorldBegin(SKY);
+		if(frames[i] != PREPASS_NONE && metal::beginPrepass()){
+			if(frames[i] == PREPASS_ALL)
+				DrawAll(s);
+			else if(frames[i] == PREPASS_BLENDED){
+				SetRenderState(VERTEXALPHA, 1);
+				s->blended->render();
+				SetRenderState(VERTEXALPHA, 0);
+			}
+			metal::endPrepass();
+		}
+		DrawAll(s);
+		metal::endScene(nil);
+		WorldEnd();
+		out[i] = metal::getFrameInfo();
+	}
+}
+
+static bool
+CheckPrepassValid(void)
+{
+	const char *name = "a modern frame without prepass draws is marked invalid and resets the temporal history on it and the next frame";
+	static const int frames[] = {
+		PREPASS_ALL, PREPASS_ALL, PREPASS_NONE, PREPASS_ALL, PREPASS_ALL, PREPASS_EMPTY, PREPASS_ALL, PREPASS_ALL,
+		PREPASS_BLENDED, PREPASS_ALL, PREPASS_ALL
+	};
+	static const int valid[] = { 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1 };
+	static const int reset[] = { 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0 };
+	enum { N = sizeof(frames)/sizeof(frames[0]) };
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	SceneFrame(&s, false);
+	metal::FrameInfo fi[N];
+	HistoryFrames(&s, frames, N, fi);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = true;
+	for(int i = 0; i < N; i++)
+		ok = ok && (fi[i].prepassValid != 0) == (valid[i] != 0) && (fi[i].temporalReset != 0) == (reset[i] != 0);
+	if(!ok)
+		for(int i = 0; i < N; i++)
+			Detail("  frame %d: prepass valid %d (want %d) reset %d (want %d)\n", i, fi[i].prepassValid, valid[i],
+				fi[i].temporalReset, reset[i]);
+	return Report(ok, name);
+}
+
+static bool
+CheckTemporalResets(void)
+{
+	const char *name = "the temporal history resets on a camera cut, a setting change, a new factor and a tier change, and only then";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	int got[10], want[10] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0 };
+	int n = 0;
+	for(int step = 0; step < 5; step++){
+		if(step == 1)
+			metal::cameraCut();
+		else if(step == 2){
+			metal::RenderSettings rs = metal::getRenderSettings();
+			rs.softness = 2.0f;
+			metal::setRenderSettings(&rs);
+		}else if(step == 3)
+			SetSettings(metal::TIER_MODERN, metal::UPSCALE_BALANCED, metal::ANTIALIAS_TAA);
+		else if(step == 4){
+			EnhancedOn();
+			Frames(&s, 1);
+			ModernOn(metal::UPSCALE_BALANCED, metal::ANTIALIAS_TAA);
+		}
+		for(int f = 0; f < 2; f++){
+			Frames(&s, 1);
+			got[n++] = metal::getFrameInfo().temporalReset != 0;
+		}
+	}
+	metal::RenderSettings rs = metal::getRenderSettings();
+	rs.softness = SOFTNESS_DEFAULT;
+	metal::setRenderSettings(&rs);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = memcmp(got, want, sizeof(got)) == 0;
+	if(!ok)
+		for(int i = 0; i < 10; i++)
+			Detail("  frame %d reset %d want %d\n", i, got[i], want[i]);
+	return Report(ok, name);
+}
+
+static uint8 slab[4096] __attribute__((aligned(16)));
+static bool slabArmed, slabUsed;
+static MemoryFunctions savedMemfuncs;
+
+static void*
+SlabMalloc(size_t sz, uint32 hint)
+{
+	if(slabArmed && hint == (MEMDUR_EVENT | ID_ATOMIC) && sz <= sizeof(slab)){
+		slabArmed = false;
+		slabUsed = true;
+		return slab;
+	}
+	return savedMemfuncs.rwmalloc(sz, hint);
+}
+
+static void
+SlabFree(void *p)
+{
+	if(p != slab)
+		savedMemfuncs.rwfree(p);
+}
+
+static bool
+CheckReusedAddress(void)
+{
+	const char *name = "an object created at a destroyed object's address starts without the old object's motion history";
+	RGBA red = { 220, 40, 30, 255 }, col[4] = { red, red, red, red };
+	Material *mat = Material::create();
+	Geometry *g = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::PRELIT | Geometry::NORMALS,
+		2.0f, 1.5f, -1.0f, -1.0f, 10.0f, col, nil, mat);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::cameraCut();
+	savedMemfuncs = Engine::memfuncs;
+	Engine::memfuncs.rwmalloc = SlabMalloc;
+	Engine::memfuncs.rwfree = SlabFree;
+	slabArmed = true;
+	Atomic *a = MakeAtomic(g);
+	void *first = a;
+	DrawOne(a);
+	DrawOne(a);
+	DestroyAtomic(a);
+	slabArmed = true;
+	Atomic *b = MakeAtomic(g);
+	void *second = b;
+	slabArmed = false;
+	V3d up = { 0.0f, 1.0f, 0.0f };
+	b->getFrame()->translate(&up, COMBINEPOSTCONCAT);
+	b->getFrame()->updateObjects();
+	DrawOne(b);
+	float m[2] = { 1.0f, 1.0f };
+	bool read = PrepassMotionAt(PX(0.5f, 10.0f), PY(1.25f, 10.0f), m);
+	DestroyAtomic(b);
+	Engine::memfuncs = savedMemfuncs;
+	TiersOff();
+	g->destroy();
+	mat->destroy();
+	bool ok = slabUsed && first == second && read && fabsf(m[0]) < 1e-4f && fabsf(m[1]) < 1e-4f;
+	if(!ok)
+		Detail("  addresses %p %p read %d motion %.5f,%.5f, expected none\n", first, second, read, m[0], m[1]);
+	return Report(ok, name);
+}
+
+static bool
+Jittered(const metal::FrameInfo &f)
+{
+	return f.jitterX != 0.0f || f.jitterY != 0.0f;
+}
+
+static void
+SteadyFrames(Scene3D *s)
+{
+	metal::cameraCut();
+	Frames(s, 4);
+}
+
+static void
+Im2DSceneFrame(Scene3D *s, float x1, float y0, const float *hud)
+{
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawOpaque(s);
+		metal::endPrepass();
+	}
+	DrawAll(s);
+	Quad2D(30.0f, y0, x1, 150.0f, white, false);
+	metal::endScene(nil);
+	if(hud)
+		Quad2D(hud[0], hud[1], hud[2], hud[3], white, false);
+	WorldEnd();
+}
+
+static bool
+HudInPlace(const uint8 *px, int w, const float *hud, int *bad)
+{
+	int x0 = (int)hud[0], y0 = (int)hud[1], x1 = (int)hud[2], y1 = (int)hud[3], my = (y0 + y1)/2, mx = (x0 + x1)/2;
+	const int in[4][2] = { { x0, my }, { x1, my }, { mx, y0 }, { mx, y1 } };
+	const int out[4][2] = { { x0 - 1, my }, { x1 + 1, my }, { mx, y0 - 1 }, { mx, y1 + 1 } };
+	for(int i = 0; i < 4; i++){
+		if(px[(in[i][1]*w + in[i][0])*4] < 250){
+			*bad = i;
+			return false;
+		}
+		if(px[(out[i][1]*w + out[i][0])*4] > 200){
+			*bad = 4 + i;
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+CheckTemporalIm2D(void)
+{
+	const char *name = "an im2D edge in the scene converges through the temporal scaler like a 3D edge, and im2D after the scene stays in place (im2D jitter)";
+	static const float hud[4] = { 500.25f, 300.25f, 600.75f, 400.75f };
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	float sx = (float)fi.outputWidth/fi.internalWidth, sy = (float)fi.outputHeight/fi.internalHeight;
+	float wantX = (150.0f + 0.85f)*sx, wantY = (40.0f + 0.85f)*sy;
+	int rowY = 105, rowX0 = (int)wantX - RUN/2, colX = 90, colY0 = (int)wantY - RUN/2;
+	EdgeProbe native, temporal, last;
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	for(int f = 0; f < 2; f++)
+		Im2DSceneFrame(&s, wantX, wantY, nil);
+	ProbeEdges(&native, rowY, rowX0, colX, colY0);
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	float drift = 0.0f, meanX = 0.0f, meanY = 0.0f;
+	int jittered = 0, hudBad = -1, hudFrame = -1;
+	bool hudOk = true;
+	for(int f = 0; f < 34; f++){
+		bool withHud = f >= 25;
+		Im2DSceneFrame(&s, wantX, wantY, withHud ? hud : nil);
+		ProbeEdges(&temporal, rowY, rowX0, colX, colY0);
+		if(f >= 26){
+			drift = std::max(drift, std::max(fabsf(temporal.x - last.x), fabsf(temporal.y - last.y)));
+			meanX += temporal.x/8.0f;
+			meanY += temporal.y/8.0f;
+		}
+		last = temporal;
+		if(withHud){
+			jittered += Jittered(metal::getFrameInfo());
+			uint8 *px = CompositeNow();
+			if(px == nil || !HudInPlace(px, cam->frameBuffer->width, hud, &hudBad)){
+				if(hudOk)
+					hudFrame = f;
+				hudOk = false;
+			}
+			delete[] px;
+		}
+	}
+	TiersOff();
+	FreeScene(&s);
+	float dx = fabsf(meanX - wantX), dy = fabsf(meanY - wantY);
+	bool flat = true;
+	for(int i = 0; i < RUN; i++)
+		if(i < RUN/2 - 3 || i > RUN/2 + 2)
+			flat = flat && fabsf(temporal.row[i] - native.row[i]) < 0.03f && fabsf(temporal.col[i] - native.col[i]) < 0.03f;
+	bool ok = dx < 0.12f && dy < 0.12f && drift < 1.0f && flat && jittered == 9 && hudOk;
+	Detail("  im2D edges at x %.3f y %.3f: native x %.3f y %.3f, mean over the last 8 frames x %.3f y %.3f, drift %.3f; "
+		"%d of 9 frames jittered\n", wantX, wantY, native.x, native.y, meanX, meanY, drift, jittered);
+	if(!ok && (dx >= 0.12f || dy >= 0.12f || drift >= 1.0f))
+		Detail("  the 0.12 px and 1.0 drift limits depend on Apple's MetalFX; an OS update may have shifted its behaviour "
+			"(measured errors x %.3f y %.3f, drift %.3f)\n", dx, dy, drift);
+	if(!hudOk)
+		Detail("  im2D after the scene displaced on frame %d (probe %d: 0-3 inside, 4-7 outside the quad)\n", hudFrame, hudBad);
+	if(!flat)
+		for(int i = 0; i < RUN; i++)
+			Detail("  %d: row native %.3f temporal %.3f; column native %.3f temporal %.3f\n", i, native.row[i],
+				temporal.row[i], native.col[i], temporal.col[i]);
+	return Report(ok, name);
+}
+
+static bool
+Covered(int x, int y, float threshold)
+{
+	float px[4] = {};
+	return metal::readScenePixel(x, y, px) && px[0] > threshold;
+}
+
+static bool
+CheckIm2DJitterCoverage(void)
+{
+	const char *name = "an im2D edge and a 3D edge at the same sub-pixel position cover the same scene pixels in every jitter phase";
+	RGBA white = { 255, 255, 255, 255 };
+	Scene3D s;
+	MakeScene(&s);
+	float cy = 0.04f;
+	PlaceCamera(0.0f, 0.0f, cy, 0.0f);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	SteadyFrames(&s);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	float ix = (float)fi.internalWidth/fi.outputWidth, iy = (float)fi.internalHeight/fi.outputHeight;
+	float e3x = 352.0f*ix, e3y = 240.0f*(1.0f - (1.5f - cy)/7.5f)*iy;
+	int p3x = (int)e3x, p3y = (int)e3y, row3 = (int)(PY(0.25f - cy, 10.0f)*iy), col3 = (int)(PX(0.5f, 10.0f)*ix);
+	float e2x = 150.0f + (e3x - p3x), e2y = 40.0f + (e3y - p3y);
+	int row2 = (int)(105*iy), col2 = (int)(90*ix);
+	int jittered = 0, xOff = 0, yOn = 0, bad = -1;
+	bool c[4] = {}, at[4] = {};
+	for(int f = 0; f < 8; f++){
+		metal::beginScene(cam);
+		WorldBegin(SKY);
+		if(metal::beginPrepass()){
+			DrawOpaque(&s);
+			metal::endPrepass();
+		}
+		DrawAll(&s);
+		Quad2D(30.0f, e2y/iy, e2x/ix, 150.0f, white, false);
+		c[0] = Covered(p3x, row3, 0.5f);
+		c[1] = Covered(150, row2, 0.6f);
+		c[2] = Covered(col3, p3y, 0.5f);
+		c[3] = Covered(col2, 40, 0.6f);
+		metal::endScene(nil);
+		WorldEnd();
+		jittered += Jittered(metal::getFrameInfo());
+		xOff += !c[0];
+		yOn += c[2];
+		if(bad < 0 && (c[0] != c[1] || c[2] != c[3])){
+			bad = f;
+			memcpy(at, c, sizeof(at));
+		}
+	}
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = bad < 0 && jittered == 8 && xOff > 0 && yOn > 0;
+	if(!ok)
+		Detail("  %d of 8 frames jittered; 3D right edge uncovered on %d, top edge covered on %d; first disagreement on frame %d "
+			"(3D x %d im2D x %d, 3D y %d im2D y %d); edges 3D %.3f,%.3f im2D %.3f,%.3f\n", jittered, xOff, yOn, bad, at[0], at[1],
+			at[2], at[3], e3x, e3y, e2x, e2y);
+	return Report(ok, name);
+}
+
+static bool
+CheckJitterStarts(void)
+{
+	const char *name = "after a reset the jitter starts on the third frame: a reset frame and a frame with history are unjittered";
+	static const int all[8] = { PREPASS_ALL, PREPASS_ALL, PREPASS_ALL, PREPASS_ALL, PREPASS_ALL, PREPASS_ALL, PREPASS_ALL, PREPASS_ALL };
+	Scene3D s;
+	MakeScene(&s);
+	metal::FrameInfo made[8], cut[4];
+	TiersOff();
+	Frames(&s, 2);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	HistoryFrames(&s, all, 8, made);
+	metal::cameraCut();
+	HistoryFrames(&s, all, 4, cut);
+	TiersOff();
+	FreeScene(&s);
+	int first = 0;
+	while(first < 4 && made[first].upscaler != metal::UPSCALER_TEMPORAL)
+		first++;
+	bool ok = first < 4;
+	const metal::FrameInfo *seq[2] = { made + first, cut };
+	for(int k = 0; k < 2 && ok; k++){
+		const metal::FrameInfo *f = seq[k];
+		ok = f[0].temporalReset && !Jittered(f[0]) && !f[1].temporalReset && !Jittered(f[1]) && !f[2].temporalReset &&
+			Jittered(f[2]) && Jittered(f[3]);
+	}
+	if(!ok){
+		Detail("  first temporal frame %d\n", first);
+		for(int i = 0; i < 4 && first + i < 8; i++)
+			Detail("  frame %d: made reset %d jitter %g,%g; after a cut reset %d jitter %g,%g\n", i, made[first+i].temporalReset,
+				made[first+i].jitterX, made[first+i].jitterY, cut[i].temporalReset, cut[i].jitterX, cut[i].jitterY);
+	}
+	return Report(ok, name);
+}
+
+static bool
+CheckJitterNeedsHistory(const char *name, bool alternate)
+{
+	enum { N = 10 };
+	int frames[N];
+	for(int i = 0; i < N; i++)
+		frames[i] = alternate && i % 2 == 0 ? PREPASS_ALL : PREPASS_NONE;
+	Scene3D s;
+	MakeScene(&s);
+	metal::FrameInfo fresh[N], cut[N];
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	HistoryFrames(&s, frames, N, fresh);
+	SteadyFrames(&s);
+	metal::cameraCut();
+	HistoryFrames(&s, frames, N, cut);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = cut[0].upscaler == metal::UPSCALER_TEMPORAL;
+	for(int i = 0; i < N; i++)
+		ok = ok && !Jittered(fresh[i]) && !Jittered(cut[i]);
+	if(!ok)
+		for(int i = 0; i < N; i++)
+			Detail("  frame %d: upscaler %d jitter %g,%g; after a cut %g,%g\n", i, cut[i].upscaler, fresh[i].jitterX, fresh[i].jitterY,
+				cut[i].jitterX, cut[i].jitterY);
+	return Report(ok, name);
+}
+
+static bool
+CheckJitterCutInFrame(void)
+{
+	const char *name = "a camera cut after beginScene costs one jittered reset frame, then the jitter restarts on the third frame";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	SteadyFrames(&s);
+	metal::FrameInfo f[3];
+	metal::beginScene(cam);
+	metal::cameraCut();
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawAll(&s);
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	metal::endScene(nil);
+	WorldEnd();
+	f[0] = metal::getFrameInfo();
+	for(int i = 1; i < 3; i++){
+		Frames(&s, 1);
+		f[i] = metal::getFrameInfo();
+	}
+	TiersOff();
+	FreeScene(&s);
+	bool ok = f[0].temporalReset && Jittered(f[0]) && !f[1].temporalReset && !Jittered(f[1]) && Jittered(f[2]);
+	if(!ok)
+		for(int i = 0; i < 3; i++)
+			Detail("  frame %d: reset %d jitter %g,%g\n", i, f[i].temporalReset, f[i].jitterX, f[i].jitterY);
+	return Report(ok, name);
+}
+
+static bool
+CheckJitterNotApplied(void)
+{
+	const char *name = "a scene camera updated before beginScene is not jittered and the temporal scaler is told no jitter";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	SteadyFrames(&s);
+	metal::FrameInfo before = metal::getFrameInfo();
+	WorldBegin(SKY);
+	metal::beginScene(cam);
+	if(metal::beginPrepass()){
+		DrawAll(&s);
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	float proj[16];
+	metal::sceneProjectionForTest(proj);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::FrameInfo fi = metal::getFrameInfo();
+	TiersOff();
+	FreeScene(&s);
+	bool ok = Jittered(before) && proj[8] == 0.0f && proj[9] == 0.0f && !Jittered(fi);
+	if(!ok)
+		Detail("  steady jitter %g,%g; then proj[8] %g proj[9] %g, scaler jitter %g,%g\n", before.jitterX, before.jitterY, proj[8],
+			proj[9], fi.jitterX, fi.jitterY);
+	return Report(ok, name);
+}
+
+static bool
+CheckJitterSubRaster(void)
+{
+	const char *name = "a scene camera on a sub-raster is jittered by the same pixels, scaled to its viewport";
+	Scene3D s;
+	MakeScene(&s);
+	Raster *parent = cam->frameBuffer;
+	Raster *sub = Raster::create(0, 0, 0, Raster::CAMERA | Raster::DONTALLOCATE);
+	Rect r = { 200, 100, 320, 160 };
+	sub->subRaster(parent, &r);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	SteadyFrames(&s);
+	float proj[16];
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	cam->endUpdate();
+	cam->frameBuffer = sub;
+	cam->beginUpdate();
+	metal::sceneProjectionForTest(proj);
+	cam->endUpdate();
+	cam->frameBuffer = parent;
+	cam->beginUpdate();
+	if(metal::beginPrepass()){
+		DrawAll(&s);
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::FrameInfo fi = metal::getFrameInfo();
+	TiersOff();
+	FreeScene(&s);
+	sub->destroy();
+	float w = r.w*(float)fi.internalWidth/fi.outputWidth, h = r.h*(float)fi.internalHeight/fi.outputHeight;
+	float wantX = 2.0f*fi.jitterX/w, wantY = -2.0f*fi.jitterY/h;
+	bool ok = Jittered(fi) && fabsf(proj[8] - wantX) <= 0.01f*fabsf(wantX) && fabsf(proj[9] - wantY) <= 0.01f*fabsf(wantY);
+	if(!ok)
+		Detail("  jitter %g,%g; sub-raster proj[8] %g proj[9] %g, expected %g %g\n", fi.jitterX, fi.jitterY, proj[8], proj[9],
+			wantX, wantY);
+	return Report(ok, name);
+}
+
+static bool
+CheckTemporalLogs(void)
+{
+	const char *name = "taa resolving to the spatial scaler logs one line: once without a depth raster, once without prepass targets";
+	Scene3D s;
+	MakeScene(&s);
+	Raster *z = cam->zBuffer;
+	metal::setTemporalFailForTest(false);
+	uint32 start = metal::temporalLogsForTest();
+	cam->zBuffer = nil;
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	int32 noDepth = metal::getFrameInfo().upscaler;
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_BALANCED, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	cam->zBuffer = z;
+	TiersOff();
+	Frames(&s, 1);
+	uint32 depthLogs = metal::temporalLogsForTest() - start;
+	metal::setPrepassTargetsFailForTest(true);
+	start = metal::temporalLogsForTest();
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_TAA);
+	Frames(&s, 2);
+	int32 noTargets = metal::getFrameInfo().upscaler;
+	uint32 targetLogs = metal::temporalLogsForTest() - start;
+	metal::setPrepassTargetsFailForTest(false);
+	TiersOff();
+	Frames(&s, 1);
+	FreeScene(&s);
+	bool ok = noDepth == metal::UPSCALER_SPATIAL && noTargets == metal::UPSCALER_SPATIAL && depthLogs == 1 && targetLogs == 1;
+	if(!ok)
+		Detail("  no depth: upscaler %d, %u lines; no prepass targets: upscaler %d, %u lines\n", noDepth, depthLogs, noTargets,
+			targetLogs);
+	return Report(ok, name);
+}
+
 int
 RunModernChecks(Camera *camera)
 {
@@ -797,6 +1846,26 @@ RunModernChecks(Camera *camera)
 	CheckObjectMotion();
 	CheckObjectMotionAfterCut();
 	CheckSkinnedMotion();
+	CheckPrepassSplit("a prepass split in two keeps the first segment's normal and motion at one sample");
+	CheckReusedAddress();
+	CheckJitter();
+	CheckJitterKeyed();
+	CheckTemporalScaler();
+	CheckTemporalAboveWhite();
+	CheckTemporalConverges();
+	CheckTemporalMotion();
+	CheckReactiveMask();
+	CheckPrepassValid();
+	CheckTemporalResets();
+	CheckTemporalIm2D();
+	CheckIm2DJitterCoverage();
+	CheckJitterStarts();
+	CheckJitterNeedsHistory("a modern frame sequence without the prepass bracket is never jittered", false);
+	CheckJitterNeedsHistory("a host that brackets the prepass on alternate frames is never jittered", true);
+	CheckJitterCutInFrame();
+	CheckJitterNotApplied();
+	CheckJitterSubRaster();
+	CheckTemporalLogs();
 	WorldClose();
 	return failures;
 }
@@ -881,6 +1950,7 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	WorldOpen(cam);
 	PrepassIdentity(name);
 	CheckPrepassSampleZero();
+	CheckPrepassSplit("a prepass split in two keeps the first segment's normal and motion at four samples");
 	WorldClose();
 	if(!restart(1))
 		Report(false, "the engine restarts at one sample after the modern checks");

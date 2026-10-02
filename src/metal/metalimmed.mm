@@ -52,6 +52,7 @@ static MTLPrimitiveType primTypeMap[] = {
 };
 
 static Im2DVertex tmpprimbuf[3];
+static bool drawEmissive;
 
 void
 im2DRenderLine(void *vertices, int32 numVertices, int32 vert1, int32 vert2)
@@ -80,6 +81,7 @@ drawRingPrimitive(MetalContext *ctx, PrimitiveType primType, int32 count, int32 
 
 	if(primType != PRIMTYPETRIFAN){
 		[ctx->encoder drawPrimitives:primTypeMap[primType] vertexStart:0 vertexCount:count];
+		noteImmediateDraw(primTypeMap[primType], count, nil, 0, 0, false, drawEmissive);
 		return;
 	}
 	wide = numVertices > 0x10000;
@@ -92,6 +94,8 @@ drawRingPrimitive(MetalContext *ctx, PrimitiveType primType, int32 count, int32 
 	[ctx->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:count
 		indexType:wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
 		indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
+	noteImmediateDraw(MTLPrimitiveTypeTriangle, count, space.buffer, space.offset,
+		wide ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16, true, drawEmissive);
 }
 
 static void
@@ -108,6 +112,7 @@ drawRingIndexedPrimitive(MetalContext *ctx, PrimitiveType primType, int32 count,
 	[ctx->encoder drawIndexedPrimitives:primTypeMap[primType] indexCount:count
 		indexType:MTLIndexTypeUInt16
 		indexBuffer:(__bridge id<MTLBuffer>)space.buffer indexBufferOffset:space.offset];
+	noteImmediateDraw(primTypeMap[primType], count, space.buffer, space.offset, MTLIndexTypeUInt16, true, drawEmissive);
 }
 
 static bool32
@@ -115,7 +120,7 @@ im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint
 {
 	Camera *cam = (Camera*)engine->currentCamera;
 	RingSpace space;
-	float32 xform[4];
+	float32 xform[4], nx, ny;
 	uint32 size;
 	bool emit, ok;
 
@@ -126,6 +131,7 @@ im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint
 		return 0;
 	emit = shader == im2dShader && im2dEmitShader && frameEmissiveScale() > 1.0f &&
 		getContext()->encoderColorFormat == COLORFMT_SCENE;
+	drawEmissive = emit;
 	if(emit)
 		im2dEmitShader->use();
 	setVertexLayout(layout);
@@ -133,6 +139,10 @@ im2DBegin(Shader *shader, uint32 layout, void *vertices, int32 numVertices, uint
 	xform[1] = -2.0f/cam->frameBuffer->height;
 	xform[2] = -1.0f;
 	xform[3] = 1.0f;
+	if(getContext()->encoderColorFormat == COLORFMT_SCENE && frameJitterIm2D(cam, &nx, &ny)){
+		xform[2] += nx;
+		xform[3] += ny;
+	}
 	setIm2DXform(xform);
 	if(emit)
 		setDrawEmissiveScale(frameEmissiveScale());
@@ -287,6 +297,7 @@ im3DBegin(void)
 {
 	uint32 size;
 
+	drawEmissive = false;
 	if(im3dShader == nil || im3dNumVertices == 0)
 		return 0;
 	if(im3dLit)

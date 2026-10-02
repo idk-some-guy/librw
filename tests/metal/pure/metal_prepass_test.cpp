@@ -49,9 +49,11 @@ TestMotion(void)
 	m = ppMotion(0.0f, 0.0f, 2.0f, 0.0f, 0.4f, 2.0f);
 	CHECK(m.x == 0.0f && Near(m.y, -0.1f, 1e-7f));
 	m = ppMotion(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
-	CHECK(m.x == 0.0f && m.y == 0.0f);
+	CHECK(m.x > 1.0f && m.y > 1.0f);
 	m = ppMotion(0.0f, 0.0f, 1.0f, 1.0f, 1.0f, -1.0f);
-	CHECK(m.x == 0.0f && m.y == 0.0f);
+	CHECK(m.x > 1.0f && m.y > 1.0f);
+	m = ppMotion(0.5f, -0.5f, 1.0f, 0.5f, -0.5f, 0.0f);
+	CHECK(m.x > 1.0f && m.y > 1.0f);
 }
 
 static void
@@ -134,6 +136,21 @@ TestPrevMap(void)
 	n.clear();
 	CHECK(n.size() == 0 && n.find(&a) == nullptr && n.find(&b) == nullptr && n.slotData() == slots);
 	CHECK(n.put(&c) != nullptr && n.put(&a) != nullptr && n.put(&b) == nullptr);
+	int keys[8];
+	PrevMap<int> f;
+	f.forget(&keys[0]);
+	f.reserve(8);
+	for(int i = 0; i < 8; i++)
+		*f.put(&keys[i]) = i;
+	for(int i = 0; i < 8; i += 2)
+		f.forget(&keys[i]);
+	f.forget(&a);
+	bool kept = true;
+	for(int i = 0; i < 8; i++)
+		kept = kept && (i % 2 == 0 ? f.find(&keys[i]) == nullptr : f.find(&keys[i]) && *f.find(&keys[i]) == i);
+	CHECK(kept && f.size() == 8 && f.put(&keys[0]) == nullptr);
+	f.clear();
+	CHECK(f.put(&keys[0]) != nullptr && f.find(&keys[0]) != nullptr);
 }
 
 int

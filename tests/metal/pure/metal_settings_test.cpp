@@ -91,6 +91,9 @@ TestAntiAliasNames(void)
 	CHECK(strcmp(antiAliasName(ANTIALIAS_FXAA), "fxaa") == 0);
 	CHECK(strcmp(antiAliasName(ANTIALIAS_TAA), "taa") == 0);
 	CHECK(strcmp(antiAliasName(7), "off") == 0);
+	CHECK(strcmp(upscalerName(UPSCALER_TEMPORAL), "temporal") == 0 && strcmp(antiAliasName(ANTIALIAS_TEMPORAL), "temporal") == 0);
+	CHECK(strcmp(upscalerName(UPSCALER_SPATIAL), "spatial") == 0 && strcmp(upscalerName(UPSCALER_NONE), "none") == 0);
+	CHECK(UPSCALER_TEMPORAL == UPSCALER_SPATIAL + 1 && ANTIALIAS_TEMPORAL == ANTIALIAS_TAA + 1);
 }
 
 int

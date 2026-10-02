@@ -1233,6 +1233,8 @@ beginUpdate(Camera *cam)
 		proj[15] = 1.0f;
 	}
 	memcpy(&cam->devProj, &proj, sizeof(RawMatrix));
+	setUnjitteredProjection(proj);
+	frameJitterProjection(cam, proj);
 	setProjectionMatrix(proj);
 	setFogPlanes(cam->fogPlane, cam->farPlane);
 

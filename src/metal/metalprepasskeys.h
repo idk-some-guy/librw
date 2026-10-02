@@ -168,6 +168,16 @@ struct PrevMap
 		return found ? &this->values[s->index] : nullptr;
 	}
 
+	void forget(const void *key)
+	{
+		if(this->slots.empty())
+			return;
+		bool found;
+		Slot *s = slot(key, &found);
+		if(found)
+			s->key = &this->gen;
+	}
+
 	T *put(const void *key)
 	{
 		if(this->slots.empty())

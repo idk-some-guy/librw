@@ -383,6 +383,21 @@ endPrepassState(void)
 	return prepassDrawsThisFrame;
 }
 
+uint32
+prepassDrawsSoFar(void)
+{
+	return prepassFrame ? prepassDrawsThisFrame : 0;
+}
+
+void
+forgetObjectHistory(const void *object)
+{
+	worldsPrev.forget(object);
+	worldsCur.forget(object);
+	bonesPrev.forget(object);
+	bonesCur.forget(object);
+}
+
 void
 finishPrepassFrame(bool countOrphans)
 {
@@ -410,6 +425,7 @@ void
 cameraCut(void)
 {
 	haveLastViewProj = false;
+	frameCameraCut();
 }
 
 void
@@ -688,6 +704,14 @@ void
 setVertexLayout(uint32 layout)
 {
 	currentLayout = layout;
+}
+
+MTLVertexDescriptor*
+layoutVertexDescriptor(uint32 layout)
+{
+	if(layout == 0 || layout >= vertexLayouts.size())
+		return nil;
+	return [vertexLayouts[layout].desc copy];
 }
 
 int32
@@ -1530,9 +1554,20 @@ out:
 }
 
 void
-setProjectionMatrix(float32 *mat)
+setUnjitteredProjection(float32 *mat)
 {
 	memcpy(projBase, mat, 64);
+}
+
+void
+sceneProjectionForTest(float32 proj[16])
+{
+	memcpy(proj, &uniformScene.proj, 64);
+}
+
+void
+setProjectionMatrix(float32 *mat)
+{
 	memcpy(&uniformScene.proj, mat, 64);
 	blockDirty[BLOCK_SCENE] = true;
 	comparePrepassView();
@@ -2517,6 +2552,48 @@ bindVertexBuffer(void *buffer, uint32 offset)
 		[ctx->encoder setVertexBuffer:buf offset:offset atIndex:BUFFER_VERTEX];
 	enc.vertexData = buf;
 	enc.vertexDataOffset = offset;
+}
+
+void
+noteImmediateDraw(uint32 primitive, uint32 count, void *indexBuffer, uint32 indexOffset, uint32 indexType, bool indexed,
+	bool emissive)
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil || ctx->encoderColorFormat != COLORFMT_SCENE || !(frameReactiveOpen() || emissive) || !frameTemporalActive())
+		return;
+	ReactiveDraw r;
+	r.vertices = enc.vertexData;
+	r.vertexOffset = enc.vertexDataOffset;
+	r.indices = (__bridge id<MTLBuffer>)indexBuffer;
+	r.indexOffset = indexOffset;
+	r.count = count;
+	r.primitive = primitive;
+	r.indexType = indexType;
+	r.indexed = indexed;
+	r.layout = currentLayout;
+	int blocks[3] = { BLOCK_SCENE, BLOCK_OBJECT, BLOCK_STATE };
+	for(int i = 0; i < 3; i++){
+		r.blocks[i] = blockBuffer[blocks[i]];
+		r.blockOffsets[i] = blockOffset[blocks[i]];
+	}
+	r.texture = enc.textures[0] ? enc.textures[0] : (__bridge id<MTLTexture>)getWhiteTexture();
+	if(enc.samplers[0])
+		r.sampler = enc.samplers[0];
+	else{
+		SamplerDesc sd;
+		sd.filter = Texture::LINEAR;
+		sd.addressU = Texture::CLAMP;
+		sd.addressV = Texture::CLAMP;
+		sd.maxAnisotropy = 1;
+		sd.hasMips = false;
+		sd.maxLevel = 0;
+		r.sampler = getSampler(sd);
+	}
+	if(haveViewport)
+		r.viewport = wantViewport;
+	else
+		r.viewport = MTLViewport{ 0.0, 0.0, (double)ctx->encoderWidth, (double)ctx->encoderHeight, 0.0, 1.0 };
+	frameAddReactive(r);
 }
 
 StateStats

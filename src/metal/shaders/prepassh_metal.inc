@@ -13,6 +13,8 @@ const char *prepassh_metal_src =
 "#define PP_SQRT sqrtf\n"
 "#endif\n"
 
+"#define PP_MOTION_OFFSCREEN 2.0f\n"
+
 "struct PPVec2 { float x, y; };\n"
 "struct PPVec3 { float x, y, z; };\n"
 
@@ -68,8 +70,8 @@ const char *prepassh_metal_src =
 "{\n"
 "	PPVec2 m;\n"
 "	if(!(cw > 0.0f) || !(pw > 0.0f)){\n"
-"		m.x = 0.0f;\n"
-"		m.y = 0.0f;\n"
+"		m.x = PP_MOTION_OFFSCREEN;\n"
+"		m.y = PP_MOTION_OFFSCREEN;\n"
 "		return m;\n"
 "	}\n"
 "	m.x = 0.5f*(px/pw - cx/cw);\n"

@@ -34,7 +34,8 @@ enum
 {
 	ANTIALIAS_OFF = 0,
 	ANTIALIAS_FXAA,
-	ANTIALIAS_TAA
+	ANTIALIAS_TAA,
+	ANTIALIAS_TEMPORAL
 };
 
 enum
@@ -47,7 +48,8 @@ enum
 enum
 {
 	UPSCALER_NONE = 0,
-	UPSCALER_SPATIAL
+	UPSCALER_SPATIAL,
+	UPSCALER_TEMPORAL
 };
 
 #define EMITTERPEAK_MIN 400.0f
@@ -112,8 +114,19 @@ antiAliasName(int32_t aa)
 	switch(aa){
 	case ANTIALIAS_FXAA: return "fxaa";
 	case ANTIALIAS_TAA: return "taa";
+	case ANTIALIAS_TEMPORAL: return "temporal";
 	}
 	return "off";
+}
+
+inline const char*
+upscalerName(int32_t u)
+{
+	switch(u){
+	case UPSCALER_SPATIAL: return "spatial";
+	case UPSCALER_TEMPORAL: return "temporal";
+	}
+	return "none";
 }
 
 inline float

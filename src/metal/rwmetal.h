@@ -345,6 +345,9 @@ struct FrameInfo
 	float32 headroom, potentialHeadroom, peak;
 	float32 bloom;
 	int32 antiAliasing;
+	float32 jitterX, jitterY;
+	bool32 prepassValid;
+	bool32 temporalReset;
 };
 
 void setRenderSettings(const RenderSettings *s);
@@ -367,6 +370,8 @@ void endScene(const GradeParams *params);
 bool32 beginPrepass(void);
 void endPrepass(void);
 void cameraCut(void);
+void beginReactive(void);
+void endReactive(void);
 bool32 enhancedFrame(void);
 void setEmissiveScale(float32 s);
 float32 getEmissiveScale(void);

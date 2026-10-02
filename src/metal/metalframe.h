@@ -46,6 +46,32 @@ PassTarget currentPassTarget(void);
 void resumePassTarget(const PassTarget &t);
 void setPassDepthSplit(Raster *color);
 
+struct ReactiveDraw
+{
+	id<MTLBuffer> vertices;
+	uint32 vertexOffset;
+	id<MTLBuffer> indices;
+	uint32 indexOffset;
+	uint32 count;
+	uint32 primitive;
+	uint32 indexType;
+	bool indexed;
+	uint32 layout;
+	id<MTLBuffer> blocks[3];
+	uint32 blockOffsets[3];
+	id<MTLTexture> texture;
+	id<MTLSamplerState> sampler;
+	MTLViewport viewport;
+};
+
+bool frameReactiveOpen(void);
+bool frameTemporalActive(void);
+void frameAddReactive(const ReactiveDraw &r);
+void frameJitterProjection(Camera *cam, float32 *proj);
+bool frameJitterIm2D(Camera *cam, float32 *nx, float32 *ny);
+void frameCameraCut(void);
+MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);
+
 }
 }
 
