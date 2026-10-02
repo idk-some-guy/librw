@@ -20,6 +20,7 @@ bool32 commitAndWait(id<MTLCommandBuffer> cb);
 
 bool32 frameInit(void);
 void frameTerm(void);
+void frameBuildReactive(void);
 const char *frameStatsTail(void);
 void frameTierChanged(void);
 uint32 activeFormatMask(void);

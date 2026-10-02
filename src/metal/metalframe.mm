@@ -650,8 +650,8 @@ reactivePipeline(id<MTLLibrary> lib, NSString *vs, uint32 layout)
 	return p;
 }
 
-static void
-buildReactive(void)
+void
+frameBuildReactive(void)
 {
 	if(frame.reactiveBuilt)
 		return;
@@ -710,7 +710,6 @@ ensureSceneTargets(Raster *main, Raster *depth)
 		if(frame.temporal){
 			outputUsage |= frame.temporal.outputTextureUsage;
 			gradedUsage |= frame.temporal.colorTextureUsage;
-			buildReactive();
 		}else{
 			frame.scaler = makeSpatialScaler(iw, ih, ow, oh);
 			if(frame.scaler == nil){
@@ -1090,7 +1089,6 @@ ensureTaa(void)
 		frame.taaHistory[i] = inputs ? newTexture(MTLPixelFormatRGBA16Float, frame.outputWidth, frame.outputHeight,
 			MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1) : nil;
 	if(frame.taaHistory[0] && frame.taaHistory[1]){
-		buildReactive();
 		frame.taaIndex = 0;
 		frame.temporalReset = true;
 		return true;

@@ -1066,6 +1066,7 @@ initMetal(void)
 	openPrepass();
 	prewarmPipelines();
 	openIm2DUV2();
+	frameBuildReactive();
 	return 1;
 }
 

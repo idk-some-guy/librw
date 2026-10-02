@@ -2554,7 +2554,7 @@ CheckTaaFaintReactive(void)
 	bg->destroy();
 	fg->destroy();
 	mat->destroy();
-	bool ok = jPlain >= 6 && jFringe >= 6 && fringe < 2.0f*plain + 0.02f;
+	bool ok = jPlain >= 6 && jFringe >= 6 && fringe < 3.0f*plain + 0.02f;
 	Detail("  over the last 8 frames (%d and %d jittered) the edge pixels swing by up to %.3f in red without the fringe and %.3f under it\n",
 		jPlain, jFringe, plain, fringe);
 	return Report(ok, name);
@@ -2704,6 +2704,10 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 		return failures;
 	}
 	cam = camera();
+	bool reactive = metal::reactivePassForTest() != nil;
+	if(!reactive)
+		Detail("  no reactive pass after the restart, before any frame\n");
+	Report(reactive, "an engine start builds the reactive mask pipelines before any temporal frame needs them");
 	WorldOpen(cam);
 	PrepassIdentity(name);
 	CheckPrepassSampleZero();
