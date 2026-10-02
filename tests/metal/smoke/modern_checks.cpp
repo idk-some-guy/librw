@@ -3068,13 +3068,14 @@ CheckNormalBudget(void)
 static bool
 CheckNormalBudgetCut(void)
 {
-	const char *name = "a reported camera cut builds every waiting stream in that frame, whatever the budget";
+	const char *name = "a reported camera cut builds every waiting stream that fits the cut budget in that frame, whatever the per-frame budget";
 	Geometry *geos[3] = { RidgeGeometry(), BoxGeometry(2.5f, 0.0f, 10.0f), CylinderGeometry(1.5f, 10.0f, true) };
 	Atomic *as[3];
 	for(int i = 0; i < 3; i++)
 		as[i] = MakeAtomic(geos[i]);
 	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
 	metal::setNormalBudgetForTest(0.0f);
+	metal::setNormalBuildCostForTest(0.0f);
 	metal::InstanceStats s0 = metal::getInstanceStats();
 	for(int i = 0; i < 3; i++)
 		DerivedFrame(as[i]);
@@ -3085,6 +3086,7 @@ CheckNormalBudgetCut(void)
 	DerivedFrame(as[1]);
 	metal::InstanceStats s3 = metal::getInstanceStats();
 	metal::setNormalBudgetForTest(-1.0f);
+	metal::setNormalBuildCostForTest(-1.0f);
 	TiersOff();
 	for(int i = 0; i < 3; i++){
 		DestroyAtomic(as[i]);
@@ -3822,6 +3824,75 @@ CheckRelitWaiting(void)
 	if(!ok)
 		Detail("  facets red %.4f %.4f want %.4f %.4f; streams %u -> %u\n", l, r, wantL, wantR, s0.normalStreams, s1.normalStreams);
 	return Report(ok, name);
+}
+
+static void
+CheckNormalCutBounded(void)
+{
+	const char *bounded = "a camera cut builds streams only up to the cut budget; the rest draw lit by their face normal and drain in the next two frames";
+	const char *after = "once the cut's backlog has drained, new streams build at the per-frame budget again";
+	enum { BOXES = 6, N = BOXES + 1 };
+	Sun sun;
+	MakeSun(&sun, 0.0f);
+	Geometry *geos[N + 2];
+	Atomic *as[N + 2];
+	for(int i = 0; i < BOXES; i++)
+		geos[i] = BoxGeometry(3.0f*i - 7.5f, 6.0f, 30.0f);
+	geos[BOXES] = CylinderGeometry(1.0f, 10.0f, false);
+	geos[N] = BoxGeometry(-6.0f, -6.0f, 30.0f);
+	geos[N + 1] = BoxGeometry(6.0f, -6.0f, 30.0f);
+	for(int i = 0; i < N + 2; i++)
+		as[i] = MakeAtomic(geos[i]);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.0f, 0.0f, 1.0f);
+	metal::setNormalBuildCostForTest(3.0f);
+	V3d left = { sinf(0.3927f), 0.0f, -cosf(0.3927f) }, right = { -sinf(0.3927f), 0.0f, -cosf(0.3927f) };
+	float wantL = Expect(0, 128/255.0f, 0.0f, 0.0f, left, &sun, true, 1.0f);
+	float wantR = Expect(0, 128/255.0f, 0.0f, 0.0f, right, &sun, true, 1.0f);
+	metal::InstanceStats s0 = metal::getInstanceStats();
+	metal::StateStats p0 = metal::getStateStats();
+	metal::cameraCut();
+	LitBegin(as, N, CULLNONE);
+	float l = ScenePixel(PX(0.354f, 9.146f), PY(0.0f, 9.146f), 0), r = ScenePixel(PX(-0.354f, 9.146f), PY(0.0f, 9.146f), 0);
+	LitEnd();
+	metal::InstanceStats s1 = metal::getInstanceStats();
+	metal::StateStats p1 = metal::getStateStats();
+	uint32 pending[3];
+	for(int f = 0; f < 3; f++){
+		LitBegin(as, N, CULLNONE);
+		LitEnd();
+		pending[f] = metal::getInstanceStats().normalPending - s0.normalPending;
+	}
+	metal::InstanceStats s2 = metal::getInstanceStats();
+	LitBegin(as, N + 2, CULLNONE);
+	LitEnd();
+	metal::InstanceStats s3 = metal::getInstanceStats();
+	metal::setNormalBuildCostForTest(-1.0f);
+	LitBegin(as, N + 2, CULLNONE);
+	LitEnd();
+	metal::InstanceStats s4 = metal::getInstanceStats();
+	RelitReset();
+	TiersOff();
+	for(int i = 0; i < N + 2; i++){
+		DestroyAtomic(as[i]);
+		geos[i]->destroy();
+	}
+	FreeSun(&sun);
+	uint32 draws = p1.prepassDraws - p0.prepassDraws, equal = p1.prepassEqual - p0.prepassEqual;
+	bool ok = s1.normalStreams == s0.normalStreams + 3 && s1.normalPending == s0.normalPending + 4 && draws == N && equal == N &&
+		fabsf(l - wantL) < 3.0f/255.0f && fabsf(r - wantR) < 3.0f/255.0f && fabsf(l - r) > 0.05f &&
+		pending[0] == 1 && pending[1] == 0 && pending[2] == 0 && s2.normalStreams == s0.normalStreams + N;
+	if(!ok)
+		Detail("  cut frame built %u pending %u; prepass %u equal %u; facets red %.4f %.4f want %.4f %.4f; then pending %u %u %u, built %u\n",
+			s1.normalStreams - s0.normalStreams, s1.normalPending - s0.normalPending, draws, equal, l, r, wantL, wantR,
+			pending[0], pending[1], pending[2], s2.normalStreams - s0.normalStreams);
+	Report(ok, bounded);
+	ok = s3.normalStreams == s2.normalStreams + 1 && s3.normalPending == s2.normalPending + 1 &&
+		s4.normalStreams == s3.normalStreams + 1 && s4.normalPending == s2.normalPending;
+	if(!ok)
+		Detail("  built %u -> %u -> %u; pending %u -> %u -> %u\n", s2.normalStreams, s3.normalStreams, s4.normalStreams,
+			s2.normalPending, s3.normalPending, s4.normalPending);
+	Report(ok, after);
 }
 
 static Atomic*
@@ -5073,6 +5144,7 @@ RunModernChecks(Camera *camera)
 	CheckRelitCrease();
 	CheckRelitBlended();
 	CheckRelitWaiting();
+	CheckNormalCutBounded();
 	CheckRelitShadowSun();
 	CheckRelitSunClamp();
 	CheckRelitOwnNormals();

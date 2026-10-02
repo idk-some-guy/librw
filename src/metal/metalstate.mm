@@ -272,11 +272,13 @@ static std::unordered_map<uint32, uint32> derivedLayouts;
 static InstanceDataHeader *currentDrawHeader;
 enum { NORMAL_QUEUE = 4096 };
 static const double normalBudgetMs = 1.0;
+static const double normalCutBudgetMs = 8.0;
 static double normalBudgetTest = -1.0;
+static double normalBuildCostTest = -1.0;
 static InstanceDataHeader *normalQueue[NORMAL_QUEUE];
-static uint32 normalQueueHead, normalQueueUsed, normalPending;
+static uint32 normalQueueHead, normalQueueUsed, normalPending, normalCutBacklog;
 static double normalSpentMs;
-static bool normalUnlimited, normalCutPending;
+static bool normalCutFrame, normalCutPending;
 
 static void drainNormalQueue(void);
 
@@ -401,7 +403,9 @@ beginPrepassState(bool continuous)
 		bonesCur.reserve(PREV_PALETTES);
 	}
 	normalSpentMs = 0.0;
-	normalUnlimited = normalCutPending;
+	if(normalCutFrame)
+		normalCutBacklog = normalQueueUsed;
+	normalCutFrame = normalCutPending;
 	normalCutPending = false;
 	drainNormalQueue();
 	prepassKeys.clear();
@@ -792,6 +796,12 @@ setNormalBudgetForTest(float32 ms)
 	normalBudgetTest = ms;
 }
 
+void
+setNormalBuildCostForTest(float32 ms)
+{
+	normalBuildCostTest = ms;
+}
+
 uint32
 normalStreamsPending(void)
 {
@@ -801,7 +811,9 @@ normalStreamsPending(void)
 static bool
 normalBudgetLeft(void)
 {
-	return normalUnlimited || normalSpentMs < (normalBudgetTest >= 0.0 ? normalBudgetTest : normalBudgetMs);
+	if(normalCutFrame || normalCutBacklog > 0)
+		return normalSpentMs < normalCutBudgetMs;
+	return normalSpentMs < (normalBudgetTest >= 0.0 ? normalBudgetTest : normalBudgetMs);
 }
 
 static uint32
@@ -905,7 +917,8 @@ ensureNormalStream(InstanceDataHeader *h)
 	packNormals(normals.data(), h->totalNumVertex, packed.data());
 	id<MTLBuffer> buf = [getContext()->device newBufferWithBytes:packed.data() length:packed.size()
 		options:MTLResourceStorageModeShared];
-	normalSpentMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	normalSpentMs += normalBuildCostTest >= 0.0 ? normalBuildCostTest :
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	if(buf == nil)
 		return nil;
 	h->mtlNormalBuffer = (__bridge_retained void*)buf;
@@ -920,6 +933,8 @@ drainNormalQueue(void)
 		InstanceDataHeader *h = normalQueue[normalQueueHead];
 		normalQueueHead = (normalQueueHead + 1) % NORMAL_QUEUE;
 		normalQueueUsed--;
+		if(normalCutBacklog > 0)
+			normalCutBacklog--;
 		if(h)
 			ensureNormalStream(h);
 	}

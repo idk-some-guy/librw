@@ -77,6 +77,7 @@ struct InstanceStats
 };
 InstanceStats getInstanceStats(void);
 void setNormalBudgetForTest(float32 ms);
+void setNormalBuildCostForTest(float32 ms);
 void setShadowFactorForTest(float32 v);
 void setFaceFetchForTest(bool32 on);
 void setFaceSkipForTest(bool32 on);
