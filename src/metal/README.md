@@ -36,7 +36,7 @@ The device calls the table from the engine's device requests and from `showRaste
 | `refreshRate()` | `showRaster`, on a frame that sleeps without a drawable | The display's refresh rate in Hz, 0 when unknown (the device then uses 60). |
 | `visible()` | `showRaster`, every frame with a surface | See "Hidden surfaces". |
 | `pollSizeChange()` | `showRaster`, every frame with a surface | Return true once after the size or scale changed, counting from `createSurface`. The device then reads `drawableSize` and `backingScale` and updates the layer. |
-| `surfaceScreen()` | `showRaster`, when the backend re-reads the EDR headroom | Return the `NSScreen` of the surface's window as a `void *`, or `nil`. The device reads the screen's EDR headroom and colour space from it. A table without the entry (`nil`) means no screen. |
+| `surfaceScreen()` | `showRaster`, when the backend re-reads the EDR headroom | Return the `NSScreen` of the surface's window as a `void *`, or `nil`. The device reads the screen's EDR headroom and colour space from it. A table without the entry (`nil`) means no screen. Once a screen has been reported, a `nil` return keeps its headroom and colour space until a screen is reported again. |
 
 Across the table, 0 means none or unknown: a count, a size, a scale or a rate of 0, and a mode `refresh` of 0.
 

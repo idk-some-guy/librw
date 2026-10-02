@@ -121,6 +121,8 @@ bool32 readFrameOutput(int32 x, int32 y, float32 rgba[4]);
 bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
 void setEdrForTest(float32 current, float32 potential, bool32 notify);
 bool32 layerIsEdrForTest(void);
+void setEdrScreenLostForTest(bool32 lost);
+uint32 edrLogsForTest(void);
 Raster *createSceneRaster(int32 width, int32 height);
 #endif
 

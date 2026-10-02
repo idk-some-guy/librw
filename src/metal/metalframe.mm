@@ -86,7 +86,10 @@ struct FrameState
 	bool outputDirty = true;
 	bool edrOverride = false;
 	float32 testCurrent = 1.0f, testPotential = 1.0f;
+	bool testScreenLost = false;
+	uint32 edrLogs = 0;
 	CGColorSpaceRef screenSpace = nil;
+	bool screenKnown = false;
 	float32 bloomWeight = 0.0f;
 	float32 emissiveScale = 1.0f;
 
@@ -922,20 +925,33 @@ frameUpdateOutput(CAMetalLayer *layer, uint32 frameCount)
 {
 	float32 current = 1.0f, potential = 1.0f;
 	CGColorSpaceRef space = nil;
+	bool onScreen = false;
 
 	if(!frame.outputDirty && (frameCount & 63) != 0)
 		return;
 	frame.outputDirty = false;
 	if(frame.edrOverride){
-		current = frame.testCurrent;
-		potential = frame.testPotential;
+		if(!frame.testScreenLost){
+			current = frame.testCurrent;
+			potential = frame.testPotential;
+			onScreen = true;
+		}
 	}else if(metalGlobals.host && metalGlobals.host->surfaceScreen){
 		NSScreen *screen = (__bridge NSScreen*)metalGlobals.host->surfaceScreen();
 		if(screen){
 			current = screen.maximumExtendedDynamicRangeColorComponentValue;
 			potential = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
 			space = CGColorSpaceRetain(screen.colorSpace.CGColorSpace);
+			onScreen = true;
 		}
+	}
+	// A fullscreen toggle reports no screen for a moment; hold the last one.
+	if(onScreen)
+		frame.screenKnown = true;
+	else if(frame.screenKnown){
+		current = frame.headroom;
+		potential = frame.potentialHeadroom;
+		space = frame.screenSpace ? CGColorSpaceRetain(frame.screenSpace) : nil;
 	}
 	bool want = edrWanted(frame.activeTier, frame.settings.hdrOutput, potential) &&
 		frame.compositeEdr != nil && frame.classicEdr != nil;
@@ -944,6 +960,7 @@ frameUpdateOutput(CAMetalLayer *layer, uint32 frameCount)
 	frame.peak = want ? edrPeak(frame.settings.emitterPeakNits, current) : 1.0f;
 	if(layer && (want != (frame.edr != 0) || (want && !sameSpace(space, frame.screenSpace)))){
 		configureLayer(layer, want, space);
+		frame.edrLogs++;
 		fprintf(stderr, "rw::metal: EDR output %s, headroom %.2f of %.2f, emitter peak %.2f\n",
 			want ? "on" : "off", current, potential, frame.peak);
 	}
@@ -967,6 +984,18 @@ setEdrForTest(float32 current, float32 potential, bool32 notify)
 	frame.testPotential = potential;
 	if(notify)
 		frame.outputDirty = true;
+}
+
+void
+setEdrScreenLostForTest(bool32 lost)
+{
+	frame.testScreenLost = lost != 0;
+}
+
+uint32
+edrLogsForTest(void)
+{
+	return frame.edrLogs;
 }
 
 bool32
@@ -1129,6 +1158,7 @@ frameTerm(void)
 	frame.aaReported = false;
 	frame.edr = 0;
 	frame.outputDirty = true;
+	frame.screenKnown = false;
 	if(frame.screenSpace)
 		CGColorSpaceRelease(frame.screenSpace);
 	frame.screenSpace = nil;

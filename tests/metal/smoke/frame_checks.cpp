@@ -1131,6 +1131,35 @@ CheckDisplayChange(void)
 }
 
 static bool
+CheckEdrScreenLost(void)
+{
+	const char *name = "a surface briefly on no screen keeps the EDR layer and logs nothing; a screen without headroom turns it off";
+	RGBA grey = { 128, 128, 128, 255 };
+	EnhancedOn();
+	metal::setEdrForTest(4.0f, 4.0f, 1);
+	SetOutput(metal::HDROUTPUT_AUTO, 1000.0f);
+	PlainFrame(grey);
+	bool held = metal::layerIsEdrForTest() && metal::getFrameInfo().edr;
+	uint32 logs = metal::edrLogsForTest();
+	metal::setEdrScreenLostForTest(1);
+	for(int i = 0; i < 4; i++){
+		metal::displayChanged();
+		PlainFrame(grey);
+		held = held && metal::layerIsEdrForTest() && metal::getFrameInfo().edr && metal::getFrameInfo().headroom == 4.0f;
+	}
+	uint32 lostLogs = metal::edrLogsForTest() - logs;
+	metal::setEdrScreenLostForTest(0);
+	metal::setEdrForTest(1.0f, 1.0f, 1);
+	PlainFrame(grey);
+	bool off = !metal::layerIsEdrForTest() && !metal::getFrameInfo().edr;
+	EnhancedOff();
+	bool ok = held && lostLogs == 0 && off;
+	if(!ok)
+		Detail("  EDR held without a screen %d, EDR log lines %u, SDR on a screen without headroom %d\n", held, lostLogs, off);
+	return Report(ok, name);
+}
+
+static bool
 CheckGradeSourceCached(void)
 {
 	const char *name = "setting the grade source it already has compiles nothing";
@@ -2084,6 +2113,7 @@ RunFrameChecks(Camera *camera)
 	CheckEdrBlend();
 	CheckEdrPeak();
 	CheckDisplayChange();
+	CheckEdrScreenLost();
 	CheckInternalSizes();
 	CheckScalerAboveWhite();
 	CheckUpscaleChange();
