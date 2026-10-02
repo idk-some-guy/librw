@@ -430,6 +430,7 @@ if os.istarget("macosx") then
 	metalpuretest("metal_sceneblend_test", nil)
 	metalpuretest("metal_output_test", nil)
 	metalpuretest("metal_bloom_test", nil)
+	metalpuretest("metal_dering_test", nil)
 
 	project "metal_smoke"
 		kind "ConsoleApp"
@@ -441,9 +442,9 @@ if os.istarget("macosx") then
 		files { "tests/metal/smoke/*.cpp", "tests/metal/smoke/*.h", "tests/metal/smoke/*.mm" }
 		libdirs { Libdir }
 		filter { "platforms:*metal" }
-			links { "librw", "glfw", "Metal.framework", "QuartzCore.framework", "Cocoa.framework" }
+			links { "librw", "glfw", "Metal.framework", "MetalFX.framework", "QuartzCore.framework", "Cocoa.framework" }
 		filter { "platforms:*metal-cocoa" }
-			links { "librw", "Metal.framework", "QuartzCore.framework", "AppKit.framework" }
+			links { "librw", "Metal.framework", "MetalFX.framework", "QuartzCore.framework", "AppKit.framework" }
 		filter {}
 		if _OPTIONS["metal-asan"] then
 			targetsuffix "_asan"

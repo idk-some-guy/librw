@@ -6,8 +6,10 @@
 #include "rwmetalshader.h"
 #include "metalbloom.h"
 #include "metaloutput.h"
+#include "metaldering.h"
 #include <string>
 #import <AppKit/AppKit.h>
+#import <MetalFX/MetalFX.h>
 
 namespace rw {
 namespace metal {
@@ -17,6 +19,8 @@ namespace metal {
 #include "shaders/output_metal.inc"
 #include "shaders/bloom_metal.inc"
 #include "shaders/bloomh_metal.inc"
+#include "shaders/dering_metal.inc"
+#include "shaders/deringh_metal.inc"
 
 static const char *frameHead =
 "#include <metal_stdlib>\n"
@@ -52,6 +56,14 @@ struct FrameState
 	Raster *mainColor = nil, *mainDepth = nil;
 	Raster *sceneBase = nil, *sceneDepth = nil;
 	id<MTLTexture> output = nil, black = nil;
+	id<MTLTexture> graded = nil, upscaled = nil;
+	id<MTLFXSpatialScaler> scaler = nil;
+	int32 factor = -1;
+	bool scalerReported = false;
+	bool scalerFail = false;
+	uint32 scalerAttempts = 0, scalerLogs = 0;
+	id<MTLComputePipelineState> deringInPlace = nil, deringCopy = nil;
+	bool deringCopyForced = false;
 	uint32 samples = 0;
 	bool dropping = false;
 	bool unendedReported = false;
@@ -340,6 +352,17 @@ frameInit(void)
 			frame.bloomDownFirst = frame.bloomDownPipe = frame.bloomUpPipe = nil;
 			fprintf(stderr, "rw::metal: bloom shaders failed to compile: %s\n", err ? err.UTF8String : "");
 		}
+		const char *deringParts[] = { frameHead, deringh_metal_src, dering_metal_src, nil };
+		id<MTLLibrary> deringLib = frameLibrary(deringParts, &err);
+		if(deringLib){
+			NSError *perr = nil;
+			id<MTLDevice> dev = getContext()->device;
+			frame.deringInPlace = [dev newComputePipelineStateWithFunction:[deringLib newFunctionWithName:@"deringInPlace"] error:&perr];
+			frame.deringCopy = [dev newComputePipelineStateWithFunction:[deringLib newFunctionWithName:@"deringCopy"] error:&perr];
+		}else{
+			frame.deringInPlace = frame.deringCopy = nil;
+			fprintf(stderr, "rw::metal: dering shaders failed to compile: %s\n", err ? err.UTF8String : "");
+		}
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -365,6 +388,11 @@ dropSceneTargets(void)
 	}
 	frame.dropping = false;
 	frame.output = nil;
+	frame.graded = nil;
+	frame.upscaled = nil;
+	frame.scaler = nil;
+	frame.factor = -1;
+	frame.upscaler = UPSCALER_NONE;
 	for(int i = 0; i < BLOOM_LEVELS; i++){
 		frame.bloomDown[i] = nil;
 		frame.bloomUp[i] = nil;
@@ -377,22 +405,60 @@ dropSceneTargets(void)
 	frame.phase = PHASE_CLASSIC;
 }
 
+static id<MTLFXSpatialScaler>
+makeSpatialScaler(int32 iw, int32 ih, int32 ow, int32 oh)
+{
+	id<MTLDevice> dev = getContext()->device;
+	frame.scalerAttempts++;
+	if(frame.scalerFail || ![MTLFXSpatialScalerDescriptor supportsDevice:dev])
+		return nil;
+	MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+	d.inputWidth = iw;
+	d.inputHeight = ih;
+	d.outputWidth = ow;
+	d.outputHeight = oh;
+	d.colorTextureFormat = MTLPixelFormatRGBA16Float;
+	d.outputTextureFormat = MTLPixelFormatRGBA16Float;
+	d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+	return [d newSpatialScalerWithDevice:dev];
+}
+
 static bool
 ensureSceneTargets(Raster *main, Raster *depth)
 {
 	int32 ow = main->width, oh = main->height;
-	int32 iw = ow, ih = oh;
+	int32 factor = frame.settings.upscale;
+	int32 iw = internalSpan(ow, factor), ih = internalSpan(oh, factor);
 	uint32 samples = metalGlobals.numSamples > 1 ? metalGlobals.numSamples : 1;
+	MTLTextureUsage outputUsage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	MTLTextureUsage gradedUsage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 
 	if(frame.sceneBase && frame.mainColor == main && frame.mainDepth == depth &&
-	   frame.outputWidth == ow && frame.outputHeight == oh &&
-	   frame.internalWidth == iw && frame.internalHeight == ih && frame.samples == samples)
+	   frame.outputWidth == ow && frame.outputHeight == oh && frame.factor == factor && frame.samples == samples)
 		return true;
 	dropSceneTargets();
+	if(iw != ow || ih != oh){
+		frame.scaler = makeSpatialScaler(iw, ih, ow, oh);
+		if(frame.scaler == nil){
+			if(!frame.scalerReported){
+				frame.scalerReported = true;
+				frame.scalerLogs++;
+				fprintf(stderr, "rw::metal: spatial scaler unavailable for %dx%d to %dx%d; rendering at native resolution\n",
+					iw, ih, ow, oh);
+			}
+			iw = ow;
+			ih = oh;
+		}else{
+			outputUsage |= frame.scaler.outputTextureUsage;
+			gradedUsage |= frame.scaler.colorTextureUsage;
+		}
+	}
 	frame.sceneBase = createSceneRaster(iw, ih);
 	frame.sceneDepth = depth ? Raster::create(iw, ih, 0, Raster::ZBUFFER) : nil;
-	frame.output = newTexture(MTLPixelFormatRGBA16Float, ow, oh, MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, 1);
-	if(frame.sceneBase == nil || (depth && frame.sceneDepth == nil) || frame.output == nil){
+	frame.output = newTexture(MTLPixelFormatRGBA16Float, ow, oh, outputUsage, 1);
+	frame.graded = frame.scaler ? newTexture(MTLPixelFormatRGBA16Float, iw, ih, gradedUsage, 1) : nil;
+	if(frame.sceneBase == nil || (depth && frame.sceneDepth == nil) || frame.output == nil ||
+	   (frame.scaler && frame.graded == nil)){
 		dropSceneTargets();
 		if(!frame.targetsReported){
 			frame.targetsReported = true;
@@ -407,6 +473,8 @@ ensureSceneTargets(Raster *main, Raster *depth)
 	frame.internalWidth = iw;
 	frame.internalHeight = ih;
 	frame.samples = samples;
+	frame.factor = factor;
+	frame.upscaler = frame.scaler ? UPSCALER_SPATIAL : UPSCALER_NONE;
 	return true;
 }
 
@@ -414,6 +482,25 @@ void
 setBloomKarisForTest(bool32 on)
 {
 	frame.karis = on != 0;
+}
+
+void
+setDeringCopyForTest(bool32 copy)
+{
+	frame.deringCopyForced = copy != 0;
+}
+
+void
+setScalerFailForTest(bool32 fail)
+{
+	frame.scalerFail = fail != 0;
+}
+
+void
+scalerCountsForTest(uint32 *attempts, uint32 *logs)
+{
+	*attempts = frame.scalerAttempts;
+	*logs = frame.scalerLogs;
 }
 
 static void
@@ -473,6 +560,41 @@ ensureBloomTargets(void)
 	return true;
 }
 
+static bool
+ensureUpscaled(void)
+{
+	if(frame.upscaled == nil)
+		frame.upscaled = newTexture(MTLPixelFormatRGBA16Float, frame.outputWidth, frame.outputHeight,
+			MTLTextureUsageShaderRead | frame.scaler.outputTextureUsage, 1);
+	return frame.upscaled != nil;
+}
+
+static void
+encodeUpscale(void)
+{
+	bool inPlace = frame.deringInPlace && !frame.deringCopyForced &&
+		getContext()->device.readWriteTextureSupport == MTLReadWriteTextureTier2;
+	bool copy = !inPlace && frame.deringCopy && ensureUpscaled();
+	frame.scaler.colorTexture = frame.graded;
+	frame.scaler.outputTexture = copy ? frame.upscaled : frame.output;
+	frame.scaler.inputContentWidth = frame.internalWidth;
+	frame.scaler.inputContentHeight = frame.internalHeight;
+	[frame.scaler encodeToCommandBuffer:frameCommandBuffer()];
+	if(!inPlace && !copy)
+		return;
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:inPlace ? frame.deringInPlace : frame.deringCopy];
+	[enc setTexture:frame.graded atIndex:0];
+	if(inPlace)
+		[enc setTexture:frame.output atIndex:1];
+	else{
+		[enc setTexture:frame.upscaled atIndex:1];
+		[enc setTexture:frame.output atIndex:2];
+	}
+	dispatchOver(enc, frame.output);
+	[enc endEncoding];
+}
+
 static void
 encodeGrade(const GradeParams *p)
 {
@@ -492,11 +614,13 @@ encodeGrade(const GradeParams *p)
 	[enc setComputePipelineState:frame.grade];
 	[enc setTexture:getRasterTexture(frame.sceneBase) atIndex:0];
 	[enc setTexture:weight > 0.0f ? frame.bloomUp[0] : frame.black atIndex:2];
-	[enc setTexture:frame.output atIndex:3];
+	[enc setTexture:frame.graded ? frame.graded : frame.output atIndex:3];
 	[enc setBytes:&g length:sizeof(g) atIndex:0];
 	[enc setBytes:constants length:sizeof(constants) atIndex:1];
-	[enc dispatchThreads:MTLSizeMake(frame.outputWidth, frame.outputHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[enc dispatchThreads:MTLSizeMake(frame.internalWidth, frame.internalHeight, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[enc endEncoding];
+	if(frame.scaler)
+		encodeUpscale();
 }
 
 void
@@ -858,6 +982,7 @@ frameTerm(void)
 	dropSceneTargets();
 	frame.unendedReported = false;
 	frame.targetsReported = false;
+	frame.scalerReported = false;
 	frame.edr = 0;
 	frame.outputDirty = true;
 	if(frame.screenSpace)

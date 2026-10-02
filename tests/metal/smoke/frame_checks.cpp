@@ -1482,6 +1482,313 @@ CheckStatsBloomClassic(void)
 	return Report(ok, name);
 }
 
+static void
+SetUpscale(int32 f)
+{
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.upscale = f;
+	metal::setRenderSettings(&s);
+}
+
+static bool
+CheckInternalSizes(void)
+{
+	const char *name = "the scene renders at the internal resolution of each upscale factor";
+	RGBA col = { 90, 140, 200, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	bool ok = true;
+	EnhancedOn();
+	for(int f = metal::UPSCALE_NATIVE; f < metal::NUMUPSCALES; f++){
+		SetUpscale(f);
+		PlainFrame(col);
+		metal::FrameInfo fi = metal::getFrameInfo();
+		uint8 *px = Composite();
+		bool sizes = fi.internalWidth == metal::internalSpan(w, f) && fi.internalHeight == metal::internalSpan(h, f) &&
+			fi.outputWidth == w && fi.outputHeight == h &&
+			fi.upscaler == (f == metal::UPSCALE_NATIVE ? metal::UPSCALER_NONE : metal::UPSCALER_SPATIAL);
+		if(!sizes)
+			Detail("  factor %d: internal %dx%d output %dx%d upscaler %d\n", f, fi.internalWidth, fi.internalHeight,
+				fi.outputWidth, fi.outputHeight, fi.upscaler);
+		ok = sizes && CompositeNear(px, w/2, h/2, 90, 140, 200, 1) && CompositeNear(px, 0, 0, 90, 140, 200, 1) && ok;
+		delete[] px;
+		cam->showRaster(0);
+	}
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	return Report(ok, name);
+}
+
+static bool
+CheckScalerAboveWhite(void)
+{
+	const char *name = "the spatial scaler fills the output and keeps values above white";
+	RGBA black = { 0, 0, 0, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	metal::beginScene(cam);
+	Begin(black);
+	metal::setEmissiveScale(5.0f);
+	Quad(260, 180, 380, 300, white, DRAW_ADD);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	float in[4], out[4];
+	bool read = metal::readFrameOutput(320, 240, in) && metal::readFrameOutput(10, 10, out);
+	bool spatial = metal::getFrameInfo().upscaler == metal::UPSCALER_SPATIAL;
+	Finish();
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool ok = read && spatial && in[0] > 4.5f && in[0] < 5.5f && out[0] < 0.02f;
+	if(read && !ok)
+		Detail("  block centre %.3f (expected about 5), corner %.4f, upscaler spatial %d\n", in[0], out[0], spatial);
+	return Report(ok, name);
+}
+
+static bool
+CheckUpscaleChange(void)
+{
+	const char *name = "changing the upscale factor reallocates the targets without a restart";
+	RGBA col = { 90, 140, 200, 255 };
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	PlainFrame(col);
+	metal::FrameInfo a = metal::getFrameInfo();
+	metal::StateStats before = metal::getStateStats();
+	uint32 shown = metal::getFrameStats().framesShown;
+	SetUpscale(metal::UPSCALE_PERFORMANCE);
+	PlainFrame(col);
+	metal::FrameInfo b = metal::getFrameInfo();
+	metal::StateStats after = metal::getStateStats();
+	bool ok = a.internalWidth != b.internalWidth && b.internalWidth == metal::internalSpan(cam->frameBuffer->width, metal::UPSCALE_PERFORMANCE) &&
+		after.pipelinesAtInit == before.pipelinesAtInit && after.pipelinesLate == before.pipelinesLate &&
+		metal::getFrameStats().framesShown == shown + 1;
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	if(!ok)
+		Detail("  internal %d -> %d; pipelines at init %u -> %u, late %u -> %u\n", a.internalWidth, b.internalWidth,
+			before.pipelinesAtInit, after.pipelinesAtInit, before.pipelinesLate, after.pipelinesLate);
+	return Report(ok, name);
+}
+
+static bool
+CheckSubRasterScaled(void)
+{
+	const char *name = "sub-raster viewports and clears scale to the internal resolution";
+	Raster *parent = cam->frameBuffer;
+	Raster *sub = Raster::create(0, 0, 0, Raster::CAMERA | Raster::DONTALLOCATE);
+	Rect r = { 200, 100, 200, 160 };
+	sub->subRaster(parent, &r);
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_PERFORMANCE);
+	metal::beginScene(cam);
+	Begin(RED);
+	cam->endUpdate();
+	cam->frameBuffer = sub;
+	cam->clear((RGBA*)&GREEN, Camera::CLEARIMAGE);
+	cam->beginUpdate();
+	Quad(50, 40, 150, 120, BLUE, DRAW_OPAQUE);
+	cam->endUpdate();
+	cam->frameBuffer = parent;
+	cam->beginUpdate();
+	metal::endScene(nil);
+	Finish();
+	uint8 *px = Composite();
+	cam->showRaster(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	sub->destroy();
+	bool ok = CompositeNear(px, 100, 50, 255, 0, 0, 2) && CompositeNear(px, 215, 115, 0, 255, 0, 2) &&
+		CompositeNear(px, 300, 180, 0, 0, 255, 2) && CompositeNear(px, 450, 300, 255, 0, 0, 2);
+	delete[] px;
+	return Report(ok, name);
+}
+
+static bool
+CheckUpscaledCopy(void)
+{
+	const char *name = "a camera copy during an upscaled scene is scaled into the destination";
+	Raster *dst = Raster::create(cam->frameBuffer->width, cam->frameBuffer->height, 0, Raster::C8888 | Raster::CAMERATEXTURE);
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_PERFORMANCE);
+	metal::beginScene(cam);
+	Begin(RED);
+	Quad(100, 100, 300, 300, GREEN, DRAW_OPAQUE);
+	Raster::pushContext(dst);
+	cam->frameBuffer->renderFast(0, 0);
+	Raster::popContext();
+	Image *img = dst->toImage();
+	metal::endScene(nil);
+	Finish();
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool ok = ImageNear(img, 200, 200, 0, 255, 0, -1, 2) && ImageNear(img, 50, 50, 255, 0, 0, -1, 2) &&
+		ImageNear(img, 400, 400, 255, 0, 0, -1, 2);
+	if(img)
+		img->destroy();
+	dst->destroy();
+	return Report(ok, name);
+}
+
+static bool
+CheckScalerFallback(void)
+{
+	const char *name = "a scaler that cannot be made renders at native size, logs once and is not retried each frame";
+	RGBA col = { 90, 140, 200, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	uint32 attempts0, logs0, attempts1, logs1, attempts2, logs2;
+	metal::scalerCountsForTest(&attempts0, &logs0);
+	metal::setScalerFailForTest(1);
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	PlainFrame(col);
+	PlainFrame(col);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	metal::logStats();
+	bool stats = strstr(metal::getStatsLine(), " upscaler none ") != nil;
+	uint8 *px = Composite();
+	cam->showRaster(0);
+	metal::scalerCountsForTest(&attempts1, &logs1);
+	SetUpscale(metal::UPSCALE_PERFORMANCE);
+	PlainFrame(col);
+	metal::FrameInfo fp = metal::getFrameInfo();
+	metal::scalerCountsForTest(&attempts2, &logs2);
+	metal::setScalerFailForTest(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool sizes = fi.internalWidth == w && fi.internalHeight == h && fi.outputWidth == w && fi.outputHeight == h &&
+		fi.upscaler == metal::UPSCALER_NONE && fp.internalWidth == w && fp.upscaler == metal::UPSCALER_NONE;
+	bool counts = attempts1 - attempts0 == 1 && logs1 - logs0 == 1 && attempts2 - attempts1 == 1 && logs2 == logs1;
+	bool ok = sizes && counts && stats && CompositeNear(px, w/2, h/2, 90, 140, 200, 1) &&
+		CompositeNear(px, 0, 0, 90, 140, 200, 1) && CompositeNear(px, w-1, h-1, 90, 140, 200, 1);
+	if(!sizes || !counts || !stats)
+		Detail("  internal %dx%d output %dx%d upscaler %d, after a factor change %d upscaler %d; attempts +%u +%u, logs +%u +%u; stats none %d\n",
+			fi.internalWidth, fi.internalHeight, fi.outputWidth, fi.outputHeight, fi.upscaler, fp.internalWidth, fp.upscaler,
+			attempts1 - attempts0, attempts2 - attempts1, logs1 - logs0, logs2 - logs1, stats);
+	delete[] px;
+	return Report(ok, name);
+}
+
+static bool
+ReadRow(int y, int x0, int n, float *red)
+{
+	float px[4];
+	for(int i = 0; i < n; i++){
+		if(!metal::readFrameOutput(x0 + i, y, px))
+			return false;
+		red[i] = px[0];
+	}
+	return true;
+}
+
+enum { RING_X0 = 288, RING_Y0 = 228, RING_N = 30, EDGE_X0 = 440, EDGE_N = 40 };
+
+static bool
+CheckScalerRinging(void)
+{
+	const char *name = "the spatial scaler keeps a small emitter and an emitter edge above white without ringing below the background";
+	RGBA grey = { 128, 128, 128, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	float rows[RING_N][RING_N], edge[EDGE_N], scene[4];
+	bool read = true;
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::setEmissiveScale(5.0f);
+	Quad(300, 240, 303, 243, white, DRAW_OPAQUE);
+	Quad(460, 100, 600, 380, white, DRAW_OPAQUE);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	float bg = 0.0f, inExcess = 0.0f;
+	read = metal::readScenePixel(10, 10, scene) && read;
+	bg = scene[0];
+	for(int y = 150; y < 175; y++)
+		for(int x = 190; x < 215; x++){
+			read = metal::readScenePixel(x, y, scene) && read;
+			inExcess += scene[0] - bg;
+		}
+	for(int y = 0; y < RING_N; y++)
+		read = ReadRow(RING_Y0 + y, RING_X0, RING_N, rows[y]) && read;
+	read = ReadRow(240, EDGE_X0, EDGE_N, edge) && read;
+	Finish();
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	float area = ((float)w/fi.internalWidth)*((float)h/fi.internalHeight);
+	float lo = 1e9f, peak = -1e9f, outExcess = 0.0f, edgeLo = 1e9f, edgeHi = -1e9f;
+	bool finite = true;
+	for(int y = 0; y < RING_N; y++)
+		for(int x = 0; x < RING_N; x++){
+			float v = rows[y][x];
+			finite = finite && v == v && v >= 0.0f;
+			lo = std::min(lo, v);
+			peak = std::max(peak, v);
+			outExcess += v - bg;
+		}
+	for(int i = 0; i < EDGE_N; i++){
+		finite = finite && edge[i] == edge[i] && edge[i] >= 0.0f;
+		edgeLo = std::min(edgeLo, edge[i]);
+		edgeHi = std::max(edgeHi, edge[i]);
+	}
+	float want = inExcess*area;
+	bool ok = read && fi.upscaler == metal::UPSCALER_SPATIAL && finite &&
+		lo >= bg - 0.02f && edgeLo >= bg - 0.02f && edgeHi >= 4.9f && edgeHi <= 5.1f &&
+		peak >= 2.5f && peak <= 5.1f && fabsf(outExcess - want) <= 0.15f*want;
+	if(ok)
+		return Report(ok, name);
+	Detail("  background %.4f; emitter peak %.3f ring min %.4f excess %.3f (input %.3f x %.3f = %.3f); edge min %.4f max %.3f\n",
+		bg, peak, lo, outExcess, inExcess, area, want, edgeLo, edgeHi);
+	Detail("  emitter row:");
+	for(int x = 6; x < 24; x++)
+		Detail(" %.3f", rows[13][x]);
+	Detail("\n  edge row:");
+	for(int i = 12; i < 32; i++)
+		Detail(" %.3f", edge[i]);
+	Detail("\n");
+	return Report(ok, name);
+}
+
+static bool
+DeringRows(float *row, float *edge)
+{
+	RGBA grey = { 128, 128, 128, 255 };
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	Begin(grey);
+	metal::setEmissiveScale(5.0f);
+	Quad(300, 240, 303, 243, white, DRAW_OPAQUE);
+	Quad(460, 100, 600, 380, white, DRAW_OPAQUE);
+	metal::setEmissiveScale(1.0f);
+	metal::endScene(nil);
+	bool read = ReadRow(241, RING_X0, RING_N, row) && ReadRow(240, EDGE_X0, EDGE_N, edge);
+	Finish();
+	return read;
+}
+
+static bool
+CheckDeringCopy(void)
+{
+	const char *name = "the dering pass through a second texture matches the in-place pass";
+	float row[2][RING_N], edge[2][EDGE_N];
+	EnhancedOn();
+	SetUpscale(metal::UPSCALE_QUALITY);
+	bool read = DeringRows(row[0], edge[0]);
+	metal::setDeringCopyForTest(1);
+	read = DeringRows(row[1], edge[1]) && read;
+	metal::setDeringCopyForTest(0);
+	SetUpscale(metal::UPSCALE_NATIVE);
+	EnhancedOff();
+	bool same = memcmp(row[0], row[1], sizeof(row[0])) == 0 && memcmp(edge[0], edge[1], sizeof(edge[0])) == 0;
+	float peak = 0.0f;
+	for(int i = 0; i < RING_N; i++)
+		peak = std::max(peak, row[1][i]);
+	bool ok = read && same && peak > 1.0f && peak <= 5.1f;
+	if(read && !ok)
+		Detail("  in place and copied rows equal %d; copied emitter peak %.3f\n", same, peak);
+	return Report(ok, name);
+}
+
 int
 RunFrameChecks(Camera *camera)
 {
@@ -1524,6 +1831,14 @@ RunFrameChecks(Camera *camera)
 	CheckEdrBlend();
 	CheckEdrPeak();
 	CheckDisplayChange();
+	CheckInternalSizes();
+	CheckScalerAboveWhite();
+	CheckUpscaleChange();
+	CheckSubRasterScaled();
+	CheckUpscaledCopy();
+	CheckScalerFallback();
+	CheckScalerRinging();
+	CheckDeringCopy();
 	CheckGradeSourceCached();
 	CheckGradeConstantsPadded();
 	CheckEmissiveReset();
