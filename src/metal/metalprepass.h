@@ -64,6 +64,29 @@ ppOctDecode(float u, float v)
 	return n;
 }
 
+#define PP_FACING_REFLECT (-0.3f)
+
+static inline PPVec3
+ppFacingNormal(PPVec3 n, PPVec3 v)
+{
+	float c = n.x*v.x + n.y*v.y + n.z*v.z;
+	if(!(PP_ABS(c) <= 2.0f))
+		return v;
+	if(c >= 0.0f)
+		return n;
+	PPVec3 r = { -n.x, -n.y, -n.z };
+	if(c <= PP_FACING_REFLECT)
+		return r;
+	r.x = n.x - 2.0f*c*v.x;
+	r.y = n.y - 2.0f*c*v.y;
+	r.z = n.z - 2.0f*c*v.z;
+	float l = PP_SQRT(r.x*r.x + r.y*r.y + r.z*r.z);
+	r.x /= l;
+	r.y /= l;
+	r.z /= l;
+	return r;
+}
+
 static inline PPVec2
 ppMotion(float cx, float cy, float cw, float px, float py, float pw)
 {

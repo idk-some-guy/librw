@@ -95,13 +95,14 @@ matfxEnvFS(EnvFragmentIn in [[stage_in]],
            const device ushort *faceIdx [[buffer(BUFFER_FACEINDICES), function_constant(relitPrelit)]],
            const device uchar *faceVerts [[buffer(BUFFER_FACEVERTICES), function_constant(relitPrelit)]],
            constant FaceFetch &face [[buffer(BUFFER_FACELAYOUT), function_constant(relitPrelit)]],
-           constant Relit &relitBlock [[buffer(BUFFER_RELIT), function_constant(relitPrelit)]],
+           constant Relit &relitBlock [[buffer(BUFFER_RELIT), function_constant(relitFragmentBlock)]],
            constant Material &material [[buffer(BUFFER_MATERIAL), function_constant(relitPrelit)]],
-           texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relit)]])
+           texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]])
 {
 	float4 base = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
 		face, relitBlock, material, in.position, shadowTex) :
-		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) : in.color;
+		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
+		relitShadow ? RelitPlainShadow(in.color, in.position, shadowTex, relitBlock) : in.color;
 	float4 pass1 = base*tex0.sample(tex0Sampler, in.tex0);
 	float4 pass2 = in.envColor*matfx.fxParams.x*tex1.sample(tex1Sampler, in.tex1);
 	pass1.rgb = mix(state.fogColor.rgb, pass1.rgb, in.fog);

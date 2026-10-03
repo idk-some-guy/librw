@@ -1,8 +1,7 @@
-constant bool shadowAlpha [[function_constant(0)]];
-
 struct ShadowRayParams
 {
 	float4x4 invViewProj;
+	float4x4 viewToWorld;
 	float4 sun;
 	float4 eye;
 	uint2 size;
@@ -27,6 +26,8 @@ struct ShadowAccumParams
 	float maxHistory;
 	float pad;
 };
+
+constant uint shadowPhase [[function_constant(0)]];
 
 static float3
 shadowWorld(float4x4 inv, uint2 px, uint2 dims, float d)
@@ -61,66 +62,117 @@ shadowAlphaBlocks(device const ShadowAlphaEntry *alpha, uint entries, uint base,
 	return e.tex.sample(s, uv, level(0)).a >= e.threshold;
 }
 
+static bool
+shadowRayStart(constant ShadowRayParams &p, depth2d<float, access::read> depth, texture2d<float, access::read> normals,
+               uint2 gid, thread float3 &origin, thread float4 &facing)
+{
+	uint2 src = gid;
+	if(p.halfRes != 0)
+		src = uint2(shRaySource(gid.x, shPhaseX(p.frame), p.depthSize.x), shRaySource(gid.y, shPhaseY(p.frame), p.depthSize.y));
+	float d = depth.read(src);
+	if(d >= 1.0)
+		return false;
+	float3 P = shadowWorld(p.invViewProj, src, p.depthSize, d);
+	float3 toEye = p.eye.xyz - P;
+	float dist = length(toEye);
+	float2 e = normals.read(src).xy;
+	PPVec3 nv = ppOctDecode(e.x, e.y);
+	float3 N = (p.viewToWorld * float4(nv.x, nv.y, nv.z, 0.0)).xyz;
+	float nl = length(N);
+	float3 v = toEye/dist;
+	N = nl > 1e-6 ? N/nl : v;
+	PPVec3 f = ppFacingNormal(PPVec3{ N.x, N.y, N.z }, PPVec3{ v.x, v.y, v.z });
+	SHVec3 o = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ f.x, f.y, f.z }, dist);
+	origin = float3(o.x, o.y, o.z);
+	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? 1.0 : 0.0);
+	return true;
+}
+
+struct ShadowAlphaTableParams
+{
+	uint entries;
+	uint mode;
+	uint pad[2];
+};
+
+[[intersection(triangle, triangle_data, instancing)]]
+bool
+shadowAlphaHit(uint user [[user_instance_id]],
+               uint geometry [[geometry_id]],
+               float2 bary [[barycentric_coord]],
+               const device void *data [[primitive_data]],
+               device const ShadowAlphaEntry *alpha [[buffer(0)]],
+               constant ShadowAlphaTableParams &tp [[buffer(1)]])
+{
+	if(tp.mode != 0u)
+		return tp.mode == 1u;
+	return shadowAlphaBlocks(alpha, tp.entries, user, geometry, data, bary);
+}
+
 kernel void
 shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
            constant ShadowRayParams &p [[buffer(1)]],
-           device const ShadowAlphaEntry *alpha [[buffer(2), function_constant(shadowAlpha)]],
            depth2d<float, access::read> depth [[texture(0)]],
            texture2d<float, access::write> raw [[texture(1)]],
+           texture2d<float, access::read> normals [[texture(2)]],
            uint2 gid [[thread_position_in_grid]])
 {
 	if(gid.x >= p.size.x || gid.y >= p.size.y)
 		return;
-	uint2 src = p.halfRes != 0 ? min(gid*2, p.depthSize - 1) : gid;
-	float d = depth.read(src);
-	if(d >= 1.0){
+	float3 o;
+	float4 f;
+	if(!shadowRayStart(p, depth, normals, gid, o, f)){
 		raw.write(float4(1.0), gid);
 		return;
 	}
-	float3 P = shadowWorld(p.invViewProj, src, p.depthSize, d);
-	float3 toEye = p.eye.xyz - P;
-	float dist = length(toEye);
-	float3 v = toEye/dist;
-	SHVec3 o = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ v.x, v.y, v.z }, dist);
+	if(shFacesAwayFromSun(f.w, dot(f.xyz, p.sun.xyz), p.sun.w)){
+		raw.write(float4(0.0), gid);
+		return;
+	}
 	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
+	intersector<triangle_data, instancing> isect;
+	isect.accept_any_intersection(true);
+	isect.assume_geometry_type(geometry_type::triangle);
+	isect.force_opacity(forced_opacity::opaque);
 	float vis = 0.0;
-	if(shadowAlpha){
-		intersector<triangle_data, instancing> isect;
-		isect.accept_any_intersection(true);
-		isect.assume_geometry_type(geometry_type::triangle);
-		intersection_params ip;
-		ip.accept_any_intersection(true);
-		ip.assume_geometry_type(geometry_type::triangle);
-		intersection_query<triangle_data, instancing> iq;
-		for(uint r = 0; r < p.raysPerPixel; r++){
-			SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
-			ray q(float3(o.x, o.y, o.z), float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
-			if(isect.intersect(q, tlas, SH_INSTANCE_OPAQUE).type != intersection_type::none)
-				continue;
-			iq.reset(q, tlas, SH_INSTANCE_ALPHA, ip);
-			bool blocked = false;
-			while(iq.next()){
-				if(iq.get_candidate_intersection_type() == intersection_type::triangle &&
-				   shadowAlphaBlocks(alpha, p.alphaEntries, iq.get_candidate_user_instance_id(), iq.get_candidate_geometry_id(),
-				                     iq.get_candidate_primitive_data(), iq.get_candidate_triangle_barycentric_coord())){
-					iq.commit_triangle_intersection();
-					blocked = true;
-					break;
-				}
-			}
-			blocked = blocked || iq.get_committed_intersection_type() != intersection_type::none;
-			vis += blocked ? 0.0 : 1.0;
-		}
-	}else{
-		intersector<triangle_data, instancing> isect;
-		isect.accept_any_intersection(true);
-		isect.assume_geometry_type(geometry_type::triangle);
-		isect.force_opacity(forced_opacity::opaque);
-		for(uint r = 0; r < p.raysPerPixel; r++){
-			SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
-			ray q(float3(o.x, o.y, o.z), float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
-			vis += isect.intersect(q, tlas, 0xFF).type == intersection_type::none ? 1.0 : 0.0;
-		}
+	for(uint r = 0; r < p.raysPerPixel; r++){
+		SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
+		ray q(o, float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
+		vis += isect.intersect(q, tlas, 0xFF).type == intersection_type::none ? 1.0 : 0.0;
+	}
+	raw.write(float4(vis/float(p.raysPerPixel)), gid);
+}
+
+kernel void
+shadowRaysAlpha(instance_acceleration_structure tlas [[buffer(0)]],
+                constant ShadowRayParams &p [[buffer(1)]],
+                intersection_function_table<triangle_data, instancing> ft [[buffer(2)]],
+                depth2d<float, access::read> depth [[texture(0)]],
+                texture2d<float, access::write> raw [[texture(1)]],
+                texture2d<float, access::read> normals [[texture(2)]],
+                uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= p.size.x || gid.y >= p.size.y)
+		return;
+	float3 o;
+	float4 f;
+	if(!shadowRayStart(p, depth, normals, gid, o, f)){
+		raw.write(float4(1.0), gid);
+		return;
+	}
+	if(shFacesAwayFromSun(f.w, dot(f.xyz, p.sun.xyz), p.sun.w)){
+		raw.write(float4(0.0), gid);
+		return;
+	}
+	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
+	intersector<triangle_data, instancing> isect;
+	isect.accept_any_intersection(true);
+	isect.assume_geometry_type(geometry_type::triangle);
+	float vis = 0.0;
+	for(uint r = 0; r < p.raysPerPixel; r++){
+		SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
+		ray q(o, float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
+		vis += isect.intersect(q, tlas, 0xFF, ft).type == intersection_type::none ? 1.0 : 0.0;
 	}
 	raw.write(float4(vis/float(p.raysPerPixel)), gid);
 }
@@ -132,6 +184,28 @@ shadowHistoryPoint(constant ShadowAccumParams &p, uint2 hp, float distance)
 	float4 f = p.prevInvViewProj * float4(uv.x*2.0 - 1.0, 1.0 - uv.y*2.0, 1.0, 1.0);
 	float3 dir = normalize(f.xyz/f.w - p.prevEye.xyz);
 	return p.prevEye.xyz + dir*distance;
+}
+
+static float
+shadowUpsample(texture2d<float, access::read> raw, depth2d<float, access::read> depth, constant ShadowAccumParams &p, uint2 gid,
+               float dist, uint2 off)
+{
+	int2 rmax = int2(p.rawSize) - 1;
+	float sum = 0.0, wsum = 0.0;
+	for(int j = 0; j < 2; j++)
+		for(int i = 0; i < 2; i++){
+			SHTap tx = shUpsampleTap(gid.x, off.x, i), ty = shUpsampleTap(gid.y, off.y, j);
+			float bw = tx.weight*ty.weight;
+			if(bw == 0.0)
+				continue;
+			int2 h = min(int2(int(tx.index), int(ty.index)), rmax);
+			uint2 src = uint2(shRaySource(uint(h.x), off.x, p.size.x), shRaySource(uint(h.y), off.y, p.size.y));
+			float td = length(shadowWorld(p.invViewProj, src, p.size, depth.read(src)) - p.eye.xyz);
+			float w = bw*shUpsampleWeight(td, dist);
+			sum += raw.read(uint2(h)).r*w;
+			wsum += w;
+		}
+	return sum/wsum;
 }
 
 kernel void
@@ -153,9 +227,13 @@ shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
 	}
 	float3 P = shadowWorld(p.invViewProj, gid, p.size, d);
 	float dist = length(P - p.eye.xyz);
-	int2 rp = int2(p.halfRes != 0 ? gid/2 : gid);
+	uint2 off = p.halfRes != 0 ? uint2(shPhaseX(shadowPhase), shPhaseY(shadowPhase)) : uint2(0);
+	SHTap tx = shUpsampleTap(gid.x, off.x, 0), ty = shUpsampleTap(gid.y, off.y, 0);
+	int2 rp = int2(p.halfRes != 0 ? uint2(tx.index, ty.index) : gid);
 	int2 rmax = int2(p.rawSize) - 1;
-	float cur = raw.read(uint2(min(rp, rmax))).r, lo = cur, hi = cur;
+	bool own = p.halfRes == 0 || tx.weight*ty.weight == 1.0;
+	float cur = own ? raw.read(uint2(min(rp, rmax))).r : shadowUpsample(raw, depth, p, gid, dist, off);
+	float lo = raw.read(uint2(min(rp, rmax))).r, hi = lo;
 	for(int y = -1; y <= 1; y++)
 		for(int x = -1; x <= 1; x++){
 			float r = raw.read(uint2(clamp(rp + int2(x, y), int2(0), rmax))).r;

@@ -82,6 +82,7 @@ void setShadowFactorForTest(float32 v);
 void setFaceFetchForTest(bool32 on);
 void setFaceSkipForTest(bool32 on);
 void setRelitAtFullWeightForTest(bool32 on);
+void setPlainTwinFailForTest(bool32 fail);
 uint32 lightsBlockForTest(void *dst, uint32 size);
 double lastFrameGpuMsForTest(void);
 void setRtBudgetForTest(uint64 bytes);
@@ -146,11 +147,15 @@ bool32 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const f
 	const float32 toSun[3], float32 *ms, float32 *ground, float32 *shadowed);
 void setRtAlphaCapForTest(uint32 entries);
 void setShadowAlphaKernelForTest(int32 mode);
-void setRtAlphaMaskForTest(int32 mode);
+void setRtAlphaFunctionForTest(int32 mode);
+const void *rtAlphaTableForTest(void);
+void setRtSkinnedLimitForTest(uint32 cap, float32 distance);
 void setRtAlphaIndexPastForTest(bool32 on);
 void setRtAlphaTextureLostForTest(bool32 on);
 void rtWatchTextureForTest(Raster *raster);
 bool32 rtWatchedTextureAliveForTest(void);
+void rtWatchAlphaTableForTest(void);
+bool32 rtWatchedTableAliveForTest(void);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);

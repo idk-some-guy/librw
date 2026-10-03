@@ -104,6 +104,7 @@ struct StateStats
 	uint32 relitDraws;
 	uint32 relitFaceDraws;
 	uint32 relitShadowDraws;
+	uint32 plainShadowDraws;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);

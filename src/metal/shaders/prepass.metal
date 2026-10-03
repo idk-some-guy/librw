@@ -67,7 +67,8 @@ prepassVS(PrepassIn in [[stage_in]],
 static PrepassTargets
 prepassWrite(PrepassFragIn in, float3 g)
 {
-	float3 n = RelitSurfaceNormal(in.viewNormal, in.valid, g, -in.viewPos, float3(0.0, 0.0, -1.0));
+	float3 f = RelitFilledNormal(in.viewNormal, in.valid, g, -in.viewPos, float3(0.0, 0.0, -1.0)), v = normalize(-in.viewPos);
+	PPVec3 n = ppFacingNormal(PPVec3{ f.x, f.y, f.z }, PPVec3{ v.x, v.y, v.z });
 	PPVec2 o = ppOctEncode(n.x, n.y, n.z);
 	PPVec2 m = ppMotion(in.curClip.x, in.curClip.y, in.curClip.w, in.prevClip.x, in.prevClip.y, in.prevClip.w);
 	PrepassTargets t;

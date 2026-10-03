@@ -33,6 +33,8 @@ constant bool spotLights [[function_constant(3)]];
 constant bool relit [[function_constant(6)]];
 constant bool relitPrelit [[function_constant(7)]];
 constant bool relitShadow [[function_constant(8)]];
+constant bool relitTexture = relit || relitShadow;
+constant bool relitFragmentBlock = relitPrelit || relitShadow;
 
 struct State
 {
@@ -87,6 +89,7 @@ struct Relit
 	float4 skyBottom;
 	float4 eye;
 	float4 params;
+	float4 shadow;
 };
 
 struct FaceFetch
@@ -217,12 +220,18 @@ faceFetchNormal(uint pid, const device ushort *idx, const device uchar *v, const
 }
 
 static float3
-RelitSurfaceNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback)
+RelitFilledNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback)
 {
 	if(dot(g, toEye) < 0.0)
 		g = -g;
 	RLVec3 r = relitFillNormal(RLVec3{ n.x, n.y, n.z }, valid, RLVec3{ g.x, g.y, g.z }, RLVec3{ fallback.x, fallback.y, fallback.z });
-	float3 f = float3(r.x, r.y, r.z);
+	return float3(r.x, r.y, r.z);
+}
+
+static float3
+RelitSurfaceNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback)
+{
+	float3 f = RelitFilledNormal(n, valid, g, toEye, fallback);
 	return dot(f, toEye) < 0.0 ? -f : f;
 }
 
@@ -240,6 +249,13 @@ RelitShadowSun(float4 color, float4 sun, float4 position, texture2d<float> shado
 		return color;
 	float s = RelitShadowFactor(position, shadowTex);
 	return float4(relitShadowed(color.r, sun.r, s), relitShadowed(color.g, sun.g, s), relitShadowed(color.b, sun.b, s), color.a);
+}
+
+static float4
+RelitPlainShadow(float4 color, float4 position, texture2d<float> shadowTex, constant Relit &r)
+{
+	float s = RelitShadowFactor(position, shadowTex), k = r.shadow.x;
+	return float4(relitPlainShadowed(color.r, s, k), relitPlainShadowed(color.g, s, k), relitPlainShadowed(color.b, s, k), color.a);
 }
 
 static float4
@@ -276,13 +292,16 @@ RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, c
 	RLSplit sg = relitSplitAdd(color.g, h.g*hs, r.sunColor.g*ss, m.g);
 	RLSplit sb = relitSplitAdd(color.b, h.b*hs, r.sunColor.b*ss, m.b);
 	float3 lit = float3(sr.full, sg.full, sb.full);
+	float3 c1 = classic1.rgb;
 	if(relitShadow){
-		float s = RelitShadowFactor(position, shadowTex);
-		lit = float3(relitShadowed(sr.full, sr.sun, s), relitShadowed(sg.full, sg.sun, s), relitShadowed(sb.full, sb.sun, s));
+		float s = RelitShadowFactor(position, shadowTex), k = r.shadow.x;
+		lit = float3(relitShadowedPrelit(sr.full, sr.sun, color.r, s, k), relitShadowedPrelit(sg.full, sg.sun, color.g, s, k),
+			relitShadowedPrelit(sb.full, sb.sun, color.b, s, k));
+		c1 = float3(relitPlainShadowed(c1.r, s, k), relitPlainShadowed(c1.g, s, k), relitPlainShadowed(c1.b, s, k));
 	}
 	if(v >= 1.0)
 		return float4(lit, color.a);
-	return float4(classic1.rgb + (lit - classic1.rgb)*v, color.a);
+	return float4(c1 + (lit - c1)*v, color.a);
 }
 
 static float

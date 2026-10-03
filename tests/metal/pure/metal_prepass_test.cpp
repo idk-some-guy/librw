@@ -153,6 +153,52 @@ TestPrevMap(void)
 	CHECK(f.put(&keys[0]) != nullptr && f.find(&keys[0]) != nullptr);
 }
 
+static PPVec3
+Unit(PPVec3 v)
+{
+	float l = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+	PPVec3 r = { v.x/l, v.y/l, v.z/l };
+	return r;
+}
+
+static float
+Dot(PPVec3 a, PPVec3 b)
+{
+	return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+static void
+TestFacing(void)
+{
+	PPVec3 v = { 0.0f, -1.0f, 0.0f };
+	PPVec3 rim = Unit({ 0.98f, 0.199f, 0.0f });
+	PPVec3 r = ppFacingNormal(rim, v);
+	CHECK(Near(Dot(r, v), -Dot(rim, v), 1e-6f) && Dot(r, v) > 0.0f);
+	CHECK(Near(r.x, rim.x, 1e-6f) && r.z == 0.0f && Near(Dot(r, r), 1.0f, 1e-6f));
+	PPVec3 grazing = Unit({ 1.0f, 0.29f, 0.0f });
+	r = ppFacingNormal(grazing, v);
+	CHECK(Dot(grazing, v) > PP_FACING_REFLECT && r.x > 0.9f && Dot(r, v) > 0.0f);
+	PPVec3 plane = Unit({ 0.3f, 0.9f, 0.1f });
+	r = ppFacingNormal(plane, v);
+	CHECK(r.x == -plane.x && r.y == -plane.y && r.z == -plane.z);
+	PPVec3 below = Unit({ 1.0f, 0.32f, 0.0f });
+	r = ppFacingNormal(below, v);
+	CHECK(Dot(below, v) < PP_FACING_REFLECT && r.x == -below.x && r.y == -below.y);
+	PPVec3 front = Unit({ 0.2f, -0.9f, 0.3f }), head = { 0.0f, -1.0f, 0.0f }, side = { 1.0f, 0.0f, 0.0f };
+	r = ppFacingNormal(front, v);
+	CHECK(r.x == front.x && r.y == front.y && r.z == front.z);
+	r = ppFacingNormal(head, v);
+	CHECK(r.x == head.x && r.y == head.y && r.z == head.z);
+	r = ppFacingNormal(side, v);
+	CHECK(r.x == side.x && r.y == side.y && r.z == side.z);
+	PPVec3 bad = { NAN, 0.0f, 1.0f }, inf = { INFINITY, 0.0f, 0.0f };
+	r = ppFacingNormal(bad, v);
+	CHECK(r.x == v.x && r.y == v.y && r.z == v.z);
+	r = ppFacingNormal(inf, v);
+	CHECK(r.x == v.x && r.y == v.y && r.z == v.z);
+	CHECK(PP_FACING_REFLECT < 0.0f && PP_FACING_REFLECT > -1.0f);
+}
+
 int
 main(void)
 {
@@ -162,6 +208,7 @@ main(void)
 	TestKey();
 	TestKeySet();
 	TestPrevMap();
+	TestFacing();
 	if(failures == 0)
 		printf("all prepass tests passed\n");
 	return failures != 0;

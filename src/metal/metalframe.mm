@@ -355,14 +355,14 @@ frameStatsTail(void)
 		snprintf(build, sizeof(build), "%.2fms", r.buildMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
 		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u"
-		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u",
+		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u large %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
 		prepassEqualLastFrame(), getStateStats().prepassUnkeyed,
 		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
 		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, top, r.frameBuilds, build, r.frameRefits, r.walkMs, pass,
-		r.shadowMegabytes, r.alphaInstances, r.alphaTextures);
+		r.shadowMegabytes, r.alphaInstances, r.alphaTextures, r.castersLarge);
 	return frame.tail;
 }
 
@@ -1348,6 +1348,12 @@ static bool
 realShadowSource(void)
 {
 	return shSourceOn(frame.settings.shadowQuality, rtShadowsSupported(), frame.activeTier == TIER_MODERN);
+}
+
+bool32
+shadowSourceOn(void)
+{
+	return realShadowSource();
 }
 
 bool

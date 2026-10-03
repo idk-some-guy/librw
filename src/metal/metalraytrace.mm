@@ -9,6 +9,7 @@
 #include "metalobjc.h"
 #include "metalstate.h"
 #include "metalnormals.h"
+#include "metalprepass.h"
 #include "metalframe.h"
 #include "metalshadow.h"
 #include "metalraytrace.h"
@@ -83,13 +84,15 @@ static struct
 	char refusal[256];
 	bool scratchFail;
 	id<MTLBuffer> scratch;
+	std::unordered_map<const InstanceDataHeader*, float32> radii;
 	RayStats stats;
 } rt;
 
-enum { RT_MAX_INSTANCES = 8192, RT_MAX_SKINNED = 24, RT_SKIN_REBUILD_FRAMES = 30, RT_SKIN_KEEP_FRAMES = 30 };
+enum { RT_MAX_INSTANCES = 8192, RT_MAX_SKINNED = 48, RT_SKIN_REBUILD_FRAMES = 30, RT_SKIN_KEEP_FRAMES = 30 };
 enum { RT_MAX_ALPHA_ENTRIES = 4096, RT_MAX_ALPHA_TEXTURES = 1024, RT_ALPHA_TRIANGLE = 24 };
 enum { RT_SAMPLE_SKIN = 0, RT_SAMPLE_SKINNED = 2, RT_SAMPLE_TOP = 4, RT_SAMPLE_BOTTOM = 6, RT_BUILD_SAMPLES = 8 };
-static const float32 RT_SKIN_DISTANCE = 60.0f;
+static const float32 RT_SKIN_DISTANCE = 100.0f;
+static const float32 RT_CASTER_RADIUS = 500.0f;
 static const int32 RT_SKIN_MODE = RT_SKIN_REFIT;
 static const char *raytraceHead =
 "#include <metal_stdlib>\n#include <metal_raytracing>\nusing namespace metal;\nusing namespace raytracing;\n";
@@ -140,6 +143,8 @@ struct TopSlot
 	id<MTLBuffer> instances;
 	id<MTLBuffer> bones;
 	id<MTLBuffer> alpha;
+	id<MTLBuffer> alphaParams;
+	id<MTLIntersectionFunctionTable> table;
 	uint64 bytes;
 	uint64 frame;
 };
@@ -166,12 +171,15 @@ static struct
 	uint64 adds, palettes;
 	int32 skinModeTest;
 	id<MTLAccelerationStructure> current, last;
-	id<MTLBuffer> currentAlpha, lastAlpha;
+	id<MTLBuffer> currentAlpha, lastAlpha, currentParams, lastParams;
+	id<MTLIntersectionFunctionTable> currentTable, lastTable, passTable;
 	std::vector<__weak id<MTLTexture>> alphaTextures;
-	uint32 alphaCap;
-	int32 alphaMaskTest;
+	uint32 alphaCap, skinCapTest;
+	float32 skinDistanceTest;
+	int32 alphaFunctionTest;
 	bool alphaIndexPast, alphaLost;
 	__weak id<MTLTexture> watched;
+	__weak id<MTLIntersectionFunctionTable> watchedTable;
 	id<MTLCounterSampleBuffer> timing, frameTiming, buildTiming[MAXFRAMESINFLIGHT];
 	uint32 timed, buildSlot;
 	std::atomic<uint64> topTicks, buildTicks;
@@ -181,11 +189,13 @@ static struct
 	std::vector<id<MTLBuffer>> deferred;
 } rf;
 
+static float32 casterMaxRadius = RT_CASTER_RADIUS;
+
 static const float32 SH_RAY_DISTANCE = 300.0f;
 
 struct ShadowRayParamsHost
 {
-	simd_float4x4 invViewProj;
+	simd_float4x4 invViewProj, viewToWorld;
 	simd_float4 sun, eye;
 	simd_uint2 size, depthSize;
 	uint32 frame, raysPerPixel, halfRes, alphaEntries;
@@ -208,14 +218,13 @@ struct ShadowAlphaEntryHost
 };
 
 static_assert(sizeof(ShadowAlphaEntryHost) == 16, "shadow alpha entry");
-static_assert(((SH_INSTANCE_ALPHA | SH_INSTANCE_OPAQUE) & (SHADOWCASTER_STATIC | SHADOWCASTER_MOVING | SHADOWCASTER_SKINNED)) == 0 &&
-	(SH_INSTANCE_ALPHA & SH_INSTANCE_OPAQUE) == 0, "shadow instance mask bits");
-static_assert(sizeof(ShadowRayParamsHost) == 128, "shadow ray params");
+static_assert(sizeof(ShadowRayParamsHost) == 192, "shadow ray params");
 static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
 
 static struct
 {
-	id<MTLComputePipelineState> rays, raysAlpha, accumulate, clear;
+	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear;
+	id<MTLFunction> alphaHit;
 	bool forceAlpha;
 	id<MTLTexture> raw, history[2];
 	uint32 index, frame, width, height, samples;
@@ -277,23 +286,36 @@ initShadows(id<MTLDevice> dev)
 		o.fastMathEnabled = NO;
 	NSError *err = nil;
 	id<MTLLibrary> lib = [dev newLibraryWithSource:src options:o error:&err];
-	id<MTLFunction> rays[2] = { nil, nil };
-	for(uint32 i = 0; i < 2 && lib; i++){
-		bool on = i == 1;
+	id<MTLFunction> rays = lib ? [lib newFunctionWithName:@"shadowRays"] : nil;
+	id<MTLFunction> raysAlpha = lib ? [lib newFunctionWithName:@"shadowRaysAlpha"] : nil;
+	sh.alphaHit = lib ? [lib newFunctionWithName:@"shadowAlphaHit"] : nil;
+	sh.rays = rays ? [dev newComputePipelineStateWithFunction:rays error:&err] : nil;
+	bool accumulate = lib != nil;
+	for(uint32 k = 0; k < 4; k++){
 		MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-		[cv setConstantValue:&on type:MTLDataTypeBool atIndex:0];
-		rays[i] = [lib newFunctionWithName:@"shadowRays" constantValues:cv error:&err];
+		[cv setConstantValue:&k type:MTLDataTypeUInt atIndex:0];
+		id<MTLFunction> f = lib ? [lib newFunctionWithName:@"shadowAccumulate" constantValues:cv error:&err] : nil;
+		sh.accumulate[k] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+		accumulate = accumulate && sh.accumulate[k];
 	}
-	sh.rays = rays[0] ? [dev newComputePipelineStateWithFunction:rays[0] error:&err] : nil;
-	sh.accumulate = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowAccumulate"] error:&err] : nil;
 	sh.clear = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowClear"] error:&err] : nil;
-	if(sh.rays == nil || sh.accumulate == nil || sh.clear == nil){
-		sh.rays = sh.accumulate = sh.clear = nil;
+	if(sh.rays == nil || !accumulate || sh.clear == nil){
+		sh.rays = sh.clear = nil;
+		for(uint32 k = 0; k < 4; k++)
+			sh.accumulate[k] = nil;
 		fprintf(stderr, "rw::metal: the shadow kernels failed to build; ray-traced shadows are off: %s\n",
 			err ? err.localizedDescription.UTF8String : "");
 	}
 	NSError *alphaErr = nil;
-	sh.raysAlpha = sh.rays && rays[1] ? [dev newComputePipelineStateWithFunction:rays[1] error:&alphaErr] : nil;
+	if(sh.rays && raysAlpha && sh.alphaHit){
+		MTLComputePipelineDescriptor *pd = [MTLComputePipelineDescriptor new];
+		pd.computeFunction = raysAlpha;
+		MTLLinkedFunctions *linked = [MTLLinkedFunctions linkedFunctions];
+		linked.functions = @[ sh.alphaHit ];
+		pd.linkedFunctions = linked;
+		sh.raysAlpha = [dev newComputePipelineStateWithDescriptor:pd options:MTLPipelineOptionNone reflection:nil error:&alphaErr];
+	}else
+		sh.raysAlpha = nil;
 	if(sh.rays && (sh.raysAlpha == nil || dev.argumentBuffersSupport != MTLArgumentBuffersTier2))
 		fprintf(stderr, "rw::metal: the alpha-tested shadow kernel is unavailable; meshes with texture alpha cast no shadow: %s\n",
 			alphaErr ? alphaErr.localizedDescription.UTF8String : "argument buffers tier 2 missing");
@@ -367,6 +389,7 @@ rtTerm(void)
 	rt.heapBytes = 0;
 	rt.usedBytes = 0;
 	rt.scratch = nil;
+	rt.radii.clear();
 	rt.stats.bottomLevels = 0;
 	rf.casters.clear();
 	rf.byKey.clear();
@@ -378,7 +401,8 @@ rtTerm(void)
 	rf.topBytes = rf.skinnedBytes = 0;
 	rf.topScratch = rf.skinScratch = nil;
 	rf.current = rf.last = nil;
-	rf.currentAlpha = rf.lastAlpha = nil;
+	rf.currentAlpha = rf.lastAlpha = rf.currentParams = rf.lastParams = nil;
+	rf.currentTable = rf.lastTable = rf.passTable = nil;
 	rf.alphaTextures.clear();
 	rf.open = false;
 	rf.skinPipe = rf.tracePipe = nil;
@@ -390,7 +414,10 @@ rtTerm(void)
 	rf.deferred.clear();
 	rt.stats.instances = rt.stats.skinnedLevels = 0;
 	rtDropShadowTargets();
-	sh.rays = sh.raysAlpha = sh.accumulate = sh.clear = nil;
+	sh.rays = sh.raysAlpha = sh.clear = nil;
+	for(uint32 k = 0; k < 4; k++)
+		sh.accumulate[k] = nil;
+	sh.alphaHit = nil;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
 		sh.timing[i] = nil;
 	sh.ticks.store(0);
@@ -618,6 +645,7 @@ rtForgetHeader(InstanceDataHeader *h)
 	auto it = rt.bottoms.find(h);
 	if(it != rt.bottoms.end())
 		dropLevel(it, true);
+	rt.radii.erase(h);
 	for(auto s = rf.skinned.begin(); s != rf.skinned.end();)
 		s = s->second.header == h ? retireSkinned(s) : std::next(s);
 	for(Caster &c : rf.casters)
@@ -648,6 +676,8 @@ rtReleaseLevels(void)
 		retireHeld(t.instances, 0);
 		retireHeld(t.bones, 0);
 		retireHeld(t.alpha, 0);
+		retireHeld(t.alphaParams, 0);
+		retireHeld(t.table, 0);
 		t = TopSlot();
 	}
 	retireHeld(rt.scratch, 0);
@@ -659,7 +689,8 @@ rtReleaseLevels(void)
 		retireHeld(h, RT_HEAP_SIZE);
 	rt.heaps.clear();
 	rf.current = rf.last = nil;
-	rf.currentAlpha = rf.lastAlpha = nil;
+	rf.currentAlpha = rf.lastAlpha = rf.currentParams = rf.lastParams = nil;
+	rf.currentTable = rf.lastTable = rf.passTable = nil;
 }
 
 static bool
@@ -867,7 +898,8 @@ rtBeginCasters(const float32 eye[3], bool passRuns)
 	memcpy(rf.eye, eye, sizeof(rf.eye));
 	rf.open = rt.available && passRuns;
 	rf.current = nil;
-	rf.currentAlpha = nil;
+	rf.currentAlpha = rf.currentParams = nil;
+	rf.currentTable = nil;
 }
 
 void
@@ -886,7 +918,8 @@ void
 rtSceneBegin(void)
 {
 	rf.current = nil;
-	rf.currentAlpha = nil;
+	rf.currentAlpha = rf.currentParams = nil;
+	rf.currentTable = rf.passTable = nil;
 	releaseRetired();
 	if(!sh.ran)
 		sh.valid = false;
@@ -974,6 +1007,52 @@ skinJob(const InstanceDataHeader *h, SkinJobHost *j)
 	return found == 3;
 }
 
+static float32
+headerRadius(const InstanceDataHeader *h)
+{
+	auto it = rt.radii.find(h);
+	if(it != rt.radii.end())
+		return it->second;
+	const AttribDesc *pos = castPosition(h);
+	float32 r = 0.0f;
+	if(pos && h->vertexBuffer && h->totalNumVertex > 0){
+		float32 lo[3], hi[3];
+		for(uint32 v = 0; v < (uint32)h->totalNumVertex; v++){
+			const float32 *p = (const float32*)(h->vertexBuffer + (size_t)v*pos->stride);
+			for(int32 k = 0; k < 3; k++){
+				lo[k] = v == 0 ? p[k] : std::min(lo[k], p[k]);
+				hi[k] = v == 0 ? p[k] : std::max(hi[k], p[k]);
+			}
+		}
+		float32 dx = hi[0] - lo[0], dy = hi[1] - lo[1], dz = hi[2] - lo[2];
+		r = 0.5f*sqrtf(dx*dx + dy*dy + dz*dz);
+	}
+	rt.radii[h] = r;
+	return r;
+}
+
+static float32
+casterRadius(const Caster &c)
+{
+	const V3d *axes[3] = { &c.world.right, &c.world.up, &c.world.at };
+	float32 scale = 0.0f;
+	for(const V3d *a : axes)
+		scale = std::max(scale, sqrtf(a->x*a->x + a->y*a->y + a->z*a->z));
+	return headerRadius(c.header)*scale;
+}
+
+static uint32
+skinCap(void)
+{
+	return rf.skinCapTest ? std::min<uint32>(rf.skinCapTest, RT_MAX_SKINNED) : (uint32)RT_MAX_SKINNED;
+}
+
+static float32
+skinDistance(void)
+{
+	return rf.skinCapTest ? rf.skinDistanceTest : RT_SKIN_DISTANCE;
+}
+
 static void
 chooseCasters(std::vector<uint32> *chosen)
 {
@@ -986,14 +1065,20 @@ chooseCasters(std::vector<uint32> *chosen)
 		dropped += rf.casters[i].header == nil;
 	}
 	shCapByDistance(d2.data(), n, n, order.data());
-	uint32 cap = rf.cap ? rf.cap : (uint32)RT_MAX_INSTANCES, skinned = 0, k = 0;
+	uint32 cap = rf.cap ? rf.cap : (uint32)RT_MAX_INSTANCES, skinned = 0, k = 0, large = 0;
+	uint32 skinMax = skinCap();
+	float32 skinFar = skinDistance();
 	SkinJobHost j;
 	for(; k < n && chosen->size() < cap; k++){
 		Caster &c = rf.casters[order[k]];
 		if(c.header == nil)
 			continue;
+		if(casterMaxRadius > 0.0f && casterRadius(c) > casterMaxRadius){
+			large++;
+			continue;
+		}
 		if(c.bones >= 0){
-			if(skinned == RT_MAX_SKINNED || c.dist2 > RT_SKIN_DISTANCE*RT_SKIN_DISTANCE || !skinJob(c.header, &j))
+			if(skinned == skinMax || c.dist2 > skinFar*skinFar || !skinJob(c.header, &j))
 				continue;
 			skinned++;
 		}else if(ensureBottomState(c.header) == LEVEL_NONE)
@@ -1005,6 +1090,7 @@ chooseCasters(std::vector<uint32> *chosen)
 	rt.stats.castersCapped = n - k;
 	rt.stats.castersDropped = dropped;
 	rt.stats.skinnedCasters = skinned;
+	rt.stats.castersLarge = large;
 }
 
 static MTLInstanceAccelerationStructureDescriptor*
@@ -1019,6 +1105,23 @@ topDescriptor(const TopSlot &t, uint32 count)
 	return d;
 }
 
+static id<MTLIntersectionFunctionTable>
+alphaFunctionTable(id<MTLBuffer> alpha, id<MTLBuffer> params)
+{
+	if(sh.raysAlpha == nil || sh.alphaHit == nil)
+		return nil;
+	id<MTLFunctionHandle> fn = [sh.raysAlpha functionHandleWithFunction:sh.alphaHit];
+	MTLIntersectionFunctionTableDescriptor *d = [MTLIntersectionFunctionTableDescriptor intersectionFunctionTableDescriptor];
+	d.functionCount = 1;
+	id<MTLIntersectionFunctionTable> table = fn ? [sh.raysAlpha newIntersectionFunctionTableWithDescriptor:d] : nil;
+	if(table == nil)
+		return nil;
+	[table setFunction:fn atIndex:0];
+	[table setBuffer:alpha offset:0 atIndex:0];
+	[table setBuffer:params offset:0 atIndex:1];
+	return table;
+}
+
 static bool
 ensureTopSlot(id<MTLCommandBuffer> cb, TopSlot &t)
 {
@@ -1029,27 +1132,35 @@ ensureTopSlot(id<MTLCommandBuffer> cb, TopSlot &t)
 		id<MTLBuffer> instances = [dev newBufferWithLength:t.instances.length options:MTLResourceStorageModeShared];
 		id<MTLBuffer> bones = [dev newBufferWithLength:t.bones.length options:MTLResourceStorageModeShared];
 		id<MTLBuffer> alpha = [dev newBufferWithLength:t.alpha.length options:MTLResourceStorageModeShared];
-		if(instances == nil || bones == nil || alpha == nil)
+		id<MTLBuffer> params = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+		if(instances == nil || bones == nil || alpha == nil || params == nil)
 			return false;
-		id<MTLBuffer> oldInstances = t.instances, oldBones = t.bones, oldAlpha = t.alpha;
+		id<MTLBuffer> oldInstances = t.instances, oldBones = t.bones, oldAlpha = t.alpha, oldParams = t.alphaParams;
+		id<MTLIntersectionFunctionTable> oldTable = t.table;
 		[cb addCompletedHandler:^(id<MTLCommandBuffer>){
 			(void)oldInstances;
 			(void)oldBones;
 			(void)oldAlpha;
+			(void)oldParams;
+			(void)oldTable;
 		}];
 		t.instances = instances;
 		t.bones = bones;
 		t.alpha = alpha;
+		t.alphaParams = params;
+		t.table = alphaFunctionTable(alpha, params);
 		return true;
 	}
 	t.instances = [dev newBufferWithLength:RT_MAX_INSTANCES*sizeof(MTLIndirectAccelerationStructureInstanceDescriptor)
 		options:MTLResourceStorageModeShared];
 	t.bones = [dev newBufferWithLength:RT_MAX_SKINNED*MAXSKINBONES*sizeof(RawMatrix) options:MTLResourceStorageModeShared];
 	t.alpha = [dev newBufferWithLength:RT_MAX_ALPHA_ENTRIES*sizeof(ShadowAlphaEntryHost) options:MTLResourceStorageModeShared];
-	if(t.instances == nil || t.bones == nil || t.alpha == nil){
-		t.instances = t.bones = t.alpha = nil;
+	t.alphaParams = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+	if(t.instances == nil || t.bones == nil || t.alpha == nil || t.alphaParams == nil){
+		t.instances = t.bones = t.alpha = t.alphaParams = nil;
 		return false;
 	}
+	t.table = alphaFunctionTable(t.alpha, t.alphaParams);
 	MTLAccelerationStructureSizes sz = [dev accelerationStructureSizesWithDescriptor:topDescriptor(t, RT_MAX_INSTANCES)];
 	if(rf.topScratch == nil || rf.topScratch.length < sz.buildScratchBufferSize)
 		rf.topScratch = [dev newBufferWithLength:std::max<NSUInteger>(sz.buildScratchBufferSize, 256)
@@ -1058,7 +1169,8 @@ ensureTopSlot(id<MTLCommandBuffer> cb, TopSlot &t)
 	int32 cause = REFUSE_BUDGET;
 	id<MTLAccelerationStructure> a = rf.topScratch ? allocAccel(sa, &cause) : nil;
 	if(a == nil){
-		t.instances = t.bones = t.alpha = nil;
+		t.instances = t.bones = t.alpha = t.alphaParams = nil;
+		t.table = nil;
 		rt.stats.budgetFull++;
 		return false;
 	}
@@ -1161,7 +1273,7 @@ encodeSkinned(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopSlo
 	std::vector<SkinWork> work;
 	NSUInteger scratch = 0;
 	for(uint32 i : chosen){
-		if(work.size() == RT_MAX_SKINNED)
+		if(work.size() == skinCap())
 			break;
 		Caster &c = rf.casters[i];
 		SkinWork w = {};
@@ -1309,20 +1421,16 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 			continue;
 		}
 		uint32 user = 0xFFFFFFFFu;
-		bool alphaLevel = false;
 		if(c.bones < 0){
 			const std::vector<uint32> &meshes = rt.bottoms.find(c.header)->second.alphaMeshes;
 			if(!meshes.empty()){
 				f.instances++;
-				alphaLevel = true;
 				user = alphaBase(f, c.header, meshes);
 			}
 		}
 		di[count].transformationMatrix = packed(c.world);
 		di[count].options = MTLAccelerationStructureInstanceOptionDisableTriangleCulling;
-		di[count].mask = shInstanceMask(c.mask, alphaLevel && rf.alphaMaskTest != 1);
-		if(alphaLevel && rf.alphaMaskTest == 2)
-			di[count].mask = c.mask;
+		di[count].mask = c.mask;
 		di[count].intersectionFunctionTableOffset = 0;
 		di[count].userID = user;
 		di[count].accelerationStructureID = as.gpuResourceID;
@@ -1338,6 +1446,10 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 	rt.stats.alphaEntries = f.entries;
 	rt.stats.alphaTextures = (uint32)f.textures.size();
 	rt.stats.alphaCapped = f.capped;
+	uint32 *tp = (uint32*)t.alphaParams.contents;
+	tp[0] = f.entries;
+	tp[1] = (uint32)rf.alphaFunctionTest;
+	tp[2] = tp[3] = 0;
 	if(f.keep.count){
 		NSMutableArray *keep = f.keep;
 		[cb addCompletedHandler:^(id<MTLCommandBuffer>){
@@ -1352,6 +1464,8 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 	[enc endEncoding];
 	rf.current = rf.last = t.accel;
 	rf.currentAlpha = rf.lastAlpha = t.alpha;
+	rf.currentParams = rf.lastParams = t.alphaParams;
+	rf.currentTable = rf.lastTable = t.table;
 }
 
 static void
@@ -1366,7 +1480,8 @@ rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters)
 {
 	rf.open = false;
 	rf.current = rf.last = nil;
-	rf.currentAlpha = rf.lastAlpha = nil;
+	rf.currentAlpha = rf.lastAlpha = rf.currentParams = rf.lastParams = nil;
+	rf.currentTable = rf.lastTable = nil;
 	rf.alphaTextures.clear();
 	if(!rt.available)
 		return;
@@ -1442,7 +1557,7 @@ rtUseHeapsForBuild(id<MTLAccelerationStructureCommandEncoder> e)
 bool
 rtShadowsSupported(void)
 {
-	return rt.available && sh.rays && sh.accumulate && sh.clear;
+	return rt.available && sh.rays && sh.accumulate[0] && sh.clear;
 }
 
 bool
@@ -1452,9 +1567,9 @@ rtAlphaCastersSupported(void)
 }
 
 static bool
-useAlphaKernel(id<MTLBuffer> table)
+useAlphaKernel(id<MTLBuffer> alpha, id<MTLIntersectionFunctionTable> table)
 {
-	return table != nil && rtAlphaCastersSupported() && (rt.stats.alphaInstances > 0 || sh.forceAlpha);
+	return alpha != nil && table != nil && rtAlphaCastersSupported() && (rt.stats.alphaInstances > 0 || sh.forceAlpha);
 }
 
 static bool
@@ -1469,9 +1584,12 @@ alphaTextureList(std::vector<__unsafe_unretained id<MTLResource>> *list)
 }
 
 static void
-encodeAlphaTable(id<MTLComputeCommandEncoder> e, id<MTLBuffer> table, const std::vector<__unsafe_unretained id<MTLResource>> &list)
+encodeAlphaTable(id<MTLComputeCommandEncoder> e, id<MTLIntersectionFunctionTable> table, id<MTLBuffer> alpha, id<MTLBuffer> params,
+	const std::vector<__unsafe_unretained id<MTLResource>> &list)
 {
-	[e setBuffer:table offset:0 atIndex:2];
+	[e setIntersectionFunctionTable:table atBufferIndex:2];
+	[e useResource:alpha usage:MTLResourceUsageRead];
+	[e useResource:params usage:MTLResourceUsageRead];
 	if(!list.empty())
 		[e useResources:list.data() count:list.size() usage:MTLResourceUsageRead];
 }
@@ -1559,7 +1677,7 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 		sh.valid = false;
 		return nil;
 	}
-	bool alpha = useAlphaKernel(rf.currentAlpha);
+	bool alpha = useAlphaKernel(rf.currentAlpha, rf.currentTable);
 	std::vector<__unsafe_unretained id<MTLResource>> textures;
 	if(alpha && !alphaTextureList(&textures)){
 		sh.valid = false;
@@ -1570,9 +1688,9 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	simd_float3 sun = simd_normalize(simd_make_float3(in.toSun[0], in.toSun[1], in.toSun[2]));
 	SHVec3 s0 = { sh.prevSun.x, sh.prevSun.y, sh.prevSun.z }, s1 = { sun.x, sun.y, sun.z };
 	bool valid = sh.valid && in.history && !rt.cutFrame && !shSunMoved(s0, s1);
-	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height;
-	ShadowRayParamsHost rp = { inv, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
-		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), sh.frame++, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
+	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height, frameNo = sh.frame++;
+	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
+		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
 	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
 		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
 	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
@@ -1587,17 +1705,19 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 		sh.fresh = false;
 	}
 	if(alpha)
-		encodeAlphaTable(e, rf.currentAlpha, textures);
+		encodeAlphaTable(e, rf.currentTable, rf.currentAlpha, rf.currentParams, textures);
 	[e setComputePipelineState:alpha ? sh.raysAlpha : sh.rays];
 	rt.stats.alphaKernel = alpha ? 1 : 0;
+	rf.passTable = alpha ? rf.currentTable : nil;
 	rtUseHeaps(e);
 	[e setAccelerationStructure:tlas atBufferIndex:0];
 	[e setBytes:&rp length:sizeof(rp) atIndex:1];
 	[e setTexture:in.depth atIndex:0];
 	[e setTexture:sh.raw atIndex:1];
+	[e setTexture:in.normals atIndex:2];
 	[e dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
-	[e setComputePipelineState:sh.accumulate];
+	[e setComputePipelineState:sh.accumulate[frameNo & 3]];
 	[e setTexture:sh.raw atIndex:0];
 	[e setTexture:prev atIndex:1];
 	[e setTexture:in.motion atIndex:2];
@@ -2101,6 +2221,8 @@ rtResetForTest(void)
 	rt.frame = 0;
 	rt.completed.store(0);
 	rt.stats = RayStats();
+	rf.skinCapTest = 0;
+	rf.skinDistanceTest = 0.0f;
 	rtInit();
 }
 
@@ -2123,9 +2245,28 @@ setShadowAlphaKernelForTest(int32 mode)
 }
 
 void
-setRtAlphaMaskForTest(int32 mode)
+setRtAlphaFunctionForTest(int32 mode)
 {
-	rf.alphaMaskTest = mode;
+	rf.alphaFunctionTest = mode;
+}
+
+const void*
+rtAlphaTableForTest(void)
+{
+	return (__bridge const void*)rf.passTable;
+}
+
+void
+setRtSkinnedLimitForTest(uint32 cap, float32 distance)
+{
+	rf.skinCapTest = cap;
+	rf.skinDistanceTest = distance;
+}
+
+void
+setShadowCasterMaxRadius(float32 metres)
+{
+	casterMaxRadius = metres > 0.0f ? metres : 0.0f;
 }
 
 void
@@ -2150,6 +2291,18 @@ bool32
 rtWatchedTextureAliveForTest(void)
 {
 	return rf.watched != nil;
+}
+
+void
+rtWatchAlphaTableForTest(void)
+{
+	rf.watchedTable = rf.passTable;
+}
+
+bool32
+rtWatchedTableAliveForTest(void)
+{
+	return rf.watchedTable != nil;
 }
 
 void
@@ -2275,24 +2428,42 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 		rd.storageMode = MTLStorageModePrivate;
 		rd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 		id<MTLTexture> raw = [dev newTextureWithDescriptor:rd];
-		if(depthTex == nil || raw == nil)
+		MTLTextureDescriptor *nd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Snorm width:width
+			height:height mipmapped:NO];
+		nd.storageMode = MTLStorageModePrivate;
+		nd.usage = MTLTextureUsageShaderRead;
+		id<MTLTexture> normalTex = [dev newTextureWithDescriptor:nd];
+		id<MTLBuffer> normalBuf = [dev newBufferWithLength:(NSUInteger)width*height*4 options:MTLResourceStorageModeShared];
+		if(depthTex == nil || raw == nil || normalTex == nil || normalBuf == nil)
 			return 0;
+		simd_float4 gn = simd_mul(view, simd_make_float4(0.0f, 0.0f, 1.0f, 0.0f));
+		PPVec2 oe = ppOctEncode(gn.x, gn.y, gn.z);
+		int16_t packedNormal[2] = { (int16_t)lrintf(std::min(std::max(oe.x, -1.0f), 1.0f)*32767.0f),
+			(int16_t)lrintf(std::min(std::max(oe.y, -1.0f), 1.0f)*32767.0f) };
+		int16_t *np = (int16_t*)normalBuf.contents;
+		for(size_t i = 0; i < (size_t)width*height; i++){
+			np[2*i] = packedNormal[0];
+			np[2*i + 1] = packedNormal[1];
+		}
 		id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
 		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 		[blit copyFromBuffer:depthBuf sourceOffset:0 sourceBytesPerRow:width*4 sourceBytesPerImage:(NSUInteger)width*height*4
 			sourceSize:MTLSizeMake(width, height, 1) toTexture:depthTex destinationSlice:0 destinationLevel:0
 			destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit copyFromBuffer:normalBuf sourceOffset:0 sourceBytesPerRow:width*4 sourceBytesPerImage:(NSUInteger)width*height*4
+			sourceSize:MTLSizeMake(width, height, 1) toTexture:normalTex destinationSlice:0 destinationLevel:0
+			destinationOrigin:MTLOriginMake(0, 0, 0)];
 		[blit endEncoding];
 		[cb commit];
 		[cb waitUntilCompleted];
 		simd_float3 sun = simd_normalize(simd_make_float3(toSun[0], toSun[1], toSun[2]));
-		bool alpha = useAlphaKernel(rf.lastAlpha);
+		bool alpha = useAlphaKernel(rf.lastAlpha, rf.lastTable);
 		std::vector<__unsafe_unretained id<MTLResource>> textures;
 		if(alpha && !alphaTextureList(&textures))
 			return 0;
 		std::vector<float32> times;
 		for(uint32 k = 0; k < 5; k++){
-			ShadowRayParamsHost rp = { inv, simd_make_float4(sun, 0.02f), simd_make_float4(e, SH_RAY_DISTANCE),
+			ShadowRayParamsHost rp = { inv, simd_inverse(view), simd_make_float4(sun, 0.02f), simd_make_float4(e, SH_RAY_DISTANCE),
 				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
 			id<MTLCommandBuffer> tcb = [ctx->queue commandBuffer];
 			MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
@@ -2302,12 +2473,13 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 			id<MTLComputeCommandEncoder> enc = [tcb computeCommandEncoderWithDescriptor:pd];
 			[enc setComputePipelineState:alpha ? sh.raysAlpha : sh.rays];
 			if(alpha)
-				encodeAlphaTable(enc, rf.lastAlpha, textures);
+				encodeAlphaTable(enc, rf.lastTable, rf.lastAlpha, rf.lastParams, textures);
 			rtUseHeaps(enc);
 			[enc setAccelerationStructure:rf.last atBufferIndex:0];
 			[enc setBytes:&rp length:sizeof(rp) atIndex:1];
 			[enc setTexture:depthTex atIndex:0];
 			[enc setTexture:raw atIndex:1];
+			[enc setTexture:normalTex atIndex:2];
 			[enc dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 			[enc endEncoding];
 			[tcb commit];

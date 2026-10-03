@@ -13,6 +13,7 @@
 #include <src/metal/metalrelit.h>
 #include "world_checks.h"
 #include "modern_checks.h"
+#include "raytrace_checks.h"
 #include "late_pipelines.h"
 
 using namespace rw;
@@ -4890,6 +4891,27 @@ CheckShadowOnlyEqualDraws(void)
 }
 
 static bool
+CheckShadowStrengthClamp(void)
+{
+	const char *name = "the shadow strength is clamped to 0..1 and a NaN falls back to 0";
+	metal::RelitParams saved = metal::getRelitParams();
+	const float in[4] = { NAN, 2.0f, -1.0f, 0.4f }, want[4] = { 0.0f, 1.0f, 0.0f, 0.4f };
+	float got[4];
+	bool ok = true;
+	for(int i = 0; i < 4; i++){
+		metal::RelitParams p = saved;
+		p.shadowStrength = in[i];
+		metal::setRelitParams(&p);
+		got[i] = metal::getRelitParams().shadowStrength;
+		ok = ok && got[i] == want[i];
+	}
+	metal::setRelitParams(&saved);
+	if(!ok)
+		Detail("  NaN %.4f, 2 %.4f, -1 %.4f, 0.4 %.4f\n", got[0], got[1], got[2], got[3]);
+	return Report(ok, name);
+}
+
+static bool
 CheckSunRadiusClamp(void)
 {
 	const char *name = "the sun radius is clamped to 0..0.1 radians and a NaN falls back to 0.02";
@@ -4922,7 +4944,7 @@ static bool
 CheckShadowTwinsPrewarmed(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 {
 	const char *name = "with ShadowQuality turned on after the modern switch, or on at an engine start on the modern tier, a relit frame at weight 0.5 builds no pipeline late";
-	uint32 late[2], shadow[2];
+	uint32 late[2], shadow[2], plain[2], plainLate[2];
 	int32 tier[2];
 	RelitScene s;
 	WorldOpen(cam);
@@ -4936,6 +4958,11 @@ CheckShadowTwinsPrewarmed(bool (*restart)(uint32 samples), Camera *(*camera)(voi
 	metal::StateStats a1 = metal::getStateStats();
 	late[0] = a1.pipelinesLate - a0.pipelinesLate;
 	shadow[0] = a1.relitShadowDraws - a0.relitShadowDraws;
+	RelitSet(1.0f, 0.5f, 1.0f);
+	RelitSceneFrame(&s, CULLNONE);
+	metal::StateStats a2 = metal::getStateStats();
+	plain[0] = a2.plainShadowDraws - a1.plainShadowDraws;
+	plainLate[0] = a2.pipelinesLate - a1.pipelinesLate;
 	FreeRelitScene(&s);
 	WorldClose();
 	bool restarted = restart(1);
@@ -4948,6 +4975,11 @@ CheckShadowTwinsPrewarmed(bool (*restart)(uint32 samples), Camera *(*camera)(voi
 	a1 = metal::getStateStats();
 	late[1] = a1.pipelinesLate - a0.pipelinesLate;
 	shadow[1] = a1.relitShadowDraws - a0.relitShadowDraws;
+	RelitSet(1.0f, 0.5f, 1.0f);
+	RelitSceneFrame(&s, CULLNONE);
+	a2 = metal::getStateStats();
+	plain[1] = a2.plainShadowDraws - a1.plainShadowDraws;
+	plainLate[1] = a2.pipelinesLate - a1.pipelinesLate;
 	RelitReset();
 	SetShadowQuality(metal::SHADOWQUALITY_OFF);
 	TiersOff();
@@ -4956,10 +4988,10 @@ CheckShadowTwinsPrewarmed(bool (*restart)(uint32 samples), Camera *(*camera)(voi
 	restarted = restart(4) && restarted;
 	cam = camera();
 	bool ok = restarted && late[0] == 0 && late[1] == 0 && shadow[0] > 0 && shadow[1] > 0 && tier[0] == metal::TIER_MODERN &&
-		tier[1] == metal::TIER_MODERN;
+		tier[1] == metal::TIER_MODERN && plain[0] > 0 && plain[1] > 0 && plainLate[0] == 0 && plainLate[1] == 0;
 	if(!ok)
-		Detail("  turned on after the switch: late %u shadow draws %u tier %d; on at the start: late %u shadow draws %u tier %d; restarts %d\n",
-			late[0], shadow[0], tier[0], late[1], shadow[1], tier[1], restarted);
+		Detail("  turned on after the switch: late %u shadow draws %u tier %d, at weight 1 late %u plain shadow draws %u; on at the start: late %u shadow draws %u tier %d, at weight 1 late %u plain shadow draws %u; restarts %d\n",
+			late[0], shadow[0], tier[0], plainLate[0], plain[0], late[1], shadow[1], tier[1], plainLate[1], plain[1], restarted);
 	return Report(ok, name);
 }
 
@@ -5284,6 +5316,7 @@ RunModernChecks(Camera *camera)
 	CheckRelitTwoSidedHost();
 	CheckRelitShadowConstant();
 	CheckShadowOnlyEqualDraws();
+	CheckShadowStrengthClamp();
 	CheckSunRadiusClamp();
 	CheckRelitFaceSkip();
 	CheckRelitFetchTransform();
@@ -5416,6 +5449,7 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	CheckRelitSplitEdge();
 	CheckRelitCreaseTaa();
 	CheckRelitCost("the GPU time of a modern frame of relit layers is measured with the face fetch on and off at four samples", 4);
+	failures += RunRaytraceSampleChecks(cam);
 	metal::FrameInfo exitFrame;
 	int32 exitTier = ExitStatsFrame(&exitFrame);
 	WorldClose();

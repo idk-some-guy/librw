@@ -31,8 +31,8 @@ shQuality(int q)
 {
 	SHQuality r = { 0u, 0u, 0.0f };
 	if(q == 1){ r.raysPerPixel = 1u; r.halfRes = 1u; r.maxHistory = 16.0f; }
-	else if(q == 2){ r.raysPerPixel = 1u; r.halfRes = 0u; r.maxHistory = 12.0f; }
-	else if(q == 3){ r.raysPerPixel = 2u; r.halfRes = 0u; r.maxHistory = 8.0f; }
+	else if(q == 2){ r.raysPerPixel = 1u; r.halfRes = 1u; r.maxHistory = 12.0f; }
+	else if(q == 3){ r.raysPerPixel = 1u; r.halfRes = 0u; r.maxHistory = 12.0f; }
 	return r;
 }
 
@@ -77,17 +77,42 @@ shDiscDirection(SHVec3 sun, float radius, float u1, float u2)
 }
 
 static inline float
-shBias(float distance)
+shNormalOffset(float distance)
 {
-	return 0.02f + 0.0015f*distance;
+	return 0.005f + 0.0002f*distance;
 }
 
 static inline SHVec3
-shRayOrigin(SHVec3 p, SHVec3 toCamera, float distance)
+shRayOrigin(SHVec3 p, SHVec3 n, float distance)
 {
-	float b = shBias(distance);
-	SHVec3 o = { p.x + toCamera.x*b, p.y + toCamera.y*b, p.z + toCamera.z*b };
+	float b = shNormalOffset(distance);
+	SHVec3 o = { p.x + n.x*b, p.y + n.y*b, p.z + n.z*b };
 	return o;
+}
+
+static inline bool
+shFacesAwayFromSun(float normalValid, float nDotL, float radius)
+{
+	return normalValid > 0.0f && nDotL <= -radius;
+}
+
+static inline unsigned int
+shPhaseX(unsigned int frame)
+{
+	return frame & 1u;
+}
+
+static inline unsigned int
+shPhaseY(unsigned int frame)
+{
+	return (frame >> 1) & 1u;
+}
+
+static inline unsigned int
+shRaySource(unsigned int h, unsigned int off, unsigned int size)
+{
+	unsigned int s = 2u*h + off;
+	return s < size - 1u ? s : size - 1u;
 }
 
 // The backend's latched sun direction points away from the sun: pass -sunDir.z.
@@ -135,6 +160,29 @@ static inline bool
 shDisoccluded(float prevViewZ, float viewZ)
 {
 	return SH_ABS(prevViewZ - viewZ) > 0.05f*viewZ + 0.1f;
+}
+
+struct SHTap { unsigned int index; float weight; };
+
+static inline SHTap
+shUpsampleTap(unsigned int g, unsigned int off, int k)
+{
+	SHTap t;
+	if(g < off){
+		t.index = 0u;
+		t.weight = 0.5f;
+		return t;
+	}
+	unsigned int p = g - off;
+	t.index = p/2u + (unsigned int)k;
+	t.weight = (p & 1u) != 0u ? 0.5f : k == 0 ? 1.0f : 0.0f;
+	return t;
+}
+
+static inline float
+shUpsampleWeight(float tapDistance, float distance)
+{
+	return 1.0f/(1e-4f + SH_ABS(tapDistance - distance)/SH_MAX(distance, 1e-3f));
 }
 
 static inline bool
@@ -198,14 +246,6 @@ shAddress(float t, unsigned int mode)
 	if(mode == 2u)
 		return SH_MIN(SH_MAX(t, 0.0f), 1.0f);
 	return t - SH_FLOOR(t);
-}
-
-enum { SH_INSTANCE_ALPHA = 8, SH_INSTANCE_OPAQUE = 16 };
-
-static inline unsigned int
-shInstanceMask(unsigned int casterMask, bool alphaLevel)
-{
-	return casterMask | (alphaLevel ? SH_INSTANCE_ALPHA : SH_INSTANCE_OPAQUE);
 }
 
 static inline bool

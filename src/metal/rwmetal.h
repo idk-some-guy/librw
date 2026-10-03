@@ -380,6 +380,7 @@ struct RayStats
 	float32 walkMs, shadowMegabytes;
 	uint32 alphaInstances, alphaEntries, alphaTextures, alphaCapped, alphaKernel, alphaSkipped;
 	float32 topMs, buildMs;
+	uint32 castersLarge;
 };
 RayStats getRayStats(void);
 
@@ -409,6 +410,7 @@ struct RelitParams
 	float32 hemiSaturation;
 	float32 sunScale;
 	float32 sunRadius;
+	float32 shadowStrength;
 };
 
 void setRelitParams(const RelitParams *p);
@@ -418,6 +420,8 @@ void setRelitDraw(bool32 on);
 enum { SHADOWCASTER_STATIC = 1, SHADOWCASTER_MOVING = 2, SHADOWCASTER_SKINNED = 4 };
 void addShadowCaster(Atomic *atomic, uint32 kind);
 void setShadowCaster(bool32 on);
+bool32 shadowSourceOn(void);
+void setShadowCasterMaxRadius(float32 metres);
 void setRelitTwoSided(bool32 on);
 void beginReactive(void);
 void endReactive(void);

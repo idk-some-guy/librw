@@ -821,14 +821,14 @@ CheckUploadedVertices(void)
 static bool
 CheckSkinnedCap(void)
 {
-	const char *name = "at most 24 skinned casters are kept, the nearest, and none beyond 60 m";
+	const char *name = "at most 48 skinned casters are kept, the nearest, and none beyond 100 m";
 	Geometry *geo = SkinnedQuadGeometry(0.5f);
 	std::vector<Atomic*> as;
 	CasterTiersOn();
-	float farA[2] = { 70.0f, 65.0f };
+	float farA[2] = { 105.0f, 102.0f };
 	for(int i = 0; i < 2; i++)
 		as.push_back(SkinnedAt(geo, 0.0f, 0.0f, farA[i]));
-	for(int i = 19; i >= 0; i--)
+	for(int i = 45; i >= 0; i--)
 		as.push_back(SkinnedAt(geo, 0.0f, 0.0f, 6.0f + 2.0f*i));
 	CasterFrame([&](bool){ for(Atomic *a : as) a->render(); });
 	metal::RayStats sa = metal::getRayStats();
@@ -836,19 +836,19 @@ CheckSkinnedCap(void)
 	for(Atomic *a : as)
 		DestroySkinAtomic(a);
 	as.clear();
-	for(int i = 25; i >= 0; i--)
+	for(int i = 49; i >= 0; i--)
 		as.push_back(SkinnedAt(geo, 0.0f, 0.0f, 6.0f + 2.0f*i));
 	CasterFrame([&](bool){ for(Atomic *a : as) a->render(); });
 	metal::RayStats sb = metal::getRayStats();
 	bool farthest = metal::rtSkinnedForTest(as[0]) || metal::rtSkinnedForTest(as[1]);
-	bool nearest = metal::rtSkinnedForTest(as[25]) && metal::rtSkinnedForTest(as[2]);
+	bool nearest = metal::rtSkinnedForTest(as[49]) && metal::rtSkinnedForTest(as[2]);
 	CasterTiersOff();
 	for(Atomic *a : as)
 		DestroySkinAtomic(a);
 	geo->destroy();
-	bool ok = sa.skinnedCasters == 20 && !beyond && sb.skinnedCasters == 24 && !farthest && nearest;
+	bool ok = sa.skinnedCasters == 46 && !beyond && sb.skinnedCasters == 48 && !farthest && nearest;
 	if(!ok)
-		Detail("  case A kept %u beyond 60 m %d; case B kept %u farthest %d nearest %d\n", sa.skinnedCasters, beyond,
+		Detail("  case A kept %u beyond 100 m %d; case B kept %u farthest %d nearest %d\n", sa.skinnedCasters, beyond,
 			sb.skinnedCasters, farthest, nearest);
 	return Report(ok, name);
 }
@@ -1259,6 +1259,24 @@ PrintCasterTiming(void)
 	float32 ratio = ms[1][0][1] > 0.0f ? ms[0][0][1]/ms[1][0][1] : 0.0f;
 	printf("    rebuild / refit = %.2f: %s\n", ratio, ratio <= 1.5f ? "rebuild per frame" :
 		"refit with a full rebuild every 30 frames");
+	std::vector<Atomic*> crowd(peds);
+	for(int i = 24; i < 48; i++){
+		Atomic *a = SkinAtomic(geo);
+		Place(a, 1.0f, 0.0f, 10.0f + 1.25f*(i - 24), 0.0f);
+		PoseSkin(a, 4);
+		peds.push_back(a);
+		crowd.push_back(a);
+	}
+	for(int i = 0; i < 24; i++)
+		Place(crowd[i], -1.0f, 0.0f, 10.0f + 1.25f*i, 0.0f);
+	metal::setRtSkinnedLimitForTest(48, 100.0f);
+	float32 skin48 = 0.0f, refit48 = 0.0f;
+	SkinnedTiming(crowd, metal::RT_SKIN_REFIT, &skin48, &refit48);
+	uint32 kept48 = metal::getRayStats().skinnedCasters;
+	metal::setRtSkinnedLimitForTest(0, 0.0f);
+	metal::setRtSkinModeForTest(metal::RT_SKIN_DEFAULT);
+	printf("    48 skinned casters of 1500 triangles, refit: skinning %.3f ms, refits %.3f ms, total %.3f ms (R5 limit 0.3 ms, %u kept)\n",
+		skin48, refit48, skin48 + refit48, kept48);
 	for(Atomic *a : peds)
 		DestroySkinAtomic(a);
 	geo->destroy();
@@ -1444,7 +1462,7 @@ ShadowFrame(ShadowScene *s, int32 quality, int n)
 }
 
 static float
-ShadowExpect(int ch, float prelit, float ambient, float w, V3d n, const ShadowScene *s, float shadow)
+ShadowExpect(int ch, float prelit, float ambient, float w, V3d n, const ShadowScene *s, float shadow, float strength)
 {
 	metal::RelitParams p = metal::getRelitParams();
 	float wc = relitClampWeight(w);
@@ -1457,7 +1475,7 @@ ShadowExpect(int ch, float prelit, float ambient, float w, V3d n, const ShadowSc
 	float live = 1.0f - wc;
 	float c = relitSunCos(-(n.x*at.x + n.y*at.y + n.z*at.z), false);
 	RLSplit sp = relitSplitAdd(classic, hc*live*p.hemiScale, sc*c*live*p.sunScale, 1.0f);
-	return relitShadowed(sp.full, sp.sun, shadow);
+	return relitShadowedPrelit(sp.full, sp.sun, classic, shadow, strength);
 }
 
 static float
@@ -1690,10 +1708,12 @@ SkipMeasure(ShadowScene *s, int32 quality, SkipState *r)
 		sscanf(t, " shadow %15s", r->pass);
 }
 
+static bool SkipStrengthIdentity(ShadowScene *s);
+
 static bool
 CheckShadowSkipped(void)
 {
-	const char *name = "with the sun below the horizon, a sun scale of 0 or ShadowQuality off no ray is traced and the factor is 1; the relit draws keep reading the factor while ShadowQuality is on; the pass adds no render pass";
+	const char *name = "with the sun below the horizon, a sun scale of 0 or ShadowQuality off no ray is traced and the factor is 1; the relit draws keep reading the factor while ShadowQuality is on; the pass adds no render pass; at a shadow strength of 0.6 a skipped pass (sun down, sun scale 0, an interior at weight 1) draws exactly the frame without the strength";
 	ShadowScene s;
 	MakeShadowScene(&s, 0.5f);
 	SkipState st[4];
@@ -1708,8 +1728,9 @@ CheckShadowSkipped(void)
 	p.sunScale = 1.0f;
 	metal::setRelitParams(&p);
 	SkipMeasure(&s, metal::SHADOWQUALITY_OFF, &st[3]);
+	bool strength = SkipStrengthIdentity(&s);
 	FreeShadowScene(&s);
-	bool ok = st[0].rays > 0 && st[0].passes > 0;
+	bool ok = st[0].rays > 0 && st[0].passes > 0 && strength;
 	for(int i = 1; i < 3; i++)
 		ok = ok && st[i].rays == 0 && st[i].read && st[i].value == 1.0f && st[i].length == 0.0f && st[i].shadow == st[i].relit &&
 			st[i].relit > 0;
@@ -1841,12 +1862,639 @@ CheckShadowSunOnly(void)
 	});
 	metal::rtWaitForTest();
 	V3d n = { 0.0f, 0.0f, 1.0f };
-	float shade0 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 0.0f);
-	float open1 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 1.0f);
+	float shade0 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 0.0f, 0.0f);
+	float open1 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 1.0f, 0.0f);
 	FreeShadowScene(&s);
 	bool ok = read && fabsf(shade[0] - shade0) < 2.0f/255.0f && fabsf(open[0] - open1) < 2.0f/255.0f && open1 - shade0 > 0.05f;
 	if(!ok)
 		Detail("  read %d shaded red %.4f (want %.4f) open red %.4f (want %.4f)\n", read, shade[0], shade0, open[0], open1);
+	return Report(ok, name);
+}
+
+static void
+SetShadowStrength(float strength)
+{
+	metal::RelitParams p = metal::getRelitParams();
+	p.shadowStrength = strength;
+	metal::setRelitParams(&p);
+}
+
+static bool
+ShadowScenePixels(ShadowScene *s, bool keptBaked, float shade[4], float open[4])
+{
+	bool read = false;
+	CasterFrame([&](bool prepass){
+		SetRenderState(CULLMODE, CULLNONE);
+		if(keptBaked && !prepass)
+			metal::setRelitDraw(0);
+		s->floor->render();
+		metal::setRelitDraw(1);
+		s->roof->render();
+		if(!prepass)
+			read = metal::readScenePixel(SX(-5.0f, 20.0f), 240, shade) && metal::readScenePixel(SX(6.5f, 20.0f), 240, open);
+	});
+	metal::rtWaitForTest();
+	return read;
+}
+
+static bool
+CheckPlainShadowTwin(void)
+{
+	const char *name = "at weight 1 a prelit floor in shadow is darkened by the shadow strength through the plain variant's shadow twin, and the open floor equals the frame without the strength";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetShadowStrength(0.6f);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 16);
+	float shadeA[4], openA[4], shadeB[4], openB[4];
+	metal::StateStats a0 = metal::getStateStats();
+	bool read = ShadowScenePixels(&s, false, shadeA, openA);
+	metal::StateStats a1 = metal::getStateStats();
+	SetShadowStrength(0.0f);
+	read = ShadowScenePixels(&s, false, shadeB, openB) && read;
+	FreeShadowScene(&s);
+	uint32 plainDraws = a1.plainShadowDraws - a0.plainShadowDraws, relitDraws = a1.relitShadowDraws - a0.relitShadowDraws;
+	float plain = fminf(120/255.0f + 0.1f, 1.0f), dark = relitPlainShadowed(plain, 0.0f, 0.6f);
+	bool same = true;
+	for(int i = 0; i < 4; i++)
+		same = same && openA[i] == openB[i];
+	bool ok = read && fabsf(shadeA[0] - dark) < 2.0f/255.0f && same && fabsf(shadeB[0] - plain) < 2.0f/255.0f && plainDraws >= 1 &&
+		relitDraws == 0;
+	if(!ok)
+		Detail("  read %d; strength 0.6: shaded red %.4f (want %.4f) open %.4f; strength 0: shaded red %.4f (want %.4f) open %.4f; open equal %d; plain shadow draws %u relit shadow draws %u\n",
+			read, shadeA[0], dark, openA[0], shadeB[0], plain, openB[0], same, plainDraws, relitDraws);
+	return Report(ok, name);
+}
+
+static Geometry*
+CornerBoxGeometry(Material *mat, float x0, float y0, float z0, float x1, float y1, float z1)
+{
+	Geometry *geo = Geometry::create(8, 12, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT);
+	V3d *v = geo->morphTargets[0].vertices;
+	for(int i = 0; i < 8; i++){
+		v[i].set(i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0);
+		geo->colors[i] = { 120, 120, 120, 255 };
+	}
+	static const int f[12][3] = { { 0, 1, 3 }, { 0, 3, 2 }, { 4, 6, 7 }, { 4, 7, 5 }, { 0, 4, 5 }, { 0, 5, 1 }, { 2, 3, 7 }, { 2, 7, 6 },
+		{ 0, 2, 6 }, { 0, 6, 4 }, { 1, 5, 7 }, { 1, 7, 3 } };
+	for(int i = 0; i < 12; i++){
+		geo->triangles[i].v[0] = f[i][0];
+		geo->triangles[i].v[1] = f[i][1];
+		geo->triangles[i].v[2] = f[i][2];
+		geo->triangles[i].matId = 0;
+	}
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static bool
+CheckPrelitClassicShadow(void)
+{
+	const char *name = "below weight 1 a prelit floor in shadow loses its sun share and the shadow strength's share of its classic part";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowStrength(0.6f);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 16);
+	float shade[4] = { -1, -1, -1, -1 }, open[4] = { -1, -1, -1, -1 };
+	bool read = ShadowScenePixels(&s, false, shade, open);
+	V3d n = { 0.0f, 0.0f, 1.0f };
+	float shade0 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 0.0f, 0.6f);
+	float open1 = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 1.0f, 0.6f);
+	float sunOnly = ShadowExpect(0, 120/255.0f, 0.1f, 0.5f, n, &s, 0.0f, 0.0f);
+	Geometry *slabGeo = CornerBoxGeometry(s.mat, -6.0f, -1.0f, -20.0f, -4.0f, 1.0f, -19.9f);
+	Atomic *slab = MakeAtomic(slabGeo);
+	metal::setFaceFetchForTest(0);
+	float flat[4] = { -1, -1, -1, -1 };
+	bool readFlat = false;
+	for(int i = 0; i < 17; i++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLNONE);
+			s.floor->render();
+			s.roof->render();
+			slab->render();
+			if(!prepass && i == 16)
+				readFlat = metal::readScenePixel(SX(-5.0f, 19.9f), 240, flat);
+		});
+	metal::rtWaitForTest();
+	metal::setFaceFetchForTest(1);
+	DestroyAtomic(slab);
+	slabGeo->destroy();
+	FreeShadowScene(&s);
+	float flatWant = relitPlainShadowed(fminf(120/255.0f + 0.1f, 1.0f), 0.0f, 0.6f);
+	bool ok = read && fabsf(shade[0] - shade0) < 2.0f/255.0f && fabsf(open[0] - open1) < 2.0f/255.0f && sunOnly - shade[0] > 0.05f &&
+		readFlat && fabsf(flat[0] - flatWant) < 2.0f/255.0f;
+	if(!ok)
+		Detail("  read %d shaded red %.4f (want %.4f, %.4f without the strength) open red %.4f (want %.4f); without a face normal %d red %.4f (want %.4f)\n",
+			read, shade[0], shade0, sunOnly, open[0], open1, readFlat, flat[0], flatWant);
+	return Report(ok, name);
+}
+
+static bool
+CheckKeptBakedShadow(void)
+{
+	const char *name = "a prelit draw the host keeps baked is darkened by the shadow strength in shadow, and with the strength 0 or the shadows off it draws the enhanced frame's colour";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowStrength(0.6f);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 16);
+	float shade[4][4], open[4][4];
+	metal::StateStats a0 = metal::getStateStats();
+	bool read = ShadowScenePixels(&s, true, shade[0], open[0]);
+	metal::StateStats a1 = metal::getStateStats();
+	SetShadowStrength(0.0f);
+	read = ShadowScenePixels(&s, true, shade[1], open[1]) && read;
+	SetShadowStrength(0.6f);
+	ShadowFrame(&s, metal::SHADOWQUALITY_OFF, 2);
+	read = ShadowScenePixels(&s, true, shade[2], open[2]) && read;
+	metal::RenderSettings r = metal::getRenderSettings();
+	r.tier = metal::TIER_ENHANCED;
+	metal::setRenderSettings(&r);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 2);
+	read = ShadowScenePixels(&s, true, shade[3], open[3]) && read;
+	FreeShadowScene(&s);
+	uint32 plainDraws = a1.plainShadowDraws - a0.plainShadowDraws;
+	float plain = fminf(120/255.0f + 0.1f, 1.0f), dark = relitPlainShadowed(plain, 0.0f, 0.6f);
+	bool same = true;
+	for(int k = 1; k < 3; k++)
+		for(int i = 0; i < 4; i++)
+			same = same && shade[k][i] == shade[3][i] && open[k][i] == open[3][i];
+	bool ok = read && fabsf(shade[0][0] - dark) < 2.0f/255.0f && fabsf(open[0][0] - plain) < 2.0f/255.0f && same && plainDraws >= 1;
+	if(!ok)
+		Detail("  read %d; strength 0.6: shaded red %.4f (want %.4f) open %.4f (want %.4f); strength 0: %.4f %.4f; shadows off: %.4f %.4f; enhanced: %.4f %.4f; equal %d; plain shadow draws %u\n",
+			read, shade[0][0], dark, open[0][0], plain, shade[1][0], open[1][0], shade[2][0], open[2][0], shade[3][0], open[3][0], same,
+			plainDraws);
+	return Report(ok, name);
+}
+
+static Geometry*
+BoxGeometry(Material *mat, float x0, float y0, float z0, float x1, float y1, float z1)
+{
+	Geometry *geo = Geometry::create(24, 12, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT);
+	V3d *v = geo->morphTargets[0].vertices;
+	const float c[8][3] = { { x0, y0, z0 }, { x1, y0, z0 }, { x1, y1, z0 }, { x0, y1, z0 },
+		{ x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 } };
+	const int faces[6][4] = { { 0, 3, 2, 1 }, { 4, 5, 6, 7 }, { 0, 1, 5, 4 }, { 1, 2, 6, 5 }, { 2, 3, 7, 6 }, { 3, 0, 4, 7 } };
+	for(int f = 0; f < 6; f++){
+		for(int k = 0; k < 4; k++){
+			const float *p = c[faces[f][k]];
+			v[f*4 + k].set(p[0], p[1], p[2]);
+			geo->colors[f*4 + k] = { 120, 120, 120, 255 };
+		}
+		Triangle *t = &geo->triangles[2*f];
+		t[0].v[0] = f*4; t[0].v[1] = f*4 + 1; t[0].v[2] = f*4 + 2; t[0].matId = 0;
+		t[1].v[0] = f*4; t[1].v[1] = f*4 + 2; t[1].v[2] = f*4 + 3; t[1].matId = 0;
+	}
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static void
+SetSunRadius(float radius)
+{
+	metal::RelitParams p = metal::getRelitParams();
+	p.sunRadius = radius;
+	metal::setRelitParams(&p);
+}
+
+static bool
+CheckShadowContact(void)
+{
+	const char *name = "a kerb 0.15 m tall seen from 60 m casts a strip that starts at its base: the origin moves along the surface normal, not toward the camera";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	V2d savedWindow = rtCamera->viewWindow;
+	float half = tanf(2.0f*3.14159265f/180.0f);
+	V2d window = { half, half*0.75f };
+	rtCamera->setViewWindow(&window);
+	Geometry *floorGeo = ShadowQuad(s.mat, 8.0f, -8.0f, -8.0f, 8.0f, -60.0f);
+	Geometry *kerbGeo = BoxGeometry(s.mat, -0.25f, -2.0f, -60.0f, 0.25f, 2.0f, -59.85f);
+	Atomic *floor = MakeAtomic(floorGeo), *kerb = MakeAtomic(kerbGeo);
+	SetSunRadius(0.0f);
+	TurnSun(&s, -110.0f);
+	V3d at = s.sunFrame->getLTM()->at;
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	for(int i = 0; i < 16; i++)
+		CasterFrame([&](bool){
+			SetRenderState(CULLMODE, CULLNONE);
+			floor->render();
+			kerb->render();
+		});
+	metal::rtWaitForTest();
+	float W = 60.0f*half, pixel = 2.0f*W/640.0f;
+	int c0 = (int)ceilf(320.0f*(1.0f + 0.25f/W) - 0.5f), dark = 0;
+	float first = -1.0f;
+	for(int c = c0; c < 640; c++){
+		float v = -1.0f, len = 0.0f;
+		if(!metal::readShadowForTest(c, 240, &v, &len) || v >= 0.5f){
+			first = v;
+			break;
+		}
+		dark++;
+	}
+	float strip = dark*pixel;
+	DestroyAtomic(floor);
+	DestroyAtomic(kerb);
+	floorGeo->destroy();
+	kerbGeo->destroy();
+	rtCamera->setViewWindow(&savedWindow);
+	FreeShadowScene(&s);
+	bool ok = strip >= 0.33f;
+	Detail("  toward the sun (%.3f, %.3f, %.3f); strip %.3f m (%d pixels of %.5f m from column %d, then %.3f)\n", -at.x, -at.y, -at.z,
+		strip, dark, pixel, c0, first);
+	return Report(ok, name);
+}
+
+static bool
+CheckShadowUpsampleEdge(void)
+{
+	const char *name = "at half resolution the upsample keeps a lit roof's edge lit over the shadowed floor beside it in every ray phase, and in four frames each pixel beside the edge takes its own ray";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetSunRadius(0.0f);
+	TurnSun(&s, 160.0f);
+	int roofCol = (int)ceilf(320.0f*(1.0f - 1.0f/15.0f));
+	ShadowFrame(&s, metal::SHADOWQUALITY_LOW, 4);
+	float v[4][2][4];
+	int own[2][4] = {};
+	bool read = true, edge = true;
+	for(int f = 0; f < 4; f++){
+		metal::cameraCut();
+		ShadowFrame(&s, metal::SHADOWQUALITY_LOW, 1);
+		for(int r = 0; r < 2; r++)
+			for(int c = 0; c < 4; c++){
+				float len = 0.0f;
+				v[f][r][c] = -1.0f;
+				read = metal::readShadowForTest(roofCol - 2 + c, 240 + r, &v[f][r][c], &len) && read;
+				edge = edge && (c >= 2 ? v[f][r][c] >= 0.95f : v[f][r][c] >= 0.0f && v[f][r][c] <= 0.05f);
+				own[r][c] += v[f][r][c] == (c >= 2 ? 1.0f : 0.0f);
+			}
+	}
+	FreeShadowScene(&s);
+	bool once = true;
+	for(int r = 0; r < 2; r++)
+		for(int c = 0; c < 4; c++)
+			once = once && own[r][c] >= 1;
+	bool ok = read && edge && once;
+	if(!ok)
+		for(int f = 0; f < 4; f++)
+			Detail("  frame %d, columns %d to %d: row 240 %.4f %.4f %.4f %.4f, row 241 %.4f %.4f %.4f %.4f\n", f, roofCol - 2, roofCol + 1,
+				v[f][0][0], v[f][0][1], v[f][0][2], v[f][0][3], v[f][1][0], v[f][1][1], v[f][1][2], v[f][1][3]);
+	return Report(ok, name);
+}
+
+static bool
+CheckShadowPhaseStable(void)
+{
+	const char *name = "a static scene at medium is stable once converged: across the roof's edge and the far edge of its shadow the factor changes by at most 0.05 from one frame to the next as the ray phase turns";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetSunRadius(0.0f);
+	TurnSun(&s, 160.0f);
+	V3d at = s.sunFrame->getLTM()->at;
+	int cols[2] = { (int)ceilf(320.0f*(1.0f - 1.0f/15.0f)), (int)floorf(320.0f*(1.0f - (1.0f - 5.0f*at.x/at.z)/20.0f)) };
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 32);
+	enum { N = 2*2*9 };
+	float last[N], worst = 0.0f;
+	int worstPx = -1;
+	bool read = true;
+	for(int f = 0; f < 9; f++){
+		ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 1);
+		for(int k = 0; k < N; k++){
+			float v = -1.0f, len = 0.0f;
+			read = metal::readShadowForTest(cols[k/18] - 4 + k % 9, 240 + (k/9) % 2, &v, &len) && read;
+			if(f > 0 && fabsf(v - last[k]) > worst){
+				worst = fabsf(v - last[k]);
+				worstPx = k;
+			}
+			last[k] = v;
+		}
+	}
+	FreeShadowScene(&s);
+	bool ok = read && worst <= 0.05f;
+	Detail("  largest change between frames %.4f at column %d row %d (edges at columns %d and %d)\n", worst,
+		worstPx < 0 ? -1 : cols[worstPx/18] - 4 + worstPx % 9, 240 + (worstPx < 0 ? 0 : (worstPx/9) % 2), cols[0], cols[1]);
+	return Report(ok, name);
+}
+
+static void
+PanBand(int32 quality, bool pan, float *v, int c0, int n, int row)
+{
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetSunRadius(0.0f);
+	metal::cameraCut();
+	if(pan){
+		ShadowFrame(&s, quality, 16);
+		for(int f = 0; f < 16; f++){
+			MoveBy(rtCamera->getFrame(), 0.23f, 0.23f, 0.0f);
+			CasterFrame([&](bool){
+				SetRenderState(CULLMODE, CULLNONE);
+				s.floor->render();
+				s.roof->render();
+			});
+		}
+		metal::rtWaitForTest();
+	}else{
+		MoveBy(rtCamera->getFrame(), 3.68f, 3.68f, 0.0f);
+		ShadowFrame(&s, quality, 24);
+	}
+	for(int i = 0; i < n; i++){
+		float len = 0.0f;
+		v[i] = -1.0f;
+		metal::readShadowForTest(c0 + i, row, &v[i], &len);
+	}
+	FreeShadowScene(&s);
+}
+
+static bool
+CheckShadowPanSmear(void)
+{
+	const char *name = "a camera pan smears the two edges of a shadow at medium by at most one pixel each more than at high, against each quality's own still frame";
+	enum { N = 81 };
+	int c0 = SX(-6.0f, 20.0f), row = SY(-4.0f, 20.0f);
+	const int32 q[2] = { metal::SHADOWQUALITY_MEDIUM, metal::SHADOWQUALITY_HIGH };
+	float pan[N], still[N];
+	int smear[2] = { 0, 0 }, dark[2] = { 0, 0 };
+	for(int k = 0; k < 2; k++){
+		PanBand(q[k], true, pan, c0, N, row);
+		PanBand(q[k], false, still, c0, N, row);
+		for(int i = 0; i < N; i++){
+			smear[k] += pan[i] < 0.0f || still[i] < 0.0f || fabsf(pan[i] - still[i]) > 0.25f;
+			dark[k] += still[i] >= 0.0f && still[i] < 0.5f;
+		}
+	}
+	bool ok = smear[0] <= smear[1] + 2 && dark[0] > 0 && dark[1] > 0;
+	Detail("  pixels off their still value by more than 0.25 after the pan: medium %d, high %d (dark in the still frame: %d, %d of %d)\n",
+		smear[0], smear[1], dark[0], dark[1], (int)N);
+	return Report(ok, name);
+}
+
+static Geometry*
+NormalQuad(Material *mat, float nx, float ny, float nz)
+{
+	Geometry *geo = Geometry::create(4, 2, Geometry::POSITIONS | Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED);
+	V3d *v = geo->morphTargets[0].vertices;
+	v[0].set(-4.0f, 4.0f, -20.0f);
+	v[1].set(4.0f, 4.0f, -20.0f);
+	v[2].set(4.0f, -4.0f, -20.0f);
+	v[3].set(-4.0f, -4.0f, -20.0f);
+	float l = sqrtf(nx*nx + ny*ny + nz*nz);
+	for(int i = 0; i < 4; i++){
+		geo->morphTargets[0].normals[i].set(nx/l, ny/l, nz/l);
+		geo->colors[i] = { 120, 120, 120, 255 };
+		geo->texCoords[0][i] = { 0.0f, 0.0f };
+	}
+	geo->matList.appendMaterial(mat);
+	Triangle *t = geo->triangles;
+	t[0].v[0] = 0; t[0].v[1] = 1; t[0].v[2] = 2; t[0].matId = 0;
+	t[1].v[0] = 0; t[1].v[1] = 2; t[1].v[2] = 3; t[1].matId = 0;
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static bool
+CheckShadowFacingAway(void)
+{
+	const char *name = "a surface whose normal faces away from the sun by more than the sun's disc reads factor 0 without a caster, at medium and high; facing the sun it reads 1";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	V3d at = s.sunFrame->getLTM()->at;
+	Geometry *awayGeo = NormalQuad(s.mat, at.x*2.0f, at.y*2.0f, 0.3f), *upGeo = NormalQuad(s.mat, 0.0f, 0.0f, 1.0f);
+	Atomic *away = MakeAtomic(awayGeo), *up = MakeAtomic(upGeo);
+	float v[2][2] = { { -1, -1 }, { -1, -1 } };
+	const int32 q[2] = { metal::SHADOWQUALITY_MEDIUM, metal::SHADOWQUALITY_HIGH };
+	bool read = true;
+	for(int k = 0; k < 2; k++)
+		for(int a = 0; a < 2; a++){
+			Atomic *quad = a == 0 ? away : up;
+			SetShadowQuality(q[k]);
+			for(int i = 0; i < 8; i++)
+				CasterFrame([&](bool){
+					SetRenderState(CULLMODE, CULLNONE);
+					quad->render();
+				});
+			metal::rtWaitForTest();
+			float len = 0.0f;
+			read = metal::readShadowForTest(320, 240, &v[k][a], &len) && read;
+		}
+	DestroyAtomic(away);
+	DestroyAtomic(up);
+	awayGeo->destroy();
+	upGeo->destroy();
+	FreeShadowScene(&s);
+	float nl = (2.0f*at.x*-at.x + 2.0f*at.y*-at.y + 0.3f*-at.z)/sqrtf(4.0f*at.x*at.x + 4.0f*at.y*at.y + 0.09f);
+	bool ok = read && v[0][0] == 0.0f && v[1][0] == 0.0f && v[0][1] == 1.0f && v[1][1] == 1.0f && nl < -0.1f;
+	if(!ok)
+		Detail("  read %d; N.L of the turned normal %.3f; facing away: medium %.4f high %.4f; facing the sun: medium %.4f high %.4f\n", read, nl,
+			v[0][0], v[1][0], v[0][1], v[1][1]);
+	return Report(ok, name);
+}
+
+static Geometry*
+SmoothCylinder(Material *mat, float x, float radius, float z)
+{
+	enum { SEG = 8 };
+	Geometry *geo = Geometry::create(2*SEG, 2*SEG, Geometry::POSITIONS | Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED);
+	V3d *v = geo->morphTargets[0].vertices, *n = geo->morphTargets[0].normals;
+	for(int k = 0; k < SEG; k++){
+		float a = 6.28318531f*k/SEG, c = cosf(a), s = sinf(a);
+		for(int e = 0; e < 2; e++){
+			v[2*k + e].set(x + radius*c, e ? 3.0f : -3.0f, z + radius*s);
+			n[2*k + e].set(c, 0.0f, s);
+			geo->colors[2*k + e] = { 120, 120, 120, 255 };
+			geo->texCoords[0][2*k + e] = { 0.0f, 0.0f };
+		}
+	}
+	for(int k = 0; k < SEG; k++){
+		int a0 = 2*k, a1 = 2*k + 1, b0 = 2*((k + 1) % SEG), b1 = b0 + 1;
+		Triangle *t = &geo->triangles[2*k];
+		t[0].v[0] = a0; t[0].v[1] = b0; t[0].v[2] = b1; t[0].matId = 0;
+		t[1].v[0] = a0; t[1].v[1] = b1; t[1].v[2] = a1; t[1].matId = 0;
+	}
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static bool
+CheckShadowSmoothRim(void)
+{
+	const char *name = "the sun-facing silhouette of a smooth cylinder is not shadowed by the cylinder itself: a normal that faces a little away from the eye is reflected, not negated, before the ray leaves";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetSunRadius(0.0f);
+	Geometry *cylGeo = SmoothCylinder(s.mat, 1.5f, 2.0f, -15.0f);
+	Atomic *cyl = MakeAtomic(cylGeo);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	for(int i = 0; i < 8; i++)
+		CasterFrame([&](bool){
+			SetRenderState(CULLMODE, CULLNONE);
+			s.floor->render();
+			cyl->render();
+		});
+	metal::rtWaitForTest();
+	int first = -1, rim = 0;
+	float v[3] = { -1, -1, -1 }, nx[3] = { 0, 0, 0 };
+	bool read = true;
+	for(int c = SX(3.8f, 15.0f); c < 320 && rim < 3; c++){
+		float n[3], m[2], d = 0.0f;
+		if(!metal::readPrepassForTest(c, 240, n, m, &d) || fabsf(n[0]) < 0.3f)
+			continue;
+		if(first < 0)
+			first = c;
+		float len = 0.0f;
+		nx[rim] = n[0];
+		read = metal::readShadowForTest(c, 240, &v[rim], &len) && read;
+		rim++;
+	}
+	DestroyAtomic(cyl);
+	cylGeo->destroy();
+	FreeShadowScene(&s);
+	bool ok = read && rim == 3 && v[0] >= 0.95f && v[1] >= 0.95f && v[2] >= 0.95f;
+	if(!ok)
+		Detail("  read %d; rim pixels from column %d: factor %.3f %.3f %.3f, stored normal x %.3f %.3f %.3f\n", read, first, v[0], v[1], v[2],
+			nx[0], nx[1], nx[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckPlainTwinFailure(void)
+{
+	const char *name = "a plain shadow twin that fails to build drops only the twin: at weight 1 the prelit floor keeps its plain colour, below weight 1 the shader's relit variants still draw with the shadow, and the twin returns when it builds";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetShadowStrength(0.6f);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 8);
+	metal::setPlainTwinFailForTest(1);
+	float shade[4] = { -1, -1, -1, -1 }, open[4] = { -1, -1, -1, -1 };
+	metal::StateStats a0 = metal::getStateStats();
+	bool read = ShadowScenePixels(&s, false, shade, open);
+	metal::StateStats a1 = metal::getStateStats();
+	metal::RelitParams p = metal::getRelitParams();
+	p.weight = 0.5f;
+	metal::setRelitParams(&p);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 1);
+	metal::StateStats a2 = metal::getStateStats();
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 1);
+	metal::StateStats a3 = metal::getStateStats();
+	metal::setPlainTwinFailForTest(0);
+	p.weight = 1.0f;
+	metal::setRelitParams(&p);
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 1);
+	metal::StateStats a4 = metal::getStateStats();
+	ShadowFrame(&s, metal::SHADOWQUALITY_MEDIUM, 1);
+	metal::StateStats a5 = metal::getStateStats();
+	FreeShadowScene(&s);
+	float plain = fminf(120/255.0f + 0.1f, 1.0f);
+	uint32 failedTwin = a1.plainShadowDraws - a0.plainShadowDraws, relit = a3.relitDraws - a2.relitDraws;
+	uint32 relitShadow = a3.relitShadowDraws - a2.relitShadowDraws, twinBack = a5.plainShadowDraws - a4.plainShadowDraws;
+	bool ok = read && failedTwin == 0 && fabsf(shade[0] - plain) < 2.0f/255.0f && relit > 0 && relitShadow > 0 && twinBack > 0;
+	if(!ok)
+		Detail("  read %d; twin failing: plain shadow draws %u, shaded red %.4f (want %.4f); below weight 1: relit draws %u, relit shadow draws %u; twin back: plain shadow draws %u\n",
+			read, failedTwin, shade[0], plain, relit, relitShadow, twinBack);
+	return Report(ok, name);
+}
+
+static bool
+SkipStrengthState(ShadowScene *s, int state, float *darkUp, bool *same)
+{
+	metal::RelitParams p = metal::getRelitParams();
+	p.weight = state == 2 ? 1.0f : 0.5f;
+	p.sunScale = 1.0f;
+	p.shadowStrength = 0.6f;
+	metal::setRelitParams(&p);
+	TurnSun(s, -135.0f);
+	ShadowFrame(s, metal::SHADOWQUALITY_MEDIUM, 4);
+	float up[4], upOpen[4], shade[2][4], open[2][4];
+	bool read = ShadowScenePixels(s, false, up, upOpen);
+	if(state == 0)
+		TurnSun(s, -87.134f);
+	else{
+		p.sunScale = 0.0f;
+		metal::setRelitParams(&p);
+	}
+	read = ShadowScenePixels(s, false, shade[0], open[0]) && read;
+	SetShadowStrength(0.0f);
+	read = ShadowScenePixels(s, false, shade[1], open[1]) && read;
+	*same = true;
+	for(int i = 0; i < 4; i++)
+		*same = *same && shade[0][i] == shade[1][i] && open[0][i] == open[1][i];
+	*darkUp = upOpen[0] - up[0];
+	TurnSun(s, -135.0f);
+	p.weight = 0.5f;
+	p.sunScale = 1.0f;
+	p.shadowStrength = 0.0f;
+	metal::setRelitParams(&p);
+	return read;
+}
+
+static bool
+SkipStrengthIdentity(ShadowScene *s)
+{
+	bool ok = true;
+	for(int k = 0; k < 3; k++){
+		float darkUp = 0.0f;
+		bool same = false, read = SkipStrengthState(s, k, &darkUp, &same);
+		ok = ok && read && same && darkUp > 0.05f;
+		if(!read || !same || darkUp <= 0.05f)
+			Detail("  strength 0.6, %s: read %d, the frame before darkened the shade by %.4f, skipped frame equal to strength 0 %d\n",
+				k == 0 ? "sun down" : k == 1 ? "sun scale 0" : "interior at weight 1", read, darkUp, same);
+	}
+	return ok;
+}
+
+static bool
+CheckShadowSkippedSamples(void)
+{
+	const char *name = "at four samples a skipped shadow pass (sun down, sun scale 0, an interior at weight 1) draws exactly the frame without the shadow strength";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	bool ok = SkipStrengthIdentity(&s);
+	FreeShadowScene(&s);
+	return Report(ok, name);
+}
+
+static bool
+CheckCasterRadiusLimit(void)
+{
+	const char *name = "a caster whose world bounding radius exceeds the host's limit casts nothing and is counted, and casts again when the limit is lifted";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Atomic *big = MakeAtomic(s.roofGeo);
+	V3d scale = { 300.0f, 300.0f, 1.0f };
+	big->getFrame()->scale(&scale, COMBINEREPLACE);
+	big->getFrame()->updateObjects();
+	const float limits[3] = { 0.0f, 400.0f, 500.0f };
+	float v[3] = { -1, -1, -1 };
+	uint32 large[3];
+	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
+	for(int k = 0; k < 3; k++){
+		metal::setShadowCasterMaxRadius(limits[k]);
+		for(int i = 0; i < 8; i++)
+			CasterFrame([&](bool prepass){
+				SetRenderState(CULLMODE, CULLNONE);
+				s.floor->render();
+				if(prepass)
+					metal::addShadowCaster(big, metal::SHADOWCASTER_STATIC);
+			});
+		metal::rtWaitForTest();
+		float len = 0.0f;
+		if(!metal::readShadowForTest(320, 240, &v[k], &len))
+			v[k] = -1.0f;
+		large[k] = metal::getRayStats().castersLarge;
+	}
+	metal::setShadowCasterMaxRadius(500.0f);
+	DestroyAtomic(big);
+	FreeShadowScene(&s);
+	bool ok = v[0] >= 0.0f && v[0] < 0.05f && v[1] > 0.95f && large[1] == 1 && v[2] >= 0.0f && v[2] < 0.05f && large[2] == 0 &&
+		large[0] == 0;
+	if(!ok)
+		Detail("  no limit %.3f (large %u), 400 m %.3f (large %u), 500 m %.3f (large %u)\n", v[0], large[0], v[1], large[1], v[2], large[2]);
 	return Report(ok, name);
 }
 
@@ -1869,10 +2517,10 @@ CheckShadowStats(void)
 	float wantMem = (float)(((double)rw*rh*2 + 2.0*fi.internalWidth*fi.internalHeight*8)/1048576.0);
 	const char *t = strstr(line, " shadows ");
 	char qn[16] = "", pass[16] = "", topTime[16] = "", buildTime[16] = "";
-	unsigned rays = 0, blas = 0, tlas = 0, builds = 0, refits = 0;
+	unsigned rays = 0, blas = 0, tlas = 0, builds = 0, refits = 0, alphaN = ~0u, texN = ~0u, large = ~0u;
 	float blasMB = -1, normalsMB = -1, walk = -1, mem = -1;
-	int n = t ? sscanf(t, " shadows %15s rays %u blas %u %fMB normals %fMB tlas %u %15s build %u %15s refit %u walk %fms shadow %15s shadowmem %fMB",
-		qn, &rays, &blas, &blasMB, &normalsMB, &tlas, topTime, &builds, buildTime, &refits, &walk, pass, &mem) : 0;
+	int n = t ? sscanf(t, " shadows %15s rays %u blas %u %fMB normals %fMB tlas %u %15s build %u %15s refit %u walk %fms shadow %15s shadowmem %fMB alpha %u tex %u large %u",
+		qn, &rays, &blas, &blasMB, &normalsMB, &tlas, topTime, &builds, buildTime, &refits, &walk, pass, &mem, &alphaN, &texN, &large) : 0;
 	FreeShadowScene(&s);
 	bool timed = st.passMs < 0.0f ? strcmp(pass, "-") == 0 : strstr(pass, "ms") != nullptr;
 	float topMs = -1, buildMs = -1;
@@ -1881,7 +2529,7 @@ CheckShadowStats(void)
 	bool counted = st.passMs < 0.0f ||
 		(topMs > 0.0f && fabsf(topMs - st.topMs) < 0.006f && buildMs >= 0.0f && fabsf(buildMs - st.buildMs) < 0.006f &&
 		 first.frameBuilds > 0 && first.buildMs > 0.0f && first.topMs > 0.0f);
-	bool ok = n == 13 && strcmp(qn, "high") == 0 && rays == want && st.raysPerFrame == want && tlas == 2 && blas >= 2 &&
+	bool ok = n == 16 && large == 0 && strcmp(qn, "high") == 0 && rays == want && st.raysPerFrame == want && tlas == 2 && blas >= 2 &&
 		fabsf(mem - wantMem) <= 0.5f && timed && walk >= 0.0f && topParsed && buildParsed && counted;
 	if(!ok)
 		Detail("  parsed %d, rays %u (expected %u), pass %.3f ms, instance build %.3f ms, builds %.3f ms, first frame %u builds %.3f ms instance build %.3f ms; line: %s",
@@ -2262,13 +2910,6 @@ CheckAlphaCap(void)
 }
 
 static bool
-RoofHit(float x, float y, float z, uint32 mask = 0xFF)
-{
-	float o[3] = { x, y, z }, d[3] = { 0.0f, 0.0f, -1.0f };
-	return metal::rtTraceForTest(o, d, 7.0f, mask) != 0;
-}
-
-static bool
 CheckAlphaUnderOpaque(void)
 {
 	const char *name = "an opaque roof above an alpha-tested roof blocks rays through its solid and its clear texels, and a clear texel with nothing above lets light through";
@@ -2301,23 +2942,24 @@ CheckAlphaUnderOpaque(void)
 }
 
 static bool
-CheckAlphaMaskBit(void)
+CheckAlphaFunctionDecides(void)
 {
-	const char *name = "an alpha-level instance given the opaque-only bit blocks as a solid quad, and one given neither bit lets all light through";
+	const char *name = "with the intersection function forced to accept every candidate an alpha mesh blocks as a solid quad, forced to reject it lets all light through, and the opaque mesh of the same level blocks in both";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
 	Geometry *ga, *gb;
 	Atomic *a = AlphaRoof(&ga, AlphaMaterial(checkerAlpha), AlphaMaterial(checkerAlpha));
 	Atomic *b = MixedRoof(&gb);
-	float v[2][4], b0[2], b1[2];
-	metal::RayStats st[2];
-	for(int k = 0; k < 2; k++){
-		metal::setRtAlphaMaskForTest(k + 1);
+	float v[3][4], b0[3], b1[3];
+	metal::RayStats st[3];
+	const int32 modes[3] = { 1, 2, 0 };
+	for(int k = 0; k < 3; k++){
+		metal::setRtAlphaFunctionForTest(modes[k]);
 		AlphaFrames(&s, 16, [&](bool prepass){
 			AlphaRoofPass(a, prepass, 128);
 			AlphaRoofPass(b, prepass, 128);
 		});
-		metal::setRtAlphaMaskForTest(0);
+		metal::setRtAlphaFunctionForTest(0);
 		FloorQuad(0.0f, v[k]);
 		b0[k] = Floor(-5.5f, 4.5f);
 		b1[k] = Floor(-4.5f, 3.5f);
@@ -2331,59 +2973,107 @@ CheckAlphaMaskBit(void)
 	bool ok = true;
 	for(int i = 0; i < 4; i++)
 		ok = ok && Dark(v[0][i]) && Lit(v[1][i]);
-	ok = ok && Dark(b0[0]) && Dark(b1[0]) && Lit(b0[1]) && Lit(b1[1]);
-	for(int k = 0; k < 2; k++)
+	ok = ok && Dark(v[2][0]) && Lit(v[2][1]) && Lit(v[2][2]) && Dark(v[2][3]);
+	ok = ok && Dark(b0[0]) && Dark(b1[0]) && Dark(b0[1]) && Lit(b1[1]) && Dark(b0[2]) && Dark(b1[2]);
+	for(int k = 0; k < 3; k++)
 		ok = ok && st[k].alphaKernel == 1 && st[k].alphaInstances == 2;
 	if(!ok)
-		for(int k = 0; k < 2; k++)
-			Detail("  %s: A %.3f %.3f %.3f %.3f, B triangle 0 %.3f triangle 1 %.3f, kernel %u alpha instances %u\n",
-				k == 0 ? "opaque-only bit" : "neither bit", v[k][0], v[k][1], v[k][2], v[k][3], b0[k], b1[k], st[k].alphaKernel,
-				st[k].alphaInstances);
+		for(int k = 0; k < 3; k++)
+			Detail("  %s: A %.3f %.3f %.3f %.3f, B opaque mesh %.3f alpha mesh %.3f, kernel %u alpha instances %u\n",
+				k == 0 ? "accept all" : k == 1 ? "reject all" : "texture", v[k][0], v[k][1], v[k][2], v[k][3], b0[k], b1[k],
+				st[k].alphaKernel, st[k].alphaInstances);
+	return Report(ok, name);
+}
+
+static const uint8 patternAlphaB[16] = {
+	0, 0, 0, 0,
+	255, 255, 0, 0,
+	0, 255, 0, 255,
+	0, 0, 255, 0 };
+
+static bool
+CheckAlphaTablePerScene(void)
+{
+	const char *name = "two prepass scenes in one frame each bind the alpha table and function table of their own instance level";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Geometry *g0, *g1;
+	Atomic *roofs[2] = { AlphaRoof(&g0, AlphaMaterial(patternAlpha, 4, 4), AlphaMaterial(patternAlpha, 4, 4)),
+		AlphaRoof(&g1, AlphaMaterial(patternAlphaB, 4, 4), AlphaMaterial(patternAlphaB, 4, 4)) };
+	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
+	const void *tables[2][2] = { { nil, nil }, { nil, nil } };
+	float v[2] = { -1, -1 };
+	for(int order = 0; order < 2; order++){
+		for(int f = 0; f < 8; f++)
+			for(int k = 0; k < 2; k++){
+				Atomic *roof = roofs[order ? 1 - k : k];
+				CasterFrame([&](bool prepass){
+					SetRenderState(CULLMODE, CULLNONE);
+					s.floor->render();
+					AlphaRoofPass(roof, prepass, 128);
+				}, k == 1);
+				if(order == 0)
+					tables[f & 1][k] = metal::rtAlphaTableForTest();
+			}
+		metal::rtWaitForTest();
+		v[order] = Floor(1.0f - 0.25f - 5.0f, 1.0f - 0.25f);
+	}
+	DestroyAtomic(roofs[0]);
+	DestroyAtomic(roofs[1]);
+	g0->destroy();
+	g1->destroy();
+	FreeShadowScene(&s);
+	bool ok = tables[0][0] && tables[0][1] && tables[0][0] != tables[0][1] && tables[1][0] && tables[1][1] &&
+		tables[1][0] != tables[1][1] && Lit(v[0]) && Dark(v[1]);
+	if(!ok)
+		Detail("  tables %p %p, %p %p; texel under the second scene's roof %.3f (pattern B, want lit), swapped %.3f (pattern A, want dark)\n",
+			tables[0][0], tables[0][1], tables[1][0], tables[1][1], v[0], v[1]);
 	return Report(ok, name);
 }
 
 static bool
-CheckAlphaMaskCarriers(void)
+CheckAlphaTableReleased(void)
 {
-	const char *name = "instances of levels with alpha geometry carry the alpha-level bit and static and moving opaque casters the opaque-only bit";
+	const char *name = "the shadow pass lets go of its intersection function table on a frame without the pass and when the levels are released, and the released table is freed";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
-	Geometry *ga, *gs, *gm;
-	Atomic *a = AlphaRoof(&ga, AlphaMaterial(checkerAlpha), AlphaMaterial(checkerAlpha));
-	Atomic *still = Roof(&gs, 1.0f, 1.0f);
-	Atomic *moving = Roof(&gm, 1.0f, 1.0f);
-	Place(still, 0.0f, 8.0f, -15.0f, 0.0f);
-	Place(moving, 0.0f, -4.0f, -15.0f, 0.0f);
-	AlphaFrames(&s, 4, [&](bool prepass){
-		AlphaRoofPass(a, prepass, 128);
-		if(prepass){
-			metal::addShadowCaster(still, metal::SHADOWCASTER_STATIC);
-			metal::addShadowCaster(moving, metal::SHADOWCASTER_MOVING);
-		}
-	});
-	bool alphaBit[3] = { RoofHit(0.0f, 0.0f, -10.0f, SH_INSTANCE_ALPHA), RoofHit(0.0f, 8.0f, -10.0f, SH_INSTANCE_ALPHA),
-		RoofHit(0.0f, -4.0f, -10.0f, SH_INSTANCE_ALPHA) };
-	bool opaqueBit[3] = { RoofHit(0.0f, 0.0f, -10.0f, SH_INSTANCE_OPAQUE), RoofHit(0.0f, 8.0f, -10.0f, SH_INSTANCE_OPAQUE),
-		RoofHit(0.0f, -4.0f, -10.0f, SH_INSTANCE_OPAQUE) };
-	bool any[3] = { RoofHit(0.0f, 0.0f, -10.0f), RoofHit(0.0f, 8.0f, -10.0f), RoofHit(0.0f, -4.0f, -10.0f) };
-	DestroyAtomic(a);
-	DestroyAtomic(still);
-	DestroyAtomic(moving);
-	ga->destroy();
-	gs->destroy();
-	gm->destroy();
+	Geometry *g;
+	Atomic *roof = AlphaRoof(&g, AlphaMaterial(patternAlpha, 4, 4), AlphaMaterial(patternAlpha, 4, 4));
+	auto draw = [&](bool prepass){
+		SetRenderState(CULLMODE, CULLNONE);
+		s.floor->render();
+		AlphaRoofPass(roof, prepass, 128);
+	};
+	AlphaFrames(&s, 4, draw);
+	bool bound = metal::rtAlphaTableForTest() != nil;
+	TurnSun(&s, -87.134f);
+	AlphaFrames(&s, 1, draw);
+	bool skipped = metal::rtAlphaTableForTest() == nil;
+	TurnSun(&s, -135.0f);
+	AlphaFrames(&s, 4, draw);
+	bool again = metal::rtAlphaTableForTest() != nil;
+	metal::rtWatchAlphaTableForTest();
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	bool released = metal::rtAlphaTableForTest() == nil;
+	for(int i = 0; i < 3; i++)
+		CasterFrame(draw);
+	metal::rtWaitForTest();
+	CasterFrame(draw);
+	bool freed = !metal::rtWatchedTableAliveForTest();
+	DestroyAtomic(roof);
+	g->destroy();
 	FreeShadowScene(&s);
-	bool ok = alphaBit[0] && !alphaBit[1] && !alphaBit[2] && !opaqueBit[0] && opaqueBit[1] && opaqueBit[2] && any[0] && any[1] && any[2];
+	bool ok = bound && skipped && again && released && freed;
 	if(!ok)
-		Detail("  alpha-level bit: alpha roof %d static roof %d moving roof %d; opaque-only bit: %d %d %d; all bits: %d %d %d\n",
-			alphaBit[0], alphaBit[1], alphaBit[2], opaqueBit[0], opaqueBit[1], opaqueBit[2], any[0], any[1], any[2]);
+		Detail("  table bound %d; dropped after a frame without the pass %d; bound again %d; dropped at release %d; freed %d\n", bound, skipped,
+			again, released, freed);
 	return Report(ok, name);
 }
 
 static bool
 CheckAlphaCappedLevel(void)
 {
-	const char *name = "a capped alpha-level instance carries the alpha-level bit: its opaque mesh casts and its alpha mesh lets light through";
+	const char *name = "a capped alpha-level instance casts with its opaque mesh and lets light through its alpha mesh";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
 	Geometry *ga, *gb;
@@ -2397,17 +3087,16 @@ CheckAlphaCappedLevel(void)
 	});
 	float b0 = Floor(-5.5f, 4.5f), b1 = Floor(-4.5f, 3.5f);
 	metal::RayStats st = metal::getRayStats();
-	bool alphaBit = RoofHit(0.5f, 4.5f, -10.0f, SH_INSTANCE_ALPHA), opaqueBit = RoofHit(0.5f, 4.5f, -10.0f, SH_INSTANCE_OPAQUE);
 	metal::setRtAlphaCapForTest(0);
 	DestroyAtomic(a);
 	DestroyAtomic(b);
 	ga->destroy();
 	gb->destroy();
 	FreeShadowScene(&s);
-	bool ok = Dark(b0) && Lit(b1) && alphaBit && !opaqueBit && st.alphaCapped == 1 && st.alphaEntries == 1 && st.alphaKernel == 1;
+	bool ok = Dark(b0) && Lit(b1) && st.alphaCapped == 1 && st.alphaEntries == 1 && st.alphaKernel == 1;
 	if(!ok)
-		Detail("  triangle 0 %.3f triangle 1 %.3f, alpha-level bit %d opaque-only bit %d, capped %u entries %u kernel %u\n", b0, b1,
-			alphaBit, opaqueBit, st.alphaCapped, st.alphaEntries, st.alphaKernel);
+		Detail("  triangle 0 %.3f triangle 1 %.3f, capped %u entries %u kernel %u\n", b0, b1, st.alphaCapped, st.alphaEntries,
+			st.alphaKernel);
 	return Report(ok, name);
 }
 
@@ -2802,6 +3491,17 @@ RunRaytraceChecks(Camera *camera)
 	CheckShadowSkipped();
 	CheckShadowOffReleases();
 	CheckShadowSunOnly();
+	CheckPlainShadowTwin();
+	CheckPrelitClassicShadow();
+	CheckKeptBakedShadow();
+	CheckShadowContact();
+	CheckShadowUpsampleEdge();
+	CheckShadowPhaseStable();
+	CheckShadowPanSmear();
+	CheckShadowFacingAway();
+	CheckShadowSmoothRim();
+	CheckPlainTwinFailure();
+	CheckCasterRadiusLimit();
 	CheckShadowStats();
 	CheckAlphaCheckerboard();
 	CheckAlphaThreshold();
@@ -2811,8 +3511,9 @@ RunRaytraceChecks(Camera *camera)
 	CheckAlphaTextureLifetime();
 	CheckAlphaCap();
 	CheckAlphaUnderOpaque();
-	CheckAlphaMaskBit();
-	CheckAlphaMaskCarriers();
+	CheckAlphaFunctionDecides();
+	CheckAlphaTablePerScene();
+	CheckAlphaTableReleased();
 	CheckAlphaCappedLevel();
 	CheckAlphaIndexGuard();
 	CheckAlphaTextureGone();
@@ -2823,5 +3524,15 @@ RunRaytraceChecks(Camera *camera)
 	PrintCasterTiming();
 	PrintShadowTiming();
 	WorldClose();
+	return failures;
+}
+
+int
+RunRaytraceSampleChecks(Camera *camera)
+{
+	failures = 0;
+	rtCamera = camera;
+	if(metal::rtAvailable())
+		CheckShadowSkippedSamples();
 	return failures;
 }

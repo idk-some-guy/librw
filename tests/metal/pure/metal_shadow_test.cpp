@@ -22,8 +22,8 @@ TestQuality(void)
 	SHQuality med = shQuality(SHADOWQUALITY_MEDIUM), high = shQuality(SHADOWQUALITY_HIGH);
 	CHECK(off.raysPerPixel == 0);
 	CHECK(low.raysPerPixel == 1 && low.halfRes == 1 && low.maxHistory == 16.0f);
-	CHECK(med.raysPerPixel == 1 && med.halfRes == 0 && med.maxHistory == 12.0f);
-	CHECK(high.raysPerPixel == 2 && high.halfRes == 0 && high.maxHistory == 8.0f);
+	CHECK(med.raysPerPixel == 1 && med.halfRes == 1 && med.maxHistory == 12.0f);
+	CHECK(high.raysPerPixel == 1 && high.halfRes == 0 && high.maxHistory == 12.0f);
 	CHECK(shQuality(99).raysPerPixel == 0 && shQuality(-1).raysPerPixel == 0);
 }
 
@@ -82,7 +82,6 @@ TestAccumulate(void)
 	CHECK(!shDisoccluded(5.0f, 5.3f) && shDisoccluded(5.0f, 5.4f));
 	CHECK(!shDisoccluded(20.0f, 21.13f) && shDisoccluded(21.13f, 20.0f));
 	CHECK(shSunUp(0.01f) && !shSunUp(0.0f) && !shSunUp(-0.059f));
-	CHECK(Near(shBias(0.0f), 0.02f, 1e-7f) && Near(shBias(100.0f), 0.17f, 1e-6f));
 	CHECK(Near(shLinearDepth(0.0f, 1.0f, 101.0f), 1.0f, 1e-4f) && Near(shLinearDepth(1.0f, 1.0f, 101.0f), 101.0f, 1e-2f));
 }
 
@@ -130,13 +129,75 @@ TestGates(void)
 static void
 TestOrigin(void)
 {
-	SHVec3 p = { 10.0f, 20.0f, 3.0f }, v = { 0.0f, -1.0f, 0.0f };
-	SHVec3 o = shRayOrigin(p, v, 40.0f);
-	CHECK(o.x == p.x && o.z == p.z && Near(o.y - p.y, -shBias(40.0f), 1e-6f));
-	SHVec3 flat = { 0.0f, 0.0f, 0.0f }, grazing = shNormalize({ 0.0f, -0.9887f, 0.15f });
-	float ds[3] = { 10.0f, 40.0f, 150.0f };
-	for(int i = 0; i < 3; i++)
-		CHECK(shRayOrigin(flat, grazing, ds[i]).z > 0.0f);
+	SHVec3 p = { 10.0f, 20.0f, 3.0f }, up = { 0.0f, 0.0f, 1.0f };
+	CHECK(Near(shNormalOffset(0.0f), 0.005f, 1e-7f) && Near(shNormalOffset(100.0f), 0.025f, 1e-6f));
+	SHVec3 o = shRayOrigin(p, up, 60.0f);
+	CHECK(o.x == p.x && o.y == p.y && Near(o.z - p.z, 0.017f, 1e-6f));
+	SHVec3 tilted = shNormalize({ 1.0f, 0.0f, -0.0875f }), inward = { 0.0f, 0.0f, -1.0f };
+	float ds[3] = { 10.0f, 60.0f, 300.0f };
+	for(int i = 0; i < 3; i++){
+		float below = p.z - shRayOrigin(p, tilted, ds[i]).z;
+		CHECK(below > 0.0f && below <= shNormalOffset(ds[i])*0.0872f + 1e-6f);
+		CHECK(Near(p.z - shRayOrigin(p, inward, ds[i]).z, shNormalOffset(ds[i]), 1e-6f));
+	}
+	CHECK(shNormalOffset(300.0f) <= 0.0651f);
+}
+
+static void
+TestFacesAway(void)
+{
+	float r = 0.016f;
+	CHECK(shFacesAwayFromSun(1.0f, -0.5f, r));
+	CHECK(shFacesAwayFromSun(1.0f, -r, r));
+	CHECK(!shFacesAwayFromSun(1.0f, -0.5f*r, r) && !shFacesAwayFromSun(1.0f, 0.0f, r) && !shFacesAwayFromSun(1.0f, 0.7f, r));
+	CHECK(!shFacesAwayFromSun(0.0f, -0.9f, r));
+	CHECK(!shFacesAwayFromSun(1.0f, NAN, r));
+}
+
+static void
+TestPhase(void)
+{
+	unsigned int seen[4] = { 0, 0, 0, 0 };
+	for(unsigned int f = 0; f < 4; f++){
+		unsigned int ox = shPhaseX(f), oy = shPhaseY(f);
+		CHECK(ox <= 1u && oy <= 1u);
+		seen[ox + 2*oy]++;
+		CHECK(shPhaseX(f + 4) == ox && shPhaseY(f + 4) == oy);
+	}
+	CHECK(seen[0] == 1 && seen[1] == 1 && seen[2] == 1 && seen[3] == 1);
+	CHECK(shRaySource(5u, 0u, 640u) == 10u && shRaySource(5u, 1u, 640u) == 11u && shRaySource(319u, 1u, 640u) == 639u);
+	CHECK(shRaySource(320u, 1u, 641u) == 640u);
+	for(unsigned int g = 0; g < 9; g++){
+		unsigned int own = 0;
+		for(unsigned int off = 0; off < 2; off++)
+			if(shUpsampleTap(g, off, 0).weight == 1.0f){
+				own++;
+				SHTap t = shUpsampleTap(g, off, 0);
+				CHECK(shRaySource(t.index, off, 640u) == g && t.weight == 1.0f && shUpsampleTap(g, off, 1).weight == 0.0f);
+			}
+		CHECK(own == 1u);
+	}
+	SHTap a = shUpsampleTap(11u, 1u, 0), b = shUpsampleTap(11u, 1u, 1);
+	CHECK(a.index == 5u && a.weight == 1.0f && b.weight == 0.0f);
+	a = shUpsampleTap(10u, 1u, 0);
+	b = shUpsampleTap(10u, 1u, 1);
+	CHECK(a.index == 4u && b.index == 5u && a.weight == 0.5f && b.weight == 0.5f);
+	CHECK(shRaySource(a.index, 1u, 640u) == 9u && shRaySource(b.index, 1u, 640u) == 11u);
+	a = shUpsampleTap(0u, 1u, 0);
+	b = shUpsampleTap(0u, 1u, 1);
+	CHECK(a.index == 0u && b.index == 0u && a.weight == 0.5f && b.weight == 0.5f && shRaySource(a.index, 1u, 640u) == 1u);
+}
+
+static void
+TestUpsample(void)
+{
+	SHTap e0 = shUpsampleTap(10u, 0u, 0), e1 = shUpsampleTap(10u, 0u, 1), o0 = shUpsampleTap(11u, 0u, 0), o1 = shUpsampleTap(11u, 0u, 1);
+	CHECK(e0.index == 5u && e0.weight == 1.0f && e1.weight == 0.0f);
+	CHECK(o0.index == 5u && o1.index == 6u && o0.weight == 0.5f && o1.weight == 0.5f);
+	CHECK(shUpsampleWeight(20.0f, 20.0f) > 9999.0f);
+	CHECK(shUpsampleWeight(15.0f, 20.0f) < 4.01f && shUpsampleWeight(15.0f, 20.0f) > 3.99f);
+	CHECK(shUpsampleWeight(15.0f, 20.0f)/shUpsampleWeight(20.0f, 20.0f) < 0.001f);
+	CHECK(Near(shUpsampleWeight(20.2f, 20.0f), shUpsampleWeight(19.8f, 20.0f), 1e-3f));
 }
 
 static void
@@ -230,20 +291,6 @@ TestAddress(void)
 }
 
 static void
-TestInstanceMask(void)
-{
-	const unsigned int kinds[3] = { 1u, 2u, 4u }, bits[2] = { SH_INSTANCE_ALPHA, SH_INSTANCE_OPAQUE };
-	for(unsigned int b : bits)
-		CHECK(b != 0u && (b & (b - 1u)) == 0u && b <= 0x80u && (b & 7u) == 0u);
-	CHECK(SH_INSTANCE_ALPHA != SH_INSTANCE_OPAQUE);
-	for(unsigned int k : kinds){
-		CHECK(shInstanceMask(k, false) == (k | SH_INSTANCE_OPAQUE));
-		CHECK(shInstanceMask(k, true) == (k | SH_INSTANCE_ALPHA));
-	}
-	CHECK(shInstanceMask(3u, true) == (3u | SH_INSTANCE_ALPHA));
-}
-
-static void
 TestAlphaIndex(void)
 {
 	CHECK(shAlphaIndexValid(0u, 0u, 1u));
@@ -267,6 +314,9 @@ main(void)
 	TestClampedAccumulate();
 	TestGates();
 	TestOrigin();
+	TestPhase();
+	TestFacesAway();
+	TestUpsample();
 	TestSunMoved();
 	TestHistoryMatches();
 	TestCap();
@@ -274,7 +324,6 @@ main(void)
 	TestAlphaRecord();
 	TestAlphaThreshold();
 	TestAddress();
-	TestInstanceMask();
 	TestAlphaIndex();
 	if(failures == 0)
 		printf("all shadow tests passed\n");

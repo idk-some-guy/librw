@@ -156,8 +156,9 @@ struct UniformRelit
 	float32 skyBottom[4];
 	float32 eye[4];
 	float32 params[4];
+	float32 shadow[4];
 };
-static_assert(sizeof(UniformRelit) == 96, "relit block size");
+static_assert(sizeof(UniformRelit) == 112, "relit block size");
 
 struct FaceFetchBlock
 {
@@ -175,9 +176,10 @@ static_assert(sizeof(FaceFetchBlock) == 80, "face fetch block size");
 
 static UniformRelit uniformRelit = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0.5f, 0.5f, 0.5f, 1 }, { 0.5f, 0.5f, 0.5f, 1 },
 	{ 0, 0, 0, 1 }, { 1.0f, 0.5f, 0.35f, 1.0f } };
-static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f, 0.02f };
+static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f, 0.02f, 0.0f };
 static const Light *relitSun;
-static std::unordered_set<uint32> relitFailed;
+static std::unordered_set<uint32> relitFailed, plainTwinFailed;
+static bool plainTwinFailTest;
 static bool relitFetch = true;
 static bool relitAtFullWeight;
 static bool relitFaceSkip = true;
@@ -1190,6 +1192,7 @@ forgetShaderPipelines(uint32 shaderId)
 	hostRecords.erase(std::remove_if(hostRecords.begin(), hostRecords.end(),
 		[shaderId](const HostPrewarmRecord &r){ return r.shader->shaderId == shaderId; }), hostRecords.end());
 	relitFailed.erase(shaderId);
+	plainTwinFailed.erase(shaderId);
 	lastPipeKey = 0;
 	lastPipe = nil;
 	lastDepthKey = 0;
@@ -1833,6 +1836,7 @@ setRelitParams(const RelitParams *p)
 {
 	relitParams = *p;
 	relitParams.sunRadius = clampRange(p->sunRadius, 0.0f, 0.1f, 0.02f);
+	relitParams.shadowStrength = clampRange(p->shadowStrength, 0.0f, 1.0f, 0.0f);
 	UniformRelit u = uniformRelit;
 	for(int i = 0; i < 3; i++){
 		u.skyTop[i] = relitNonNegative(p->skyTop[i]);
@@ -1842,6 +1846,7 @@ setRelitParams(const RelitParams *p)
 	u.params[1] = relitNonNegative(p->hemiScale);
 	u.params[2] = relitNonNegative(p->hemiSaturation);
 	u.params[3] = relitNonNegative(p->sunScale);
+	u.shadow[0] = relitParams.shadowStrength;
 	if(memcmp(&u, &uniformRelit, sizeof(u)) != 0){
 		uniformRelit = u;
 		blockDirty[BLOCK_RELIT] = true;
@@ -1909,6 +1914,15 @@ void
 setFaceFetchForTest(bool32 on)
 {
 	relitFetch = on != 0;
+}
+
+void
+setPlainTwinFailForTest(bool32 fail)
+{
+	plainTwinFailTest = fail != 0;
+	plainTwinFailed.clear();
+	lastPipeKey = 0;
+	lastPipe = nil;
 }
 
 void
@@ -2430,13 +2444,13 @@ flushCache(void)
 	bool depthEqual = matched || forced;
 	uint32 variant = currentVariant, layout = currentLayout;
 	id<MTLBuffer> stream = nil;
-	bool relitFrag = false;
-	if(ctx->encoderColorFormat == COLORFMT_SCENE && frameRelitActive() && relitHostDraw && relitGeometryDraw &&
-	   relitFailed.count(currentShader->shaderId) == 0){
+	bool relitFrag = false, plainShadow = false;
+	if(ctx->encoderColorFormat == COLORFMT_SCENE && frameRelitActive() && relitFailed.count(currentShader->shaderId) == 0){
 		uint32 rv = relitVariant(currentShader, currentLayout, currentVariant);
-		if((rv & VARIANT_RELITPRELIT) == 0)
+		bool lit = relitHostDraw && relitGeometryDraw;
+		if(lit && (rv & VARIANT_RELITPRELIT) == 0)
 			variant = rv;
-		else if(wantsNormalStream(currentLayout) && (uniformRelit.params[0] < 1.0f || relitAtFullWeight)){
+		else if(lit && wantsNormalStream(currentLayout) && (uniformRelit.params[0] < 1.0f || relitAtFullWeight)){
 			variant = rv;
 			relitFrag = true;
 			uint32 derived = derivedNormalLayout(currentLayout);
@@ -2447,6 +2461,11 @@ flushCache(void)
 		}
 		if((variant & VARIANT_RELIT) && depthEqual && frameShadowSource())
 			variant |= VARIANT_RELITSHADOW;
+		else if((rv & VARIANT_RELITPRELIT) && (variant & VARIANT_RELIT) == 0 && depthEqual && frameShadowSource() &&
+		        plainTwinFailed.count(currentShader->shaderId) == 0){
+			variant = currentVariant | VARIANT_RELITSHADOW;
+			plainShadow = true;
+		}
 	}
 	pd.shader = currentShader->shaderId;
 	pd.variant = variant;
@@ -2466,7 +2485,21 @@ flushCache(void)
 		lastPipeKey = key;
 		lastPipe = pipe;
 	}
-	if(pipe == nil && (variant & VARIANT_RELIT)){
+	if(plainShadow && plainTwinFailTest)
+		pipe = nil;
+	if(pipe == nil && plainShadow){
+		plainTwinFailed.insert(currentShader->shaderId);
+		fprintf(stderr, "rw::metal: shader %s/%s has no plain shadow twin; it draws without the shadow\n",
+			currentShader->vertexName, currentShader->fragmentName);
+		variant = currentVariant;
+		pd.variant = variant;
+		plainShadow = false;
+		key = pipelineKey(pd);
+		pipe = getPipeline(currentShader, pd, key);
+		lastPipeKey = key;
+		lastPipe = pipe;
+	}
+	if(pipe == nil && (variant & (VARIANT_RELIT | VARIANT_RELITSHADOW))){
 		relitFailed.insert(currentShader->shaderId);
 		fprintf(stderr, "rw::metal: shader %s/%s has no relit variant; it draws without the live light\n",
 			currentShader->vertexName, currentShader->fragmentName);
@@ -2475,6 +2508,7 @@ flushCache(void)
 		pd.vertexLayout = currentLayout;
 		stream = nil;
 		relitFrag = false;
+		plainShadow = false;
 		key = pipelineKey(pd);
 		pipe = getPipeline(currentShader, pd, key);
 		lastPipeKey = key;
@@ -2504,6 +2538,8 @@ flushCache(void)
 		if(variant & VARIANT_RELITSHADOW)
 			stats.relitShadowDraws++;
 	}
+	if(plainShadow)
+		stats.plainShadowDraws++;
 	return 1;
 }
 
@@ -2785,6 +2821,8 @@ prewarmRelit(Shader *shader, uint32 layout, uint32 variant, int32 blend, uint32 
 	if((v & VARIANT_RELIT) == 0)
 		return;
 	uint32 derived = (v & VARIANT_RELITPRELIT) ? derivedNormalLayout(layout) : 0;
+	if((v & VARIANT_RELITPRELIT) && frameShadowSource())
+		prewarm(shader, layout, variant | VARIANT_RELITSHADOW, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
 	for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
 		uint32 sv = shadow ? v | VARIANT_RELITSHADOW : v;
 		prewarm(shader, layout, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
@@ -2857,6 +2895,13 @@ hostPrewarmRelit(const HostPrewarmRecord &r)
 			if(derived){
 				d.vertexLayout = derived;
 				if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
+					ok = 0;
+			}
+			if(shadow && (v & VARIANT_RELITPRELIT)){
+				PipelineDesc t = d;
+				t.variant = (r.variant & r.shader->variantMask) | VARIANT_RELITSHADOW;
+				t.vertexLayout = r.layout;
+				if(getPipeline(r.shader, t, pipelineKey(t)) == nil)
 					ok = 0;
 			}
 		}
@@ -3123,6 +3168,7 @@ initState(void)
 	memset(&stats, 0, sizeof(stats));
 	dropsReported.clear();
 	relitFailed.clear();
+	plainTwinFailed.clear();
 	resetStatsLog();
 	@autoreleasepool {
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);

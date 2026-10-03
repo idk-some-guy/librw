@@ -71,6 +71,20 @@ relitShadowed(float full, float sunPart, float shadow)
 }
 
 static inline float
+relitShadowedPrelit(float full, float sunPart, float classic, float shadow, float strength)
+{
+	float open = 1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f);
+	return full - open*sunPart - RL_MIN(RL_MAX(strength, 0.0f), 1.0f)*open*classic;
+}
+
+static inline float
+relitPlainShadowed(float c, float shadow, float strength)
+{
+	float open = 1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f);
+	return c*(1.0f - RL_MIN(RL_MAX(strength, 0.0f), 1.0f)*open);
+}
+
+static inline float
 relitWeighted(float c, float w)
 {
 	return w < 1.0f ? c*w : c;
