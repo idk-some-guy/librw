@@ -10,7 +10,7 @@ struct ShadowRayParams
 	uint frame;
 	uint raysPerPixel;
 	uint halfRes;
-	uint pad;
+	uint alphaEntries;
 };
 
 struct ShadowAccumParams
@@ -49,9 +49,9 @@ struct ShadowAlphaTriangle
 };
 
 static bool
-shadowAlphaBlocks(device const ShadowAlphaEntry *alpha, uint base, uint geometry, const device void *data, float2 bary)
+shadowAlphaBlocks(device const ShadowAlphaEntry *alpha, uint entries, uint base, uint geometry, const device void *data, float2 bary)
 {
-	if(base == 0xFFFFFFFFu)
+	if(!shAlphaIndexValid(base, geometry, entries))
 		return false;
 	device const ShadowAlphaEntry &e = alpha[base + geometry];
 	device const ShadowAlphaTriangle &t = *(device const ShadowAlphaTriangle*)data;
@@ -85,6 +85,9 @@ shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
 	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
 	float vis = 0.0;
 	if(shadowAlpha){
+		intersector<triangle_data, instancing> isect;
+		isect.accept_any_intersection(true);
+		isect.assume_geometry_type(geometry_type::triangle);
 		intersection_params ip;
 		ip.accept_any_intersection(true);
 		ip.assume_geometry_type(geometry_type::triangle);
@@ -92,11 +95,13 @@ shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
 		for(uint r = 0; r < p.raysPerPixel; r++){
 			SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
 			ray q(float3(o.x, o.y, o.z), float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
-			iq.reset(q, tlas, 0xFF, ip);
+			if(isect.intersect(q, tlas, SH_INSTANCE_OPAQUE).type != intersection_type::none)
+				continue;
+			iq.reset(q, tlas, SH_INSTANCE_ALPHA, ip);
 			bool blocked = false;
 			while(iq.next()){
 				if(iq.get_candidate_intersection_type() == intersection_type::triangle &&
-				   shadowAlphaBlocks(alpha, iq.get_candidate_user_instance_id(), iq.get_candidate_geometry_id(),
+				   shadowAlphaBlocks(alpha, p.alphaEntries, iq.get_candidate_user_instance_id(), iq.get_candidate_geometry_id(),
 				                     iq.get_candidate_primitive_data(), iq.get_candidate_triangle_barycentric_coord())){
 					iq.commit_triangle_intersection();
 					blocked = true;

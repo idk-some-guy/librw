@@ -1784,13 +1784,20 @@ static const uint8 checkerAlpha[4] = { 0, 255, 255, 0 };
 static const uint8 clearAlpha[4] = { 0, 0, 0, 0 };
 static const uint8 solidAlpha[4] = { 255, 255, 255, 254 };
 
+static const uint8 patternAlpha[16] = {
+	255, 0, 0, 0,
+	255, 255, 0, 0,
+	0, 255, 0, 255,
+	0, 0, 255, 0 };
+static const uint8 cornerAlpha[4] = { 255, 0, 0, 0 };
+
 static Texture*
-AlphaTexture(int w, int h, const uint8 *alpha)
+AlphaTexture(int w, int h, const uint8 *alpha, int32 addressU = Texture::WRAP, int32 addressV = Texture::WRAP)
 {
 	std::vector<RGBA> t(w*h);
 	for(int i = 0; i < w*h; i++)
 		t[i] = { 255, 255, 255, alpha[i] };
-	return MakeTexture(w, h, t.data(), Texture::LINEAR, Texture::WRAP, Texture::WRAP);
+	return MakeTexture(w, h, t.data(), Texture::LINEAR, addressU, addressV);
 }
 
 static Material*
@@ -1810,12 +1817,12 @@ AlphaMaterial(const uint8 *alpha, int w = 2, int h = 2, uint8 materialAlpha = 25
 }
 
 static Atomic*
-AlphaRoof(Geometry **geo, Material *m0, Material *m1, uint8 vertexAlpha = 255)
+AlphaRoof(Geometry **geo, Material *m0, Material *m1, uint8 vertexAlpha = 255, float uvScale = 1.0f)
 {
 	RGBA c = { 120, 120, 120, 255 };
 	RGBA col[4] = { c, c, c, c };
 	col[3].alpha = vertexAlpha;
-	TexCoords uv[4] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { uvScale, 0.0f }, { uvScale, uvScale }, { 0.0f, uvScale } };
 	*geo = SplitQuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED, 1.0f, -1.0f, -1.0f, 1.0f,
 		-15.0f, col, uv, m0, m1);
 	m0->destroy();
@@ -1883,23 +1890,27 @@ Dark(float v)
 static bool
 CheckAlphaCheckerboard(void)
 {
-	const char *name = "an alpha-tested caster casts its texture's alpha: a checkerboard roof casts a checkerboard shadow";
+	const char *name = "an alpha-tested caster casts its texture's alpha: an asymmetric 4x4 alpha pattern on a roof shows texel for texel in its shadow";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
-	Material *m = AlphaMaterial(checkerAlpha);
+	Material *m = AlphaMaterial(patternAlpha, 4, 4);
 	Geometry *g;
 	Atomic *roof = AlphaRoof(&g, m, m);
 	AlphaFrames(&s, 16, [&](bool prepass){ AlphaRoofPass(roof, prepass, 128); });
-	float v[4];
-	FloorQuad(0.0f, v);
+	float v[16];
+	for(int r = 0; r < 4; r++)
+		for(int c = 0; c < 4; c++)
+			v[r*4 + c] = Floor(1.0f - (c + 0.5f)/2.0f - 5.0f, 1.0f - (r + 0.5f)/2.0f);
 	float open = Floor(3.0f, 0.0f);
 	metal::RayStats st = metal::getRayStats();
 	DestroyAtomic(roof);
 	g->destroy();
 	FreeShadowScene(&s);
-	bool ok = Dark(v[0]) && Lit(v[1]) && Lit(v[2]) && Dark(v[3]) && Lit(open) && st.alphaKernel == 1 && st.alphaInstances == 1 &&
-		st.alphaEntries == 1 && st.alphaTextures == 1;
-	Detail("  floor (-5.5, 0.5) %.3f (-4.5, 0.5) %.3f (-5.5, -0.5) %.3f (-4.5, -0.5) %.3f open %.3f\n", v[0], v[1], v[2], v[3], open);
+	bool ok = Lit(open) && st.alphaKernel == 1 && st.alphaInstances == 1 && st.alphaEntries == 1 && st.alphaTextures == 1;
+	for(int i = 0; i < 16; i++)
+		ok = ok && (patternAlpha[i] ? Dark(v[i]) : Lit(v[i]));
+	Detail("  floor under texel rows: %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f, open %.3f\n",
+		v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15], open);
 	if(!ok)
 		Detail("  alpha kernel %u instances %u entries %u textures %u\n", st.alphaKernel, st.alphaInstances, st.alphaEntries,
 			st.alphaTextures);
@@ -2069,7 +2080,7 @@ CheckAlphaKernelChoice(void)
 static bool
 CheckAlphaTextureLifetime(void)
 {
-	const char *name = "an alpha caster's texture lives until the frame that sampled it completes, and a swapped texture is sampled the next frame";
+	const char *name = "an alpha caster's texture is alive while the frame that sampled it is in flight and released after it, and a swapped texture is sampled the next frame";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
 	Material *m = AlphaMaterial(checkerAlpha);
@@ -2138,6 +2149,269 @@ CheckAlphaCap(void)
 	if(!ok)
 		Detail("  A %.3f %.3f %.3f %.3f, B triangle 0 %.3f triangle 1 %.3f, entries %u capped %u\n", v[0], v[1], v[2], v[3], b0, b1,
 			st.alphaEntries, st.alphaCapped);
+	return Report(ok, name);
+}
+
+static bool
+RoofHit(float x, float y, float z, uint32 mask = 0xFF)
+{
+	float o[3] = { x, y, z }, d[3] = { 0.0f, 0.0f, -1.0f };
+	return metal::rtTraceForTest(o, d, 7.0f, mask) != 0;
+}
+
+static bool
+CheckAlphaUnderOpaque(void)
+{
+	const char *name = "an opaque roof above an alpha-tested roof blocks rays through its solid and its clear texels, and a clear texel with nothing above lets light through";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Material *m = AlphaMaterial(checkerAlpha);
+	Geometry *g, *og;
+	Atomic *roof = AlphaRoof(&g, m, m);
+	Atomic *over = Roof(&og, 1.0f, 0.5f);
+	Place(over, 3.0f, 0.5f, -12.0f, 0.0f);
+	AlphaFrames(&s, 16, [&](bool prepass){
+		AlphaRoofPass(roof, prepass, 128);
+		if(prepass)
+			metal::addShadowCaster(over, metal::SHADOWCASTER_STATIC);
+	});
+	float v[4];
+	FloorQuad(0.0f, v);
+	float open = Floor(3.0f, 0.0f);
+	metal::RayStats st = metal::getRayStats();
+	DestroyAtomic(roof);
+	DestroyAtomic(over);
+	g->destroy();
+	og->destroy();
+	FreeShadowScene(&s);
+	bool ok = Dark(v[0]) && Dark(v[1]) && Lit(v[2]) && Dark(v[3]) && Lit(open) && st.alphaKernel == 1 && st.alphaInstances == 1;
+	if(!ok)
+		Detail("  solid under roof %.3f, clear under roof %.3f, clear alone %.3f, solid alone %.3f, open %.3f, kernel %u alpha instances %u\n",
+			v[0], v[1], v[2], v[3], open, st.alphaKernel, st.alphaInstances);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaMaskBit(void)
+{
+	const char *name = "an alpha-level instance given the opaque-only bit blocks as a solid quad, and one given neither bit lets all light through";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Geometry *ga, *gb;
+	Atomic *a = AlphaRoof(&ga, AlphaMaterial(checkerAlpha), AlphaMaterial(checkerAlpha));
+	Atomic *b = MixedRoof(&gb);
+	float v[2][4], b0[2], b1[2];
+	metal::RayStats st[2];
+	for(int k = 0; k < 2; k++){
+		metal::setRtAlphaMaskForTest(k + 1);
+		AlphaFrames(&s, 16, [&](bool prepass){
+			AlphaRoofPass(a, prepass, 128);
+			AlphaRoofPass(b, prepass, 128);
+		});
+		metal::setRtAlphaMaskForTest(0);
+		FloorQuad(0.0f, v[k]);
+		b0[k] = Floor(-5.5f, 4.5f);
+		b1[k] = Floor(-4.5f, 3.5f);
+		st[k] = metal::getRayStats();
+	}
+	DestroyAtomic(a);
+	DestroyAtomic(b);
+	ga->destroy();
+	gb->destroy();
+	FreeShadowScene(&s);
+	bool ok = true;
+	for(int i = 0; i < 4; i++)
+		ok = ok && Dark(v[0][i]) && Lit(v[1][i]);
+	ok = ok && Dark(b0[0]) && Dark(b1[0]) && Lit(b0[1]) && Lit(b1[1]);
+	for(int k = 0; k < 2; k++)
+		ok = ok && st[k].alphaKernel == 1 && st[k].alphaInstances == 2;
+	if(!ok)
+		for(int k = 0; k < 2; k++)
+			Detail("  %s: A %.3f %.3f %.3f %.3f, B triangle 0 %.3f triangle 1 %.3f, kernel %u alpha instances %u\n",
+				k == 0 ? "opaque-only bit" : "neither bit", v[k][0], v[k][1], v[k][2], v[k][3], b0[k], b1[k], st[k].alphaKernel,
+				st[k].alphaInstances);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaMaskCarriers(void)
+{
+	const char *name = "instances of levels with alpha geometry carry the alpha-level bit and static and moving opaque casters the opaque-only bit";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Geometry *ga, *gs, *gm;
+	Atomic *a = AlphaRoof(&ga, AlphaMaterial(checkerAlpha), AlphaMaterial(checkerAlpha));
+	Atomic *still = Roof(&gs, 1.0f, 1.0f);
+	Atomic *moving = Roof(&gm, 1.0f, 1.0f);
+	Place(still, 0.0f, 8.0f, -15.0f, 0.0f);
+	Place(moving, 0.0f, -4.0f, -15.0f, 0.0f);
+	AlphaFrames(&s, 4, [&](bool prepass){
+		AlphaRoofPass(a, prepass, 128);
+		if(prepass){
+			metal::addShadowCaster(still, metal::SHADOWCASTER_STATIC);
+			metal::addShadowCaster(moving, metal::SHADOWCASTER_MOVING);
+		}
+	});
+	bool alphaBit[3] = { RoofHit(0.0f, 0.0f, -10.0f, SH_INSTANCE_ALPHA), RoofHit(0.0f, 8.0f, -10.0f, SH_INSTANCE_ALPHA),
+		RoofHit(0.0f, -4.0f, -10.0f, SH_INSTANCE_ALPHA) };
+	bool opaqueBit[3] = { RoofHit(0.0f, 0.0f, -10.0f, SH_INSTANCE_OPAQUE), RoofHit(0.0f, 8.0f, -10.0f, SH_INSTANCE_OPAQUE),
+		RoofHit(0.0f, -4.0f, -10.0f, SH_INSTANCE_OPAQUE) };
+	bool any[3] = { RoofHit(0.0f, 0.0f, -10.0f), RoofHit(0.0f, 8.0f, -10.0f), RoofHit(0.0f, -4.0f, -10.0f) };
+	DestroyAtomic(a);
+	DestroyAtomic(still);
+	DestroyAtomic(moving);
+	ga->destroy();
+	gs->destroy();
+	gm->destroy();
+	FreeShadowScene(&s);
+	bool ok = alphaBit[0] && !alphaBit[1] && !alphaBit[2] && !opaqueBit[0] && opaqueBit[1] && opaqueBit[2] && any[0] && any[1] && any[2];
+	if(!ok)
+		Detail("  alpha-level bit: alpha roof %d static roof %d moving roof %d; opaque-only bit: %d %d %d; all bits: %d %d %d\n",
+			alphaBit[0], alphaBit[1], alphaBit[2], opaqueBit[0], opaqueBit[1], opaqueBit[2], any[0], any[1], any[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaCappedLevel(void)
+{
+	const char *name = "a capped alpha-level instance carries the alpha-level bit: its opaque mesh casts and its alpha mesh lets light through";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Geometry *ga, *gb;
+	Material *m = AlphaMaterial(checkerAlpha);
+	Atomic *a = AlphaRoof(&ga, m, m);
+	Atomic *b = MixedRoof(&gb);
+	metal::setRtAlphaCapForTest(1);
+	AlphaFrames(&s, 16, [&](bool prepass){
+		AlphaRoofPass(a, prepass, 128);
+		AlphaRoofPass(b, prepass, 128);
+	});
+	float b0 = Floor(-5.5f, 4.5f), b1 = Floor(-4.5f, 3.5f);
+	metal::RayStats st = metal::getRayStats();
+	bool alphaBit = RoofHit(0.5f, 4.5f, -10.0f, SH_INSTANCE_ALPHA), opaqueBit = RoofHit(0.5f, 4.5f, -10.0f, SH_INSTANCE_OPAQUE);
+	metal::setRtAlphaCapForTest(0);
+	DestroyAtomic(a);
+	DestroyAtomic(b);
+	ga->destroy();
+	gb->destroy();
+	FreeShadowScene(&s);
+	bool ok = Dark(b0) && Lit(b1) && alphaBit && !opaqueBit && st.alphaCapped == 1 && st.alphaEntries == 1 && st.alphaKernel == 1;
+	if(!ok)
+		Detail("  triangle 0 %.3f triangle 1 %.3f, alpha-level bit %d opaque-only bit %d, capped %u entries %u kernel %u\n", b0, b1,
+			alphaBit, opaqueBit, st.alphaCapped, st.alphaEntries, st.alphaKernel);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaIndexGuard(void)
+{
+	const char *name = "an alpha caster whose table index lies past the frame's entries lets light through its alpha mesh and keeps its opaque one";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Geometry *gb;
+	Atomic *b = MixedRoof(&gb);
+	metal::setRtAlphaIndexPastForTest(1);
+	AlphaFrames(&s, 16, [&](bool prepass){ AlphaRoofPass(b, prepass, 128); });
+	metal::setRtAlphaIndexPastForTest(0);
+	float b0 = Floor(-5.5f, 4.5f), b1 = Floor(-4.5f, 3.5f);
+	metal::RayStats st = metal::getRayStats();
+	DestroyAtomic(b);
+	gb->destroy();
+	FreeShadowScene(&s);
+	bool ok = Dark(b0) && Lit(b1) && st.alphaKernel == 1 && st.alphaEntries == 1;
+	if(!ok)
+		Detail("  triangle 0 %.3f triangle 1 %.3f, kernel %u entries %u\n", b0, b1, st.alphaKernel, st.alphaEntries);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaTextureGone(void)
+{
+	const char *name = "a frame whose alpha caster texture is gone skips the shadow pass and shows a factor of 1 instead of tracing alpha meshes as solid";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Material *m = AlphaMaterial(checkerAlpha);
+	Geometry *g;
+	Atomic *roof = AlphaRoof(&g, m, m);
+	metal::setRtAlphaTextureLostForTest(1);
+	AlphaFrames(&s, 4, [&](bool prepass){ AlphaRoofPass(roof, prepass, 128); });
+	metal::setRtAlphaTextureLostForTest(0);
+	float v[4];
+	FloorQuad(0.0f, v);
+	metal::RayStats st = metal::getRayStats();
+	DestroyAtomic(roof);
+	g->destroy();
+	FreeShadowScene(&s);
+	bool ok = v[0] == 1.0f && v[1] == 1.0f && v[2] == 1.0f && v[3] == 1.0f && st.raysPerFrame == 0 && st.alphaKernel == 0 &&
+		st.alphaInstances == 1;
+	if(!ok)
+		Detail("  floor %.3f %.3f %.3f %.3f rays %u kernel %u alpha instances %u\n", v[0], v[1], v[2], v[3], st.raysPerFrame,
+			st.alphaKernel, st.alphaInstances);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaRefSceneOnly(void)
+{
+	const char *name = "an off-screen draw of an alpha-tested mesh does not overwrite the reference its scene draw recorded";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	static const uint8 ramp[2] = { 100, 200 };
+	Material *m = AlphaMaterial(ramp, 2, 1);
+	Geometry *g;
+	Atomic *roof = AlphaRoof(&g, m, m);
+	Camera *other = Camera::create();
+	other->setFrame(Frame::create());
+	other->frameBuffer = Raster::create(64, 64, 0, Raster::CAMERATEXTURE);
+	other->zBuffer = Raster::create(64, 64, 0, Raster::ZBUFFER);
+	AlphaFrames(&s, 16, [&](bool prepass){
+		AlphaRoofPass(roof, prepass, 50);
+		if(prepass)
+			return;
+		rtCamera->endUpdate();
+		other->beginUpdate();
+		AlphaRoofPass(roof, false, 250);
+		other->endUpdate();
+		rtCamera->beginUpdate();
+	});
+	float lo = Floor(-4.5f, 0.0f), hi = Floor(-5.5f, 0.0f);
+	Frame *of = other->getFrame();
+	Raster *fb = other->frameBuffer, *z = other->zBuffer;
+	other->destroy();
+	of->destroy();
+	fb->destroy();
+	z->destroy();
+	DestroyAtomic(roof);
+	g->destroy();
+	FreeShadowScene(&s);
+	bool ok = Lit(lo) && Dark(hi);
+	if(!ok)
+		Detail("  alpha 100 %.3f alpha 200 %.3f (scene ref 50, off-screen ref 250)\n", lo, hi);
+	return Report(ok, name);
+}
+
+static bool
+CheckAlphaAddressAxes(void)
+{
+	const char *name = "an alpha caster with clamp on u and wrap on v samples coordinates beyond 1 per axis";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Material *m = AlphaMaterial(nil);
+	Texture *tex = AlphaTexture(2, 2, cornerAlpha, Texture::CLAMP, Texture::WRAP);
+	m->setTexture(tex);
+	if(tex)
+		tex->destroy();
+	Geometry *g;
+	Atomic *roof = AlphaRoof(&g, m, m, 255, 2.0f);
+	AlphaFrames(&s, 16, [&](bool prepass){ AlphaRoofPass(roof, prepass, 128); });
+	float uClamped = Floor(-5.25f, 0.75f), vWrapped = Floor(-4.25f, -0.25f);
+	metal::RayStats st = metal::getRayStats();
+	DestroyAtomic(roof);
+	g->destroy();
+	FreeShadowScene(&s);
+	bool ok = Lit(uClamped) && Dark(vWrapped) && st.alphaKernel == 1;
+	if(!ok)
+		Detail("  u 1.25 v 0.25 %.3f (want lit), u 0.25 v 1.25 %.3f (want dark), kernel %u\n", uClamped, vWrapped, st.alphaKernel);
 	return Report(ok, name);
 }
 
@@ -2259,7 +2533,7 @@ PrintShadowTerminator(void)
 
 struct TimingGrid
 {
-	float32 ms[2][3], ground, megabytes, walkMs;
+	float32 ms[2][3], shadowed[2][3], ground, megabytes, walkMs;
 	bool measured;
 };
 
@@ -2275,18 +2549,29 @@ SettleRetired(void)
 }
 
 static void
-ShadowTimingGrid(Texture *tex, int32 alphaKernel, TimingGrid *t)
+ShadowTimingGrid(Texture *tex, int32 alphaKernel, TimingGrid *t, bool mixed = false)
 {
 	SettleRetired();
 	metal::RayStats before = metal::getRayStats();
 	std::vector<Geometry*> strips;
 	for(int q = 1; q <= 200; q++)
-		strips.push_back(StripGeometry(q, 0.0f, tex));
+		strips.push_back(StripGeometry(q, 0.0f, !mixed || q % 10 == 0 ? tex : nil));
 	std::vector<Atomic*> grid;
-	for(int i = 0; i < 8192; i++){
+	for(int i = 0; i < (mixed ? 8191 : 8192); i++){
 		Atomic *a = MakeAtomic(strips[i % 200]);
 		Place(a, (float)(i % 91)*20.0f, (float)(i / 91)*20.0f, 10.0f, 0.0f);
 		grid.push_back(a);
+	}
+	Geometry *coverGeo = nil;
+	if(mixed){
+		RGBA c = { 200, 200, 200, 255 };
+		RGBA col[4] = { c, c, c, c };
+		Material *mat = Material::create();
+		coverGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 0.0f, -200.0f, -1000.0f, 2000.0f, 0.0f, col, nil, mat);
+		mat->destroy();
+		Atomic *cover = MakeAtomic(coverGeo);
+		Place(cover, 910.0f, 0.0f, 30.0f, 0.0f);
+		grid.push_back(cover);
 	}
 	CasterTiersOn();
 	auto all = [&](bool prepass){
@@ -2317,13 +2602,15 @@ ShadowTimingGrid(Texture *tex, int32 alphaKernel, TimingGrid *t)
 	for(int r = 0; r < 2; r++)
 		for(int q = 0; q < 3; q++)
 			t->measured = t->measured && metal::rtShadowTimingForTest(sizes[r][0], sizes[r][1], metal::SHADOWQUALITY_LOW + q, eye,
-				target, sun, &t->ms[r][q], &t->ground);
+				target, sun, &t->ms[r][q], &t->ground, &t->shadowed[r][q]);
 	metal::setShadowAlphaKernelForTest(-1);
 	CasterTiersOff();
 	for(Atomic *a : grid)
 		DestroyAtomic(a);
 	for(Geometry *g : strips)
 		g->destroy();
+	if(coverGeo)
+		coverGeo->destroy();
 	SettleRetired();
 }
 
@@ -2335,28 +2622,29 @@ PrintShadowTiming(void)
 		0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 255, 0, 255, 0, 255, 0,
 		0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 255, 0, 255, 0, 255, 0,
 		0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 255, 0, 255, 0, 255, 0 };
-	TimingGrid g[3];
+	TimingGrid g[4];
 	ShadowTimingGrid(nil, -1, &g[0]);
 	ShadowTimingGrid(nil, 1, &g[1]);
 	Texture *tex = AlphaTexture(8, 8, stripes);
 	ShadowTimingGrid(tex, -1, &g[2]);
+	ShadowTimingGrid(tex, -1, &g[3], true);
 	if(tex)
 		tex->destroy();
-	if(!g[0].measured || !g[1].measured || !g[2].measured){
+	if(!g[0].measured || !g[1].measured || !g[2].measured || !g[3].measured){
 		printf("  shadow ray timing: not measured (no stage-boundary counter samples)\n");
 		return;
 	}
 	const uint32 sizes[2][2] = { { 2560, 1440 }, { 3840, 2160 } };
-	const char *rows[3] = { "opaque grid", "opaque grid, alpha kernel", "alpha grid" };
+	const char *rows[4] = { "opaque grid", "opaque grid, alpha kernel", "alpha grid", "mixed grid" };
 	printf("  shadow ray timing (median of 5, recorded not gated), ground %.0f%%:\n", g[0].ground*100.0f);
-	for(int k = 0; k < 3; k++)
+	for(int k = 0; k < 4; k++)
 		for(int r = 0; r < 2; r++){
 			printf("    %s %ux%u low %.3f ms medium %.3f ms high %.3f ms", rows[k], sizes[r][0], sizes[r][1], g[k].ms[r][0],
 				g[k].ms[r][1], g[k].ms[r][2]);
 			if(k > 0)
 				printf(" (%+.0f%% %+.0f%% %+.0f%%)", (g[k].ms[r][0]/g[0].ms[r][0] - 1.0f)*100.0f,
 					(g[k].ms[r][1]/g[0].ms[r][1] - 1.0f)*100.0f, (g[k].ms[r][2]/g[0].ms[r][2] - 1.0f)*100.0f);
-			printf("\n");
+			printf(" shadowed %.0f%%\n", g[k].shadowed[r][1]*100.0f);
 		}
 	printf("    bottom levels: opaque grid %.2f MB, alpha grid %.2f MB; alpha grid walk %.2f ms\n", g[0].megabytes, g[2].megabytes,
 		g[2].walkMs);
@@ -2410,6 +2698,14 @@ RunRaytraceChecks(Camera *camera)
 	CheckAlphaKernelChoice();
 	CheckAlphaTextureLifetime();
 	CheckAlphaCap();
+	CheckAlphaUnderOpaque();
+	CheckAlphaMaskBit();
+	CheckAlphaMaskCarriers();
+	CheckAlphaCappedLevel();
+	CheckAlphaIndexGuard();
+	CheckAlphaTextureGone();
+	CheckAlphaRefSceneOnly();
+	CheckAlphaAddressAxes();
 	PrintShadowTerminator();
 	PrintBuildTiming();
 	PrintCasterTiming();

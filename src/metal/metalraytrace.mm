@@ -166,6 +166,8 @@ static struct
 	id<MTLBuffer> currentAlpha, lastAlpha;
 	std::vector<__weak id<MTLTexture>> alphaTextures;
 	uint32 alphaCap;
+	int32 alphaMaskTest;
+	bool alphaIndexPast, alphaLost;
 	__weak id<MTLTexture> watched;
 	id<MTLCounterSampleBuffer> timing;
 	uint32 timed;
@@ -182,7 +184,7 @@ struct ShadowRayParamsHost
 	simd_float4x4 invViewProj;
 	simd_float4 sun, eye;
 	simd_uint2 size, depthSize;
-	uint32 frame, raysPerPixel, halfRes, pad;
+	uint32 frame, raysPerPixel, halfRes, alphaEntries;
 };
 
 struct ShadowAccumParamsHost
@@ -202,6 +204,8 @@ struct ShadowAlphaEntryHost
 };
 
 static_assert(sizeof(ShadowAlphaEntryHost) == 16, "shadow alpha entry");
+static_assert(((SH_INSTANCE_ALPHA | SH_INSTANCE_OPAQUE) & (SHADOWCASTER_STATIC | SHADOWCASTER_MOVING | SHADOWCASTER_SKINNED)) == 0 &&
+	(SH_INSTANCE_ALPHA & SH_INSTANCE_OPAQUE) == 0, "shadow instance mask bits");
 static_assert(sizeof(ShadowRayParamsHost) == 128, "shadow ray params");
 static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
 
@@ -1217,7 +1221,7 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 	f.cap = rf.alphaCap ? std::min<uint32>(rf.alphaCap, RT_MAX_ALPHA_ENTRIES) : (uint32)RT_MAX_ALPHA_ENTRIES;
 	f.keep = [NSMutableArray new];
 	rf.alphaTextures.clear();
-	uint32 count = 0, waiting = 0;
+	uint32 count = 0, waiting = 0, past = ~0u;
 	for(uint32 i : chosen){
 		Caster &c = rf.casters[i];
 		id<MTLAccelerationStructure> as = nil;
@@ -1232,21 +1236,29 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 			continue;
 		}
 		uint32 user = 0xFFFFFFFFu;
+		bool alphaLevel = false;
 		if(c.bones < 0){
 			const std::vector<uint32> &meshes = rt.bottoms.find(c.header)->second.alphaMeshes;
 			if(!meshes.empty()){
 				f.instances++;
+				alphaLevel = true;
 				user = alphaBase(f, c.header, meshes);
 			}
 		}
 		di[count].transformationMatrix = packed(c.world);
 		di[count].options = MTLAccelerationStructureInstanceOptionDisableTriangleCulling;
-		di[count].mask = c.mask;
+		di[count].mask = shInstanceMask(c.mask, alphaLevel && rf.alphaMaskTest != 1);
+		if(alphaLevel && rf.alphaMaskTest == 2)
+			di[count].mask = c.mask;
 		di[count].intersectionFunctionTableOffset = 0;
 		di[count].userID = user;
 		di[count].accelerationStructureID = as.gpuResourceID;
+		if(rf.alphaIndexPast && past == ~0u && user != 0xFFFFFFFFu)
+			past = count;
 		count++;
 	}
+	if(past != ~0u)
+		di[past].userID = f.entries;
 	rt.stats.instances = count;
 	rt.stats.castersWaiting = waiting;
 	rt.stats.alphaInstances = f.instances;
@@ -1352,20 +1364,22 @@ useAlphaKernel(id<MTLBuffer> table)
 }
 
 static bool
-encodeAlphaTable(id<MTLComputeCommandEncoder> e, id<MTLBuffer> table)
+alphaTextureList(std::vector<__unsafe_unretained id<MTLResource>> *list)
 {
-	std::vector<__unsafe_unretained id<MTLResource>> list;
-	NSMutableArray *held = [NSMutableArray new];
 	for(id<MTLTexture> t : rf.alphaTextures){
-		if(t == nil)
+		if(t == nil || rf.alphaLost)
 			return false;
-		[held addObject:t];
-		list.push_back(t);
+		list->push_back(t);
 	}
+	return true;
+}
+
+static void
+encodeAlphaTable(id<MTLComputeCommandEncoder> e, id<MTLBuffer> table, const std::vector<__unsafe_unretained id<MTLResource>> &list)
+{
 	[e setBuffer:table offset:0 atIndex:2];
 	if(!list.empty())
 		[e useResources:list.data() count:list.size() usage:MTLResourceUsageRead];
-	return true;
 }
 
 void
@@ -1451,6 +1465,12 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 		sh.valid = false;
 		return nil;
 	}
+	bool alpha = useAlphaKernel(rf.currentAlpha);
+	std::vector<__unsafe_unretained id<MTLResource>> textures;
+	if(alpha && !alphaTextureList(&textures)){
+		sh.valid = false;
+		return nil;
+	}
 	simd_float4x4 inv = simd_inverse(in.viewProj), toWorld = simd_inverse(in.view);
 	simd_float3 eye = toWorld.columns[3].xyz;
 	simd_float3 sun = simd_normalize(simd_make_float3(in.toSun[0], in.toSun[1], in.toSun[2]));
@@ -1458,7 +1478,7 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	bool valid = sh.valid && in.history && !rt.cutFrame && !shSunMoved(s0, s1);
 	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height;
 	ShadowRayParamsHost rp = { inv, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
-		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), sh.frame++, q.raysPerPixel, q.halfRes, 0 };
+		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), sh.frame++, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
 	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
 		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
 	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
@@ -1472,7 +1492,8 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 		[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 		sh.fresh = false;
 	}
-	bool alpha = useAlphaKernel(rf.currentAlpha) && encodeAlphaTable(e, rf.currentAlpha);
+	if(alpha)
+		encodeAlphaTable(e, rf.currentAlpha, textures);
 	[e setComputePipelineState:alpha ? sh.raysAlpha : sh.rays];
 	rt.stats.alphaKernel = alpha ? 1 : 0;
 	rtUseHeaps(e);
@@ -1984,6 +2005,24 @@ setShadowAlphaKernelForTest(int32 mode)
 }
 
 void
+setRtAlphaMaskForTest(int32 mode)
+{
+	rf.alphaMaskTest = mode;
+}
+
+void
+setRtAlphaIndexPastForTest(bool32 on)
+{
+	rf.alphaIndexPast = on != 0;
+}
+
+void
+setRtAlphaTextureLostForTest(bool32 on)
+{
+	rf.alphaLost = on != 0;
+}
+
+void
 rtWatchTextureForTest(Raster *raster)
 {
 	rf.watched = raster ? (__bridge id<MTLTexture>)getRasterSampleTexture(raster) : nil;
@@ -2060,7 +2099,7 @@ rtFrameTimingForTest(RtFrameTiming *t)
 
 bool32
 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 eye[3], const float32 target[3],
-	const float32 toSun[3], float32 *ms, float32 *ground)
+	const float32 toSun[3], float32 *ms, float32 *ground, float32 *shadowed)
 {
 	MetalContext *ctx = getContext();
 	SHQuality q = shQuality(quality);
@@ -2130,10 +2169,13 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 		[cb waitUntilCompleted];
 		simd_float3 sun = simd_normalize(simd_make_float3(toSun[0], toSun[1], toSun[2]));
 		bool alpha = useAlphaKernel(rf.lastAlpha);
+		std::vector<__unsafe_unretained id<MTLResource>> textures;
+		if(alpha && !alphaTextureList(&textures))
+			return 0;
 		std::vector<float32> times;
 		for(uint32 k = 0; k < 5; k++){
 			ShadowRayParamsHost rp = { inv, simd_make_float4(sun, 0.02f), simd_make_float4(e, SH_RAY_DISTANCE),
-				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, 0 };
+				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
 			id<MTLCommandBuffer> tcb = [ctx->queue commandBuffer];
 			MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
 			pd.sampleBufferAttachments[0].sampleBuffer = sb;
@@ -2141,10 +2183,8 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 			pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
 			id<MTLComputeCommandEncoder> enc = [tcb computeCommandEncoderWithDescriptor:pd];
 			[enc setComputePipelineState:alpha ? sh.raysAlpha : sh.rays];
-			if(alpha && !encodeAlphaTable(enc, rf.lastAlpha)){
-				[enc endEncoding];
-				return 0;
-			}
+			if(alpha)
+				encodeAlphaTable(enc, rf.lastAlpha, textures);
 			rtUseHeaps(enc);
 			[enc setAccelerationStructure:rf.last atBufferIndex:0];
 			[enc setBytes:&rp length:sizeof(rp) atIndex:1];
@@ -2162,6 +2202,25 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 		}
 		*ms = median(times);
 		*ground = (float32)((double)hits/((double)width*height));
+		id<MTLBuffer> rawBuf = [dev newBufferWithLength:(NSUInteger)rw*rh*2 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> rcb = [ctx->queue commandBuffer];
+		id<MTLBlitCommandEncoder> rb = [rcb blitCommandEncoder];
+		[rb copyFromTexture:raw sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(rw, rh, 1)
+			toBuffer:rawBuf destinationOffset:0 destinationBytesPerRow:rw*2 destinationBytesPerImage:(NSUInteger)rw*rh*2];
+		[rb endEncoding];
+		[rcb commit];
+		[rcb waitUntilCompleted];
+		const __fp16 *rv = (const __fp16*)rawBuf.contents;
+		uint64 groundRays = 0, dark = 0;
+		for(uint32 y = 0; y < rh; y++)
+			for(uint32 x = 0; x < rw; x++){
+				uint32 sx = q.halfRes ? std::min(2*x, width - 1) : x, sy = q.halfRes ? std::min(2*y, height - 1) : y;
+				if(dp[(size_t)sy*width + sx] >= 1.0f)
+					continue;
+				groundRays++;
+				dark += (float)rv[(size_t)y*rw + x] < 0.5f;
+			}
+		*shadowed = groundRays ? (float32)((double)dark/groundRays) : 0.0f;
 	}
 	return 1;
 }

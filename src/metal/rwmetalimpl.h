@@ -140,9 +140,12 @@ void rtResetForTest(void);
 void setRtTimingForTest(bool32 on);
 bool32 rtFrameTimingForTest(RtFrameTiming *t);
 bool32 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 eye[3], const float32 target[3],
-	const float32 toSun[3], float32 *ms, float32 *ground);
+	const float32 toSun[3], float32 *ms, float32 *ground, float32 *shadowed);
 void setRtAlphaCapForTest(uint32 entries);
 void setShadowAlphaKernelForTest(int32 mode);
+void setRtAlphaMaskForTest(int32 mode);
+void setRtAlphaIndexPastForTest(bool32 on);
+void setRtAlphaTextureLostForTest(bool32 on);
 void rtWatchTextureForTest(Raster *raster);
 bool32 rtWatchedTextureAliveForTest(void);
 

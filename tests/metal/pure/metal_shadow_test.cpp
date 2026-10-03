@@ -229,6 +229,34 @@ TestAddress(void)
 	CHECK(shAddress(-0.5f, 2u) == 0.0f && shAddress(1.5f, 2u) == 1.0f && Near(shAddress(0.3f, 2u), 0.3f, 1e-6f));
 }
 
+static void
+TestInstanceMask(void)
+{
+	const unsigned int kinds[3] = { 1u, 2u, 4u }, bits[2] = { SH_INSTANCE_ALPHA, SH_INSTANCE_OPAQUE };
+	for(unsigned int b : bits)
+		CHECK(b != 0u && (b & (b - 1u)) == 0u && b <= 0x80u && (b & 7u) == 0u);
+	CHECK(SH_INSTANCE_ALPHA != SH_INSTANCE_OPAQUE);
+	for(unsigned int k : kinds){
+		CHECK(shInstanceMask(k, false) == (k | SH_INSTANCE_OPAQUE));
+		CHECK(shInstanceMask(k, true) == (k | SH_INSTANCE_ALPHA));
+	}
+	CHECK(shInstanceMask(3u, true) == (3u | SH_INSTANCE_ALPHA));
+}
+
+static void
+TestAlphaIndex(void)
+{
+	CHECK(shAlphaIndexValid(0u, 0u, 1u));
+	CHECK(!shAlphaIndexValid(0u, 1u, 1u));
+	CHECK(shAlphaIndexValid(2u, 0u, 3u));
+	CHECK(!shAlphaIndexValid(2u, 1u, 3u));
+	CHECK(!shAlphaIndexValid(3u, 0u, 3u));
+	CHECK(!shAlphaIndexValid(0u, 0u, 0u));
+	CHECK(!shAlphaIndexValid(0xFFFFFFFFu, 0u, 4096u));
+	CHECK(!shAlphaIndexValid(0xFFFFFFFEu, 3u, 4096u));
+	CHECK(!shAlphaIndexValid(1u, 0xFFFFFFFFu, 4096u));
+}
+
 int
 main(void)
 {
@@ -246,6 +274,8 @@ main(void)
 	TestAlphaRecord();
 	TestAlphaThreshold();
 	TestAddress();
+	TestInstanceMask();
+	TestAlphaIndex();
 	if(failures == 0)
 		printf("all shadow tests passed\n");
 	return failures != 0;

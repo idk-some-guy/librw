@@ -2422,7 +2422,7 @@ flushCache(void)
 	if(prepassPass)
 		return keyed ? flushPrepass(ctx, e, drawKey) : (stats.prepassSkipped++, 0);
 	static_assert(ALPHAGREATEREQUAL == 1, "alpha test function");
-	if(currentDrawInst && shRecordsAlphaRef(rwStateCache.zwrite != 0, alphaFunc))
+	if(currentDrawInst && ctx->encoderColorFormat == COLORFMT_SCENE && shRecordsAlphaRef(rwStateCache.zwrite != 0, alphaFunc))
 		((InstanceData*)currentDrawInst)->castAlphaRef = alphaRef;
 
 	bool matched = keyed && prepassKeys.markUsed(drawKey);

@@ -200,6 +200,20 @@ shAddress(float t, unsigned int mode)
 	return t - SH_FLOOR(t);
 }
 
+enum { SH_INSTANCE_ALPHA = 8, SH_INSTANCE_OPAQUE = 16 };
+
+static inline unsigned int
+shInstanceMask(unsigned int casterMask, bool alphaLevel)
+{
+	return casterMask | (alphaLevel ? SH_INSTANCE_ALPHA : SH_INSTANCE_OPAQUE);
+}
+
+static inline bool
+shAlphaIndexValid(unsigned int base, unsigned int geometry, unsigned int count)
+{
+	return base < count && geometry < count - base;
+}
+
 #ifndef __METAL_VERSION__
 inline uint32_t
 shCapByDistance(const float *dist2, uint32_t n, uint32_t cap, uint32_t *order)

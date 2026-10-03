@@ -201,6 +201,20 @@ const char *shadowh_metal_src =
 "	return t - SH_FLOOR(t);\n"
 "}\n"
 
+"enum { SH_INSTANCE_ALPHA = 8, SH_INSTANCE_OPAQUE = 16 };\n"
+
+"static inline unsigned int\n"
+"shInstanceMask(unsigned int casterMask, bool alphaLevel)\n"
+"{\n"
+"	return casterMask | (alphaLevel ? SH_INSTANCE_ALPHA : SH_INSTANCE_OPAQUE);\n"
+"}\n"
+
+"static inline bool\n"
+"shAlphaIndexValid(unsigned int base, unsigned int geometry, unsigned int count)\n"
+"{\n"
+"	return base < count && geometry < count - base;\n"
+"}\n"
+
 "#ifndef __METAL_VERSION__\n"
 "inline uint32_t\n"
 "shCapByDistance(const float *dist2, uint32_t n, uint32_t cap, uint32_t *order)\n"
