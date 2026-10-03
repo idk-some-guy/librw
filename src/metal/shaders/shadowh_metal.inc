@@ -136,6 +136,20 @@ const char *shadowh_metal_src =
 "	return SH_ABS(prevViewZ - viewZ) > 0.05f*viewZ + 0.1f;\n"
 "}\n"
 
+"static inline bool\n"
+"shSunMoved(SHVec3 a, SHVec3 b)\n"
+"{\n"
+"	SHVec3 u = shNormalize(a), v = shNormalize(b);\n"
+"	return u.x*v.x + u.y*v.y + u.z*v.z < 0.99939083f;\n"
+"}\n"
+
+"static inline bool\n"
+"shHistoryMatches(SHVec3 q, SHVec3 p, SHVec3 n, float prevDistance, float distance)\n"
+"{\n"
+"	float d = (q.x - p.x)*n.x + (q.y - p.y)*n.y + (q.z - p.z)*n.z;\n"
+"	return SH_ABS(d) <= 0.02f + 0.003f*distance || !shDisoccluded(prevDistance, distance);\n"
+"}\n"
+
 "static inline float\n"
 "shLinearDepth(float d, float n, float f)\n"
 "{\n"

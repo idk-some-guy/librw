@@ -336,6 +336,7 @@ struct RenderSettings
 	float32 emitterPeakNits;
 	float32 softness;
 	int32 antiAliasing;
+	int32 shadowQuality;
 };
 
 struct FrameInfo
@@ -374,6 +375,8 @@ struct RayStats
 	float32 scratchMegabytes;
 	uint32 casters, hostCasters, castersCapped, castersWaiting, skinnedCasters, skinnedLevels, skinnedBuilds, rayFrames, castersDropped;
 	float32 skinnedMegabytes, topMegabytes;
+	uint32 frameBuilds, frameRefits;
+	float32 walkMs, shadowMegabytes;
 };
 RayStats getRayStats(void);
 
@@ -402,6 +405,7 @@ struct RelitParams
 	float32 hemiScale;
 	float32 hemiSaturation;
 	float32 sunScale;
+	float32 sunRadius;
 };
 
 void setRelitParams(const RelitParams *p);

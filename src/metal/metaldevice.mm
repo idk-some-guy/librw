@@ -179,7 +179,6 @@ createContext(void)
 
 	metalGlobals.context = ctx;
 	frameInit();
-	rtInit();
 	return 1;
 }
 
@@ -1026,6 +1025,7 @@ startDevice(void)
 		layer.displaySyncEnabled = YES;
 		ctx->layer = layer;
 	}
+	rtInit();
 	return 1;
 }
 

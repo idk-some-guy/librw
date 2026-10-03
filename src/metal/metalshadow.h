@@ -135,6 +135,20 @@ shDisoccluded(float prevViewZ, float viewZ)
 	return SH_ABS(prevViewZ - viewZ) > 0.05f*viewZ + 0.1f;
 }
 
+static inline bool
+shSunMoved(SHVec3 a, SHVec3 b)
+{
+	SHVec3 u = shNormalize(a), v = shNormalize(b);
+	return u.x*v.x + u.y*v.y + u.z*v.z < 0.99939083f;
+}
+
+static inline bool
+shHistoryMatches(SHVec3 q, SHVec3 p, SHVec3 n, float prevDistance, float distance)
+{
+	float d = (q.x - p.x)*n.x + (q.y - p.y)*n.y + (q.z - p.z)*n.z;
+	return SH_ABS(d) <= 0.02f + 0.003f*distance || !shDisoccluded(prevDistance, distance);
+}
+
 static inline float
 shLinearDepth(float d, float n, float f)
 {

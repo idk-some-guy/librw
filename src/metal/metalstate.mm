@@ -174,7 +174,7 @@ static_assert(sizeof(FaceFetchBlock) == 80, "face fetch block size");
 
 static UniformRelit uniformRelit = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0.5f, 0.5f, 0.5f, 1 }, { 0.5f, 0.5f, 0.5f, 1 },
 	{ 0, 0, 0, 1 }, { 1.0f, 0.5f, 0.35f, 1.0f } };
-static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f };
+static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f, 0.02f };
 static const Light *relitSun;
 static std::unordered_set<uint32> relitFailed;
 static bool relitFetch = true;
@@ -436,6 +436,7 @@ beginPrepassState(bool continuous)
 	RawMatrix vp;
 	mul44((float32*)&vp, projBase, uniformScene.view);
 	mul44((float32*)&prepassMats.uploadedViewProj, uniformScene.proj, uniformScene.view);
+	memcpy(&prepassMats.view, uniformScene.view, 64);
 	prepassMats.viewProj = vp;
 	prepassMats.prevViewProj = cut ? vp : lastViewProj;
 	prepassFrameBlock.viewProj = vp;
@@ -589,7 +590,7 @@ static StatsLog statsLog;
 static uint32 statsInterval;
 static void resetStatsLog(void);
 static char prewarmLine[128];
-static char statsLine[1024];
+static char statsLine[2048];
 static char dropLine[256];
 static std::unordered_set<uint32> dropsReported;
 
@@ -1830,6 +1831,7 @@ void
 setRelitParams(const RelitParams *p)
 {
 	relitParams = *p;
+	relitParams.sunRadius = clampRange(p->sunRadius, 0.0f, 0.1f, 0.02f);
 	UniformRelit u = uniformRelit;
 	for(int i = 0; i < 3; i++){
 		u.skyTop[i] = relitNonNegative(p->skyTop[i]);
@@ -1849,6 +1851,18 @@ RelitParams
 getRelitParams(void)
 {
 	return relitParams;
+}
+
+ShadowSunInputs
+shadowSunInputs(void)
+{
+	ShadowSunInputs s;
+	for(int i = 0; i < 3; i++)
+		s.toward[i] = -uniformRelit.sunDir[i];
+	s.present = uniformRelit.sunDir[3];
+	s.scale = uniformRelit.params[3];
+	s.radius = relitParams.sunRadius;
+	return s;
 }
 
 static void refreshRelitSun(void);
@@ -2407,6 +2421,9 @@ flushCache(void)
 	if(prepassPass)
 		return keyed ? flushPrepass(ctx, e, drawKey) : (stats.prepassSkipped++, 0);
 
+	bool matched = keyed && prepassKeys.markUsed(drawKey);
+	bool forced = forceEqualNext && ctx->encoderColorFormat == COLORFMT_SCENE;
+	bool depthEqual = matched || forced;
 	uint32 variant = currentVariant, layout = currentLayout;
 	id<MTLBuffer> stream = nil;
 	bool relitFrag = false;
@@ -2424,7 +2441,7 @@ flushCache(void)
 			else
 				queueNormalStream(currentDrawHeader);
 		}
-		if((variant & VARIANT_RELIT) && frameShadowSource())
+		if((variant & VARIANT_RELIT) && depthEqual && frameShadowSource())
 			variant |= VARIANT_RELITSHADOW;
 	}
 	pd.shader = currentShader->shaderId;
@@ -2463,15 +2480,12 @@ flushCache(void)
 		countDroppedDraw(DROP_NOPIPELINE, currentShader);
 		return 0;
 	}
-	bool depthEqual = keyed && prepassKeys.markUsed(drawKey);
-	if(depthEqual){
+	if(matched){
 		stats.prepassEqual++;
 		prepassEqualThisFrame++;
 	}
-	if(forceEqualNext && ctx->encoderColorFormat == COLORFMT_SCENE){
+	if(forced)
 		forceEqualNext = false;
-		depthEqual = true;
-	}
 	bool faced = false;
 	if(relitFrag)
 		faced = bindFaceFetch(e, (const float32*)&uniformObject.world, relitFetch, relitHostTwoSided);

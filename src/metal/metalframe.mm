@@ -10,6 +10,7 @@
 #include "metalaa.h"
 #include "metalprepass.h"
 #include "metaltemporal.h"
+#include "metalshadow.h"
 #include "metalraytrace.h"
 #include <algorithm>
 #include <string>
@@ -70,7 +71,8 @@ struct TaaFrame
 
 struct FrameState
 {
-	RenderSettings settings = { TIER_CLASSIC, UPSCALE_NATIVE, 0, HDROUTPUT_AUTO, EMITTERPEAK_DEFAULT, SOFTNESS_DEFAULT, ANTIALIAS_OFF };
+	RenderSettings settings = { TIER_CLASSIC, UPSCALE_NATIVE, 0, HDROUTPUT_AUTO, EMITTERPEAK_DEFAULT, SOFTNESS_DEFAULT, ANTIALIAS_OFF,
+		SHADOWQUALITY_MEDIUM };
 	int32 activeTier = TIER_CLASSIC;
 	int32 tierReason = TIERREASON_NONE;
 	bool capsOverride = false;
@@ -162,11 +164,15 @@ struct FrameState
 	bool taaFail = false, taaGaveUp = false, taaReported = false;
 	uint32 taaAllocs = 0, taaLogs = 0, taaRequests = 0;
 	id<MTLTexture> white = nil, testShadow = nil;
-	char tail[512] = "";
-	char lastTail[512] = "";
+	id<MTLTexture> shadow = nil, shadowShown = nil;
+	bool shadowShownReal = false;
+	char tail[1024] = "";
+	char lastTail[1024] = "";
 };
 
 static FrameState frame;
+
+static bool realShadowSource(void);
 
 static TierCaps
 deviceCaps(void)
@@ -208,6 +214,8 @@ clampSettings(const RenderSettings *s)
 	n.softness = clampRange(n.softness, SOFTNESS_MIN, SOFTNESS_MAX, SOFTNESS_DEFAULT);
 	if(n.antiAliasing != ANTIALIAS_FXAA && n.antiAliasing != ANTIALIAS_TAA)
 		n.antiAliasing = ANTIALIAS_OFF;
+	if(n.shadowQuality < SHADOWQUALITY_OFF || n.shadowQuality >= NUMSHADOWQUALITIES)
+		n.shadowQuality = SHADOWQUALITY_MEDIUM;
 	return n;
 }
 
@@ -216,6 +224,7 @@ applySettings(const RenderSettings *s)
 {
 	RenderSettings n = clampSettings(s);
 	int32 reason, active;
+	bool sourceBefore = frameShadowSource(), realBefore = realShadowSource();
 
 	active = resolveTier(s->tier, getSupportedTier(), &reason);
 	if(reason != TIERREASON_NONE && (n.tier != frame.settings.tier || reason != frame.tierReason))
@@ -236,6 +245,10 @@ applySettings(const RenderSettings *s)
 	frame.outputDirty = true;
 	if(changed)
 		frameTierChanged();
+	if(!sourceBefore && frameShadowSource())
+		prewarmShadowTwins();
+	if(realBefore && !realShadowSource())
+		rtDropShadowTargets();
 }
 
 void
@@ -330,12 +343,20 @@ const char*
 frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
+	RayStats r = getRayStats();
+	char pass[32] = "-";
+	if(r.passMs >= 0.0f)
+		snprintf(pass, sizeof(pass), "%.2fms", r.passMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u",
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u"
+		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u build %u refit %u walk %.2fms shadow %s shadowmem %.0fMB",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
-		prepassEqualLastFrame(), getStateStats().prepassUnkeyed);
+		prepassEqualLastFrame(), getStateStats().prepassUnkeyed,
+		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
+		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, r.frameBuilds, r.frameRefits, r.walkMs, pass,
+		r.shadowMegabytes);
 	return frame.tail;
 }
 
@@ -554,6 +575,8 @@ static void
 dropSceneTargets(void)
 {
 	frame.dropping = true;
+	frame.shadow = frame.shadowShown = nil;
+	frame.shadowShownReal = false;
 	dropPrepassTargets();
 	finishPrepassFrame(false);
 	frame.prepassOpen = false;
@@ -1208,6 +1231,7 @@ beginScene(Camera *cam)
 		frame.prepassOpen = false;
 		frame.prepassDone = false;
 		frame.rayWorkDone = false;
+		frame.shadow = nil;
 		frame.prepassPasses = 0;
 		frame.prepassDrawsLast = 0;
 		frame.prevPrepassValid = frame.prepassValid && frame.prepassValidShow + 1 == frame.shows;
@@ -1236,6 +1260,8 @@ endScene(const GradeParams *params)
 	@autoreleasepool {
 		flushPasses();
 		finishPrepassFrame(true);
+		frame.shadowShown = frameShadowTexture();
+		frame.shadowShownReal = frame.testShadow == nil && frame.shadow != nil;
 		encodeGrade(params);
 		if(frame.internalWidth > 0)
 			snprintf(frame.lastTail, sizeof(frame.lastTail), "%s", frameStatsTail());
@@ -1309,13 +1335,19 @@ frameRelitActive(void)
 id<MTLTexture>
 frameShadowTexture(void)
 {
-	return frame.testShadow ? frame.testShadow : frame.white;
+	return frame.testShadow ? frame.testShadow : frame.shadow ? frame.shadow : frame.white;
+}
+
+static bool
+realShadowSource(void)
+{
+	return shSourceOn(frame.settings.shadowQuality, rtShadowsSupported(), frame.activeTier == TIER_MODERN);
 }
 
 bool
 frameShadowSource(void)
 {
-	return frame.testShadow != nil;
+	return frame.testShadow != nil || realShadowSource();
 }
 
 void
@@ -1917,7 +1949,28 @@ frameRayWork(void)
 	if(frame.rayWorkDone || frame.dropping || ctx == nil || ctx->encoder != nil || !rtFrameWorkEnabled())
 		return;
 	frame.rayWorkDone = true;
-	rtEncodeFrame(frameCommandBuffer(), true);
+	ShadowSunInputs sun = shadowSunInputs();
+	int32 q = frame.settings.shadowQuality;
+	bool casters = shPassRuns(q, rtShadowsSupported(), frame.activeTier == TIER_MODERN, true, sun.toward[2], sun.scale,
+		sun.present);
+	rtEncodeFrame(frameCommandBuffer(), casters);
+	if(!casters || !frame.prepassValid)
+		return;
+	const PrepassMatrices &m = prepassMatrices();
+	ShadowInputs in;
+	in.depth = getRasterTexture(frame.sceneDepth);
+	in.normals = frame.prepassNormal;
+	in.motion = frame.prepassMotion;
+	memcpy(&in.viewProj, &m.uploadedViewProj, 64);
+	memcpy(&in.view, &m.view, 64);
+	in.width = (uint32)frame.internalWidth;
+	in.height = (uint32)frame.internalHeight;
+	in.samples = frame.samples;
+	in.quality = q;
+	memcpy(in.toSun, sun.toward, sizeof(in.toSun));
+	in.radius = sun.radius;
+	in.history = frame.prevPrepassValid;
+	frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
 }
 
 void
@@ -2010,6 +2063,20 @@ readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float
 	motion[0] = m[0];
 	motion[1] = m[1];
 	return readResolvedDepth(frame.sceneDepth, x, y, depth);
+}
+
+bool32
+readShadowForTest(int32 x, int32 y, float32 *value, float32 *length)
+{
+	float32 px[4];
+	if(frame.shadowShown == nil)
+		return 0;
+	bool32 ok = frame.shadowShownReal ? readHalfPixel(frame.shadowShown, x, y, px) : readHalfPixel(frame.shadowShown, 0, 0, px);
+	if(!ok)
+		return 0;
+	*value = px[0];
+	*length = frame.shadowShownReal ? px[1] : 0.0f;
+	return 1;
 }
 
 void

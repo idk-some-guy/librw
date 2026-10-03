@@ -135,8 +135,17 @@ struct PrepassMatrices
 	RawMatrix viewProj;
 	RawMatrix prevViewProj;
 	RawMatrix uploadedViewProj;
+	RawMatrix view;
 };
 const PrepassMatrices &prepassMatrices(void);
+struct ShadowSunInputs
+{
+	float32 toward[3];
+	float32 scale;
+	float32 present;
+	float32 radius;
+};
+ShadowSunInputs shadowSunInputs(void);
 uint32 endPrepassState(void);
 uint32 prepassDrawsSoFar(void);
 uint32 prepassEqualLastFrame(void);

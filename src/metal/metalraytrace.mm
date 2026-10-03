@@ -13,9 +13,13 @@
 #include "metalshadow.h"
 #include "metalraytrace.h"
 #include "shaders/raytrace_metal.inc"
+#include "shaders/shadowh_metal.inc"
+#include "shaders/shadow_metal.inc"
 
 namespace rw {
 namespace metal {
+
+extern const char *prepassh_metal_src;
 
 enum { RT_HEAP_SIZE = 64<<20, RT_EVICT_FRAMES = 120, RT_CUT_FACTOR = 8, RT_BUILD_TRIANGLES = 50000 };
 static const uint64 RT_BUDGET = 256ull<<20;
@@ -164,6 +168,100 @@ static struct
 	std::vector<id<MTLBuffer>> deferred;
 } rf;
 
+static const float32 SH_RAY_DISTANCE = 300.0f;
+
+struct ShadowRayParamsHost
+{
+	simd_float4x4 invViewProj;
+	simd_float4 sun, eye;
+	simd_uint2 size, depthSize;
+	uint32 frame, raysPerPixel, halfRes, pad;
+};
+
+struct ShadowAccumParamsHost
+{
+	simd_float4x4 invViewProj, prevInvViewProj, viewToWorld;
+	simd_float4 eye, prevEye;
+	simd_uint2 size, rawSize;
+	uint32 halfRes, valid;
+	float32 maxHistory, pad;
+};
+
+static_assert(sizeof(ShadowRayParamsHost) == 128, "shadow ray params");
+static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
+
+static struct
+{
+	id<MTLComputePipelineState> rays, accumulate, clear;
+	id<MTLTexture> raw, history[2];
+	uint32 index, frame, width, height, samples;
+	int32 quality;
+	bool valid, fresh, ran, reported;
+	uint64 bytes;
+	simd_float4x4 prevInvViewProj;
+	simd_float3 prevEye, prevSun;
+	id<MTLCounterSampleBuffer> timing[MAXFRAMESINFLIGHT];
+	uint32 timingSlot;
+	std::atomic<uint64> ticks;
+	MTLTimestamp cpu0, gpu0;
+	std::chrono::steady_clock::time_point wall0;
+} sh;
+
+static uint64 tickSpan(id<MTLCounterSampleBuffer> sb, uint32 first, uint32 last);
+
+static id<MTLCounterSet>
+timestampCounters(id<MTLDevice> dev)
+{
+	if(![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+		return nil;
+	for(id<MTLCounterSet> s in dev.counterSets)
+		if([s.name isEqualToString:MTLCommonCounterSetTimestamp])
+			return s;
+	return nil;
+}
+
+static id<MTLCounterSampleBuffer>
+twoSampleBuffer(id<MTLDevice> dev, id<MTLCounterSet> timestamps)
+{
+	if(timestamps == nil)
+		return nil;
+	MTLCounterSampleBufferDescriptor *sd = [MTLCounterSampleBufferDescriptor new];
+	sd.counterSet = timestamps;
+	sd.storageMode = MTLStorageModeShared;
+	sd.sampleCount = 2;
+	return [dev newCounterSampleBufferWithDescriptor:sd error:nil];
+}
+
+static void
+initShadows(id<MTLDevice> dev)
+{
+	NSMutableString *src = [NSMutableString string];
+	const char *parts[] = { raytraceHead, prepassh_metal_src, shadowh_metal_src, shadow_metal_src };
+	for(const char *p : parts)
+		[src appendString:[NSString stringWithUTF8String:p]];
+	MTLCompileOptions *o = [MTLCompileOptions new];
+	if(@available(macOS 15.0, *))
+		o.mathMode = MTLMathModeRelaxed;
+	else
+		o.fastMathEnabled = NO;
+	NSError *err = nil;
+	id<MTLLibrary> lib = [dev newLibraryWithSource:src options:o error:&err];
+	sh.rays = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowRays"] error:&err] : nil;
+	sh.accumulate = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowAccumulate"] error:&err] : nil;
+	sh.clear = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowClear"] error:&err] : nil;
+	if(sh.rays == nil || sh.accumulate == nil || sh.clear == nil){
+		sh.rays = sh.accumulate = sh.clear = nil;
+		fprintf(stderr, "rw::metal: the shadow kernels failed to build; ray-traced shadows are off: %s\n",
+			err ? err.localizedDescription.UTF8String : "");
+	}
+	id<MTLCounterSet> timestamps = timestampCounters(dev);
+	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
+		sh.timing[i] = twoSampleBuffer(dev, timestamps);
+	sh.timingSlot = 0;
+	[dev sampleTimestamps:&sh.cpu0 gpuTimestamp:&sh.gpu0];
+	sh.wall0 = std::chrono::steady_clock::now();
+}
+
 static void
 retireAccel(id<MTLAccelerationStructure> a, uint64 bytes)
 {
@@ -197,6 +295,8 @@ rtInit(void)
 			fprintf(stderr, "rw::metal: the shadow caster kernels failed to build; skinned casters are left out: %s\n",
 				err ? err.localizedDescription.UTF8String : "");
 	}
+	if(rt.available && sh.rays == nil)
+		initShadows(ctx->device);
 	return rt.available;
 }
 
@@ -230,6 +330,13 @@ rtTerm(void)
 	rf.timing = nil;
 	rf.deferred.clear();
 	rt.stats.instances = rt.stats.skinnedLevels = 0;
+	rtDropShadowTargets();
+	sh.rays = sh.accumulate = sh.clear = nil;
+	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
+		sh.timing[i] = nil;
+	sh.ticks.store(0);
+	sh.valid = sh.ran = false;
+	sh.frame = 0;
 }
 
 bool
@@ -634,6 +741,10 @@ void
 rtSceneBegin(void)
 {
 	rf.current = nil;
+	if(!sh.ran)
+		sh.valid = false;
+	sh.ran = false;
+	rt.stats.raysPerFrame = 0;
 }
 
 bool
@@ -1009,6 +1120,8 @@ rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters)
 	rf.current = rf.last = nil;
 	if(!rt.available)
 		return;
+	uint32 b0 = rt.stats.builds + rt.stats.skinnedBuilds, r0 = rt.stats.refits;
+	rt.stats.instances = 0;
 	rt.stats.rayFrames++;
 	rf.timed = 0;
 	auto t0 = std::chrono::steady_clock::now();
@@ -1030,6 +1143,8 @@ rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters)
 	rf.byKey.clear();
 	rf.bones.clear();
 	rf.walkMs = (float32)std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	rt.stats.frameBuilds = rt.stats.builds + rt.stats.skinnedBuilds - b0;
+	rt.stats.frameRefits = rt.stats.refits - r0;
 }
 
 id<MTLAccelerationStructure>
@@ -1052,6 +1167,143 @@ rtUseHeapsForBuild(id<MTLAccelerationStructureCommandEncoder> e)
 		[e useHeap:h];
 }
 
+bool
+rtShadowsSupported(void)
+{
+	return rt.available && sh.rays && sh.accumulate && sh.clear;
+}
+
+void
+rtDropShadowTargets(void)
+{
+	sh.raw = nil;
+	sh.history[0] = sh.history[1] = nil;
+	sh.width = sh.height = 0;
+	sh.bytes = 0;
+	sh.valid = false;
+}
+
+static bool
+ensureShadowTargets(const ShadowInputs &in, const SHQuality &q)
+{
+	uint32 rw = q.halfRes ? (in.width + 1)/2 : in.width, rh = q.halfRes ? (in.height + 1)/2 : in.height;
+	if(sh.raw && sh.width == in.width && sh.height == in.height && sh.raw.width == rw && sh.raw.height == rh){
+		if(sh.quality != in.quality || sh.samples != in.samples)
+			sh.valid = false;
+		sh.quality = in.quality;
+		sh.samples = in.samples;
+		return true;
+	}
+	rtDropShadowTargets();
+	id<MTLDevice> dev = getContext()->device;
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:rw height:rh
+		mipmapped:NO];
+	d.storageMode = MTLStorageModePrivate;
+	d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	sh.raw = [dev newTextureWithDescriptor:d];
+	d.pixelFormat = MTLPixelFormatRGBA16Float;
+	d.width = in.width;
+	d.height = in.height;
+	sh.history[0] = [dev newTextureWithDescriptor:d];
+	sh.history[1] = [dev newTextureWithDescriptor:d];
+	if(sh.raw == nil || sh.history[0] == nil || sh.history[1] == nil){
+		rtDropShadowTargets();
+		if(!sh.reported){
+			sh.reported = true;
+			fprintf(stderr, "rw::metal: shadow targets for %ux%u could not be created; the shadow factor is 1\n", in.width, in.height);
+		}
+		return false;
+	}
+	sh.width = in.width;
+	sh.height = in.height;
+	sh.quality = in.quality;
+	sh.samples = in.samples;
+	sh.index = 0;
+	sh.fresh = true;
+	sh.valid = false;
+	sh.bytes = (uint64)rw*rh*2 + 2ull*in.width*in.height*8;
+	return true;
+}
+
+static id<MTLComputeCommandEncoder>
+shadowEncoder(id<MTLCommandBuffer> cb)
+{
+	id<MTLCounterSampleBuffer> sb = sh.timing[sh.timingSlot];
+	sh.timingSlot = (sh.timingSlot + 1) % MAXFRAMESINFLIGHT;
+	if(sb == nil)
+		return [cb computeCommandEncoder];
+	MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
+	pd.sampleBufferAttachments[0].sampleBuffer = sb;
+	pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+	pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>){
+		uint64 t = tickSpan(sb, 0, 1);
+		if(t)
+			sh.ticks.store(t);
+	}];
+	return [cb computeCommandEncoderWithDescriptor:pd];
+}
+
+id<MTLTexture>
+rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
+{
+	SHQuality q = shQuality(in.quality);
+	id<MTLAccelerationStructure> tlas = rf.current;
+	rt.stats.raysPerFrame = 0;
+	if(tlas == nil || !rtShadowsSupported() || q.raysPerPixel == 0 || in.depth == nil || in.normals == nil || in.motion == nil ||
+	   !ensureShadowTargets(in, q)){
+		sh.valid = false;
+		return nil;
+	}
+	simd_float4x4 inv = simd_inverse(in.viewProj), toWorld = simd_inverse(in.view);
+	simd_float3 eye = toWorld.columns[3].xyz;
+	simd_float3 sun = simd_normalize(simd_make_float3(in.toSun[0], in.toSun[1], in.toSun[2]));
+	SHVec3 s0 = { sh.prevSun.x, sh.prevSun.y, sh.prevSun.z }, s1 = { sun.x, sun.y, sun.z };
+	bool valid = sh.valid && in.history && !rt.cutFrame && !shSunMoved(s0, s1);
+	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height;
+	ShadowRayParamsHost rp = { inv, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
+		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), sh.frame++, q.raysPerPixel, q.halfRes, 0 };
+	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
+		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
+	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
+	id<MTLComputeCommandEncoder> e = shadowEncoder(cb);
+	if(sh.fresh){
+		[e setComputePipelineState:sh.clear];
+		[e setTexture:prev atIndex:0];
+		[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+		[e setTexture:next atIndex:0];
+		[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+		[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+		sh.fresh = false;
+	}
+	[e setComputePipelineState:sh.rays];
+	rtUseHeaps(e);
+	[e setAccelerationStructure:tlas atBufferIndex:0];
+	[e setBytes:&rp length:sizeof(rp) atIndex:1];
+	[e setTexture:in.depth atIndex:0];
+	[e setTexture:sh.raw atIndex:1];
+	[e dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+	[e setComputePipelineState:sh.accumulate];
+	[e setTexture:sh.raw atIndex:0];
+	[e setTexture:prev atIndex:1];
+	[e setTexture:in.motion atIndex:2];
+	[e setTexture:in.normals atIndex:3];
+	[e setTexture:in.depth atIndex:4];
+	[e setTexture:next atIndex:5];
+	[e setBytes:&ap length:sizeof(ap) atIndex:0];
+	[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e endEncoding];
+	sh.index ^= 1;
+	sh.valid = true;
+	sh.ran = true;
+	sh.prevInvViewProj = inv;
+	sh.prevEye = eye;
+	sh.prevSun = sun;
+	rt.stats.raysPerFrame = rw*rh*q.raysPerPixel;
+	return next;
+}
+
 RayStats
 getRayStats(void)
 {
@@ -1061,6 +1313,17 @@ getRayStats(void)
 	s.topMegabytes = (float32)(rf.topBytes/1048576.0);
 	s.skinnedLevels = (uint32)rf.skinned.size();
 	s.scratchMegabytes = rt.scratch ? (float32)(rt.scratch.length/1048576.0) : 0.0f;
+	s.walkMs = rf.walkMs;
+	s.shadowMegabytes = (float32)(sh.bytes/1048576.0);
+	s.passMs = -1.0f;
+	MetalContext *ctx = getContext();
+	if(sh.timing[0] != nil && ctx != nil && s.raysPerFrame != 0){
+		MTLTimestamp cpu1, gpu1;
+		[ctx->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+		double wall = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - sh.wall0).count();
+		double nsPerTick = gpu1 > sh.gpu0 ? wall/(double)(gpu1 - sh.gpu0) : 1.0;
+		s.passMs = (float32)(sh.ticks.load()*nsPerTick/1e6);
+	}
 	return s;
 }
 
@@ -1570,6 +1833,109 @@ rtFrameTimingForTest(RtFrameTiming *t)
 	t->walkMs = rf.walkMs;
 	t->instances = rt.stats.instances;
 	t->skinned = rt.stats.skinnedCasters;
+	return 1;
+}
+
+bool32
+rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 eye[3], const float32 target[3],
+	const float32 toSun[3], float32 *ms, float32 *ground)
+{
+	MetalContext *ctx = getContext();
+	SHQuality q = shQuality(quality);
+	if(ctx == nil || rf.last == nil || !rtShadowsSupported() || q.raysPerPixel == 0 || width == 0 || height == 0)
+		return 0;
+	id<MTLDevice> dev = ctx->device;
+	id<MTLCounterSampleBuffer> sb = twoSampleBuffer(dev, timestampCounters(dev));
+	if(sb == nil)
+		return 0;
+	@autoreleasepool {
+		simd_float3 e = simd_make_float3(eye[0], eye[1], eye[2]), t = simd_make_float3(target[0], target[1], target[2]);
+		simd_float3 f = simd_normalize(t - e);
+		simd_float3 r = simd_normalize(simd_cross(f, simd_make_float3(0.0f, 0.0f, 1.0f)));
+		simd_float3 u = simd_cross(r, f);
+		simd_float4x4 view;
+		view.columns[0] = simd_make_float4(r.x, u.x, -f.x, 0.0f);
+		view.columns[1] = simd_make_float4(r.y, u.y, -f.y, 0.0f);
+		view.columns[2] = simd_make_float4(r.z, u.z, -f.z, 0.0f);
+		view.columns[3] = simd_make_float4(-simd_dot(r, e), -simd_dot(u, e), simd_dot(f, e), 1.0f);
+		float32 n = 1.0f, fa = 3000.0f, fy = 1.0f/tanf(30.0f*3.14159265f/180.0f), aspect = (float32)width/height;
+		simd_float4x4 proj = simd_float4x4{};
+		proj.columns[0].x = fy/aspect;
+		proj.columns[1].y = fy;
+		proj.columns[2].z = -(fa + n)/(fa - n);
+		proj.columns[2].w = -1.0f;
+		proj.columns[3].z = -2.0f*fa*n/(fa - n);
+		simd_float4x4 vp = simd_mul(proj, view), inv = simd_inverse(vp);
+		id<MTLBuffer> depthBuf = [dev newBufferWithLength:(NSUInteger)width*height*4 options:MTLResourceStorageModeShared];
+		float32 *dp = (float32*)depthBuf.contents;
+		uint64 hits = 0;
+		for(uint32 y = 0; y < height; y++)
+			for(uint32 x = 0; x < width; x++){
+				float32 nx = (x + 0.5f)/width*2.0f - 1.0f, ny = 1.0f - (y + 0.5f)/height*2.0f;
+				simd_float4 a4 = simd_mul(inv, simd_make_float4(nx, ny, -1.0f, 1.0f)), b4 = simd_mul(inv, simd_make_float4(nx, ny, 1.0f, 1.0f));
+				simd_float3 a = a4.xyz/a4.w, b = b4.xyz/b4.w, d = b - a;
+				float32 depth = 1.0f;
+				if(d.z < 0.0f){
+					float32 s = -a.z/d.z;
+					if(s >= 0.0f && s <= 1.0f){
+						simd_float4 c = simd_mul(vp, simd_make_float4(a + d*s, 1.0f));
+						depth = 0.5f*(c.z/c.w + 1.0f);
+						hits++;
+					}
+				}
+				dp[(size_t)y*width + x] = depth;
+			}
+		MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:width
+			height:height mipmapped:NO];
+		td.storageMode = MTLStorageModePrivate;
+		td.usage = MTLTextureUsageShaderRead;
+		id<MTLTexture> depthTex = [dev newTextureWithDescriptor:td];
+		uint32 rw = q.halfRes ? (width + 1)/2 : width, rh = q.halfRes ? (height + 1)/2 : height;
+		MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float width:rw height:rh
+			mipmapped:NO];
+		rd.storageMode = MTLStorageModePrivate;
+		rd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+		id<MTLTexture> raw = [dev newTextureWithDescriptor:rd];
+		if(depthTex == nil || raw == nil)
+			return 0;
+		id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromBuffer:depthBuf sourceOffset:0 sourceBytesPerRow:width*4 sourceBytesPerImage:(NSUInteger)width*height*4
+			sourceSize:MTLSizeMake(width, height, 1) toTexture:depthTex destinationSlice:0 destinationLevel:0
+			destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[blit endEncoding];
+		[cb commit];
+		[cb waitUntilCompleted];
+		simd_float3 sun = simd_normalize(simd_make_float3(toSun[0], toSun[1], toSun[2]));
+		std::vector<float32> times;
+		for(uint32 k = 0; k < 5; k++){
+			ShadowRayParamsHost rp = { inv, simd_make_float4(sun, 0.02f), simd_make_float4(e, SH_RAY_DISTANCE),
+				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, 0 };
+			id<MTLCommandBuffer> tcb = [ctx->queue commandBuffer];
+			MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
+			pd.sampleBufferAttachments[0].sampleBuffer = sb;
+			pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+			pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+			id<MTLComputeCommandEncoder> enc = [tcb computeCommandEncoderWithDescriptor:pd];
+			[enc setComputePipelineState:sh.rays];
+			rtUseHeaps(enc);
+			[enc setAccelerationStructure:rf.last atBufferIndex:0];
+			[enc setBytes:&rp length:sizeof(rp) atIndex:1];
+			[enc setTexture:depthTex atIndex:0];
+			[enc setTexture:raw atIndex:1];
+			[enc dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+			[enc endEncoding];
+			[tcb commit];
+			[tcb waitUntilCompleted];
+			MTLTimestamp cpu1, gpu1;
+			[dev sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+			double wall = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - sh.wall0).count();
+			double nsPerTick = gpu1 > sh.gpu0 ? wall/(double)(gpu1 - sh.gpu0) : 1.0;
+			times.push_back((float32)(tickSpan(sb, 0, 1)*nsPerTick/1e6));
+		}
+		*ms = median(times);
+		*ground = (float32)((double)hits/((double)width*height));
+	}
 	return 1;
 }
 

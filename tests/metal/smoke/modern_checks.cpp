@@ -4829,11 +4829,137 @@ CheckRelitShadowConstant(void)
 	uint32 relit1 = a1.relitDraws - a0.relitDraws, shadow1 = a1.relitShadowDraws - a0.relitShadowDraws;
 	uint32 relit2 = a2.relitDraws - a1.relitDraws, shadow2 = a2.relitShadowDraws - a1.relitShadowDraws;
 	uint32 late = a2.pipelinesLate - a1.pipelinesLate;
-	bool ok = relit1 > 0 && shadow1 == 0 && relit2 > 0 && shadow2 == relit2 && late == 0 && tier1 == metal::TIER_MODERN &&
+	bool ok = relit1 > 0 && shadow1 == 0 && relit2 > 0 && shadow2 + 1 == relit2 && late == 0 && tier1 == metal::TIER_MODERN &&
 		tier2 == metal::TIER_MODERN;
 	if(!ok)
 		Detail("  without a source: relit %u shadow %u; with one: relit %u shadow %u; late %u; tiers %d %d\n", relit1, shadow1,
 			relit2, shadow2, late, tier1, tier2);
+	return Report(ok, name);
+}
+
+static bool
+CheckShadowOnlyEqualDraws(void)
+{
+	const char *name = "only draws that test depth equal against the prepass read the shadow factor; the others take a factor of 1";
+	Sun sun;
+	MakeSun(&sun, 0.1f);
+	Material *mat = TestMaterial();
+	const uint32 flags = Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT;
+	Geometry *ga = TiltedQuad(flags, 2.5f, 12.0f, FacingTilt(&sun), STONE, mat);
+	Geometry *gb = TiltedQuad(flags, -2.5f, 12.0f, FacingTilt(&sun), STONE, mat);
+	Atomic *a = MakeAtomic(ga), *b = MakeAtomic(gb);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	RelitSet(0.5f, 1.0f, 1.0f);
+	RelitSky(0.3f, 0.3f, 0.3f, 0.1f, 0.1f, 0.1f);
+	metal::setShadowFactorForTest(0.0f);
+	float A[4] = { -1, -1, -1, -1 }, B[4] = { -1, -1, -1, -1 };
+	metal::StateStats s0 = metal::getStateStats();
+	metal::beginScene(cam);
+	metal::setRelitTwoSided(0);
+	WorldBegin(SKY);
+	SetRenderState(CULLMODE, CULLBACK);
+	if(metal::beginPrepass()){
+		a->render();
+		metal::endPrepass();
+	}
+	SetRenderState(CULLMODE, CULLBACK);
+	a->render();
+	b->render();
+	bool read = metal::readScenePixel(PX(2.5f, 12.0f), PY(0.0f, 12.0f), A) && metal::readScenePixel(PX(-2.5f, 12.0f), PY(0.0f, 12.0f), B);
+	metal::endScene(nil);
+	WorldEnd();
+	metal::StateStats s1 = metal::getStateStats();
+	V3d n = TiltNormal(FacingTilt(&sun));
+	float wantA = Expect(0, 140/255.0f, 0.1f, 0.5f, n, &sun, false, 0.0f);
+	float wantB = Expect(0, 140/255.0f, 0.1f, 0.5f, n, &sun, false, 1.0f);
+	RelitReset();
+	TiersOff();
+	DestroyAtomic(a);
+	DestroyAtomic(b);
+	ga->destroy();
+	gb->destroy();
+	mat->destroy();
+	FreeSun(&sun);
+	uint32 relit = s1.relitDraws - s0.relitDraws, shadow = s1.relitShadowDraws - s0.relitShadowDraws;
+	bool ok = read && relit == 2 && shadow == 1 && fabsf(A[0] - wantA) < 2.0f/255.0f && fabsf(B[0] - wantB) < 2.0f/255.0f &&
+		wantB - wantA > 0.05f;
+	if(!ok)
+		Detail("  relit %u shadow %u; prepassed red %.4f (want %.4f), forward only red %.4f (want %.4f); read %d\n", relit, shadow,
+			A[0], wantA, B[0], wantB, read);
+	return Report(ok, name);
+}
+
+static bool
+CheckSunRadiusClamp(void)
+{
+	const char *name = "the sun radius is clamped to 0..0.1 radians and a NaN falls back to 0.02";
+	metal::RelitParams saved = metal::getRelitParams();
+	const float in[4] = { NAN, 1.0f, -1.0f, 0.01f }, want[4] = { 0.02f, 0.1f, 0.0f, 0.01f };
+	float got[4];
+	bool ok = true;
+	for(int i = 0; i < 4; i++){
+		metal::RelitParams p = saved;
+		p.sunRadius = in[i];
+		metal::setRelitParams(&p);
+		got[i] = metal::getRelitParams().sunRadius;
+		ok = ok && got[i] == want[i];
+	}
+	metal::setRelitParams(&saved);
+	if(!ok)
+		Detail("  NaN %.4f, 1 %.4f, -1 %.4f, 0.01 %.4f\n", got[0], got[1], got[2], got[3]);
+	return Report(ok, name);
+}
+
+static void
+SetShadowQuality(int32 quality)
+{
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.shadowQuality = quality;
+	metal::setRenderSettings(&s);
+}
+
+static bool
+CheckShadowTwinsPrewarmed(bool (*restart)(uint32 samples), Camera *(*camera)(void))
+{
+	const char *name = "with ShadowQuality turned on after the modern switch, or on at an engine start on the modern tier, a relit frame at weight 0.5 builds no pipeline late";
+	uint32 late[2], shadow[2];
+	int32 tier[2];
+	RelitScene s;
+	WorldOpen(cam);
+	MakeRelitScene(&s);
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
+	RelitSet(0.5f, 0.5f, 1.0f);
+	metal::StateStats a0 = metal::getStateStats();
+	tier[0] = RelitSceneFrame(&s, CULLNONE);
+	metal::StateStats a1 = metal::getStateStats();
+	late[0] = a1.pipelinesLate - a0.pipelinesLate;
+	shadow[0] = a1.relitShadowDraws - a0.relitShadowDraws;
+	FreeRelitScene(&s);
+	WorldClose();
+	bool restarted = restart(1);
+	cam = camera();
+	WorldOpen(cam);
+	MakeRelitScene(&s);
+	RelitSet(0.5f, 0.5f, 1.0f);
+	a0 = metal::getStateStats();
+	tier[1] = RelitSceneFrame(&s, CULLNONE);
+	a1 = metal::getStateStats();
+	late[1] = a1.pipelinesLate - a0.pipelinesLate;
+	shadow[1] = a1.relitShadowDraws - a0.relitShadowDraws;
+	RelitReset();
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	TiersOff();
+	FreeRelitScene(&s);
+	WorldClose();
+	restarted = restart(4) && restarted;
+	cam = camera();
+	bool ok = restarted && late[0] == 0 && late[1] == 0 && shadow[0] > 0 && shadow[1] > 0 && tier[0] == metal::TIER_MODERN &&
+		tier[1] == metal::TIER_MODERN;
+	if(!ok)
+		Detail("  turned on after the switch: late %u shadow draws %u tier %d; on at the start: late %u shadow draws %u tier %d; restarts %d\n",
+			late[0], shadow[0], tier[0], late[1], shadow[1], tier[1], restarted);
 	return Report(ok, name);
 }
 
@@ -5157,6 +5283,8 @@ RunModernChecks(Camera *camera)
 	CheckRelitOptOutScoped();
 	CheckRelitTwoSidedHost();
 	CheckRelitShadowConstant();
+	CheckShadowOnlyEqualDraws();
+	CheckSunRadiusClamp();
 	CheckRelitFaceSkip();
 	CheckRelitFetchTransform();
 	CheckRelitNoFetchFallback();
@@ -5278,6 +5406,7 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	if(!reactive)
 		Detail("  no reactive pass after the restart, before any frame\n");
 	Report(reactive, "an engine start builds the reactive mask pipelines before any temporal frame needs them");
+	CheckShadowTwinsPrewarmed(restart, camera);
 	WorldOpen(cam);
 	PrepassIdentity(name);
 	CheckPrepassSampleZero();

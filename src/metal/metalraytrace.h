@@ -3,6 +3,10 @@
 
 #ifdef RW_METAL
 
+#ifdef __OBJC__
+#include <simd/simd.h>
+#endif
+
 namespace rw {
 namespace metal {
 
@@ -23,8 +27,22 @@ void rtSceneBegin(void);
 bool rtFrameWorkEnabled(void);
 void rtAddDrawCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const RawMatrix *bones);
 bool rtAddHostCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const float32 sphere[4], uint32 mask);
+bool rtShadowsSupported(void);
+void rtDropShadowTargets(void);
 
 #ifdef __OBJC__
+struct ShadowInputs
+{
+	id<MTLTexture> depth, normals, motion;
+	simd_float4x4 viewProj, view;
+	uint32 width, height, samples;
+	int32 quality;
+	float32 toSun[3];
+	float32 radius;
+	bool history;
+};
+
+id<MTLTexture> rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in);
 void rtEncodeBuilds(id<MTLCommandBuffer> cb);
 id<MTLAccelerationStructure> rtBottomLevel(const InstanceDataHeader *h);
 void rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters);

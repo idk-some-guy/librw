@@ -1532,10 +1532,10 @@ CheckSettingsDefaults(void)
 	metal::RenderSettings s = metal::getRenderSettings();
 	bool ok = s.tier == metal::TIER_CLASSIC && s.upscale == metal::UPSCALE_NATIVE && !s.dynamicResolution &&
 		s.hdrOutput == metal::HDROUTPUT_AUTO && s.emitterPeakNits == 1000.0f && s.softness == 1.0f &&
-		s.antiAliasing == metal::ANTIALIAS_OFF;
+		s.antiAliasing == metal::ANTIALIAS_OFF && s.shadowQuality == metal::SHADOWQUALITY_MEDIUM;
 	if(!ok)
-		Detail("  defaults tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d\n", s.tier, s.upscale,
-			s.dynamicResolution, s.hdrOutput, s.emitterPeakNits, s.softness, s.antiAliasing);
+		Detail("  defaults tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d shadows %d\n", s.tier, s.upscale,
+			s.dynamicResolution, s.hdrOutput, s.emitterPeakNits, s.softness, s.antiAliasing, s.shadowQuality);
 	metal::RenderSettings bad = s;
 	bad.tier = 7;
 	bad.upscale = -2;
@@ -1544,14 +1544,16 @@ CheckSettingsDefaults(void)
 	bad.emitterPeakNits = 99999.0f;
 	bad.softness = -1.0f;
 	bad.antiAliasing = 9;
+	bad.shadowQuality = 9;
 	metal::setRenderSettings(&bad);
 	metal::RenderSettings got = metal::getRenderSettings();
 	bool clamped = got.tier == metal::TIER_CLASSIC && got.upscale == metal::UPSCALE_NATIVE && !got.dynamicResolution &&
 		got.hdrOutput == metal::HDROUTPUT_AUTO && got.emitterPeakNits == 4000.0f && got.softness == 0.0f &&
-		metal::getFrameInfo().tier == metal::TIER_CLASSIC && got.antiAliasing == metal::ANTIALIAS_OFF;
+		metal::getFrameInfo().tier == metal::TIER_CLASSIC && got.antiAliasing == metal::ANTIALIAS_OFF &&
+		got.shadowQuality == metal::SHADOWQUALITY_MEDIUM;
 	if(!clamped)
-		Detail("  clamped tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d\n", got.tier, got.upscale,
-			got.dynamicResolution, got.hdrOutput, got.emitterPeakNits, got.softness, got.antiAliasing);
+		Detail("  clamped tier %d upscale %d dynamic %d hdr %d peak %.1f softness %.2f aa %d shadows %d\n", got.tier, got.upscale,
+			got.dynamicResolution, got.hdrOutput, got.emitterPeakNits, got.softness, got.antiAliasing, got.shadowQuality);
 	metal::setRenderSettings(&s);
 	return Report(ok && clamped, name);
 }
@@ -2321,6 +2323,9 @@ RunFrameChecks(Camera *camera)
 	failures = 0;
 	cam = camera;
 	CheckSettingsDefaults();
+	metal::RenderSettings pin = metal::getRenderSettings();
+	pin.shadowQuality = metal::SHADOWQUALITY_OFF;
+	metal::setRenderSettings(&pin);
 	CheckClassicPrewarm();
 	CheckHostPrewarmAcrossTiers();
 	CheckTierFallback();

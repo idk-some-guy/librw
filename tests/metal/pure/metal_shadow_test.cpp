@@ -140,6 +140,40 @@ TestOrigin(void)
 }
 
 static void
+TestSunMoved(void)
+{
+	float r1 = 1.0f*3.14159265f/180.0f, r3 = 3.0f*3.14159265f/180.0f;
+	SHVec3 a = { 0.7071f, 0.0f, 0.7071f };
+	float r19 = 1.9f*3.14159265f/180.0f, r21 = 2.1f*3.14159265f/180.0f;
+	SHVec3 b1 = { cosf(0.7854f + r1), 0.0f, sinf(0.7854f + r1) }, b3 = { cosf(0.7854f + r3), 0.0f, sinf(0.7854f + r3) };
+	SHVec3 b19 = { cosf(0.7854f + r19), 0.0f, sinf(0.7854f + r19) }, b21 = { cosf(0.7854f + r21), 0.0f, sinf(0.7854f + r21) };
+	SHVec3 back = { -0.7071f, 0.0f, -0.7071f }, longer = { 1.4142f, 0.0f, 1.4142f };
+	CHECK(!shSunMoved(a, a));
+	CHECK(!shSunMoved(a, longer));
+	CHECK(!shSunMoved(a, b1));
+	CHECK(!shSunMoved(a, b19));
+	CHECK(shSunMoved(a, b21));
+	CHECK(shSunMoved(a, b3));
+	CHECK(shSunMoved(a, back));
+}
+
+static void
+TestHistoryMatches(void)
+{
+	SHVec3 up = { 0.0f, 0.0f, 1.0f }, rear = { 0.0f, -1.0f, 0.0f };
+	SHVec3 g = { 0.0f, 6.0f, 0.0f };
+	CHECK(shDisoccluded(6.42f, 6.0f));
+	CHECK(shHistoryMatches(g, g, up, 6.42f, 6.0f));
+	SHVec3 far0 = { 0.0f, 200.0f, 0.0f }, far1 = { 0.0f, 210.0f, 0.0f };
+	CHECK(shHistoryMatches(far1, far0, up, 210.0f, 200.0f));
+	SHVec3 ground = { 0.0f, 10.0f, 0.0f }, car = { 0.0f, 8.0f, 1.2f };
+	CHECK(!shHistoryMatches(car, ground, up, 7.5f, 10.0f));
+	SHVec3 now = { 0.0f, 6.0f, 1.0f }, before = { 0.0f, 6.42f, 1.0f };
+	CHECK(shHistoryMatches(before, now, rear, 6.0f, 6.0f));
+	CHECK(!shHistoryMatches(before, now, rear, 6.6f, 6.0f));
+}
+
+static void
 TestCap(void)
 {
 	float d2[6] = { 50.0f, 4.0f, 900.0f, 1.0f, 25.0f, 400.0f };
@@ -162,6 +196,8 @@ main(void)
 	TestClampedAccumulate();
 	TestGates();
 	TestOrigin();
+	TestSunMoved();
+	TestHistoryMatches();
 	TestCap();
 	if(failures == 0)
 		printf("all shadow tests passed\n");

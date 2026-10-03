@@ -1,0 +1,131 @@
+struct ShadowRayParams
+{
+	float4x4 invViewProj;
+	float4 sun;
+	float4 eye;
+	uint2 size;
+	uint2 depthSize;
+	uint frame;
+	uint raysPerPixel;
+	uint halfRes;
+	uint pad;
+};
+
+struct ShadowAccumParams
+{
+	float4x4 invViewProj;
+	float4x4 prevInvViewProj;
+	float4x4 viewToWorld;
+	float4 eye;
+	float4 prevEye;
+	uint2 size;
+	uint2 rawSize;
+	uint halfRes;
+	uint valid;
+	float maxHistory;
+	float pad;
+};
+
+static float3
+shadowWorld(float4x4 inv, uint2 px, uint2 dims, float d)
+{
+	float2 uv = (float2(px) + 0.5)/float2(dims);
+	float4 w = inv * float4(uv.x*2.0 - 1.0, 1.0 - uv.y*2.0, d*2.0 - 1.0, 1.0);
+	return w.xyz/w.w;
+}
+
+kernel void
+shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
+           constant ShadowRayParams &p [[buffer(1)]],
+           depth2d<float, access::read> depth [[texture(0)]],
+           texture2d<float, access::write> raw [[texture(1)]],
+           uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= p.size.x || gid.y >= p.size.y)
+		return;
+	uint2 src = p.halfRes != 0 ? min(gid*2, p.depthSize - 1) : gid;
+	float d = depth.read(src);
+	if(d >= 1.0){
+		raw.write(float4(1.0), gid);
+		return;
+	}
+	float3 P = shadowWorld(p.invViewProj, src, p.depthSize, d);
+	float3 toEye = p.eye.xyz - P;
+	float dist = length(toEye);
+	float3 v = toEye/dist;
+	SHVec3 o = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ v.x, v.y, v.z }, dist);
+	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
+	intersector<triangle_data, instancing> isect;
+	isect.accept_any_intersection(true);
+	isect.assume_geometry_type(geometry_type::triangle);
+	isect.force_opacity(forced_opacity::opaque);
+	float vis = 0.0;
+	for(uint r = 0; r < p.raysPerPixel; r++){
+		SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
+		ray q(float3(o.x, o.y, o.z), float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
+		vis += isect.intersect(q, tlas, 0xFF).type == intersection_type::none ? 1.0 : 0.0;
+	}
+	raw.write(float4(vis/float(p.raysPerPixel)), gid);
+}
+
+static float3
+shadowHistoryPoint(constant ShadowAccumParams &p, uint2 hp, float distance)
+{
+	float2 uv = (float2(hp) + 0.5)/float2(p.size);
+	float4 f = p.prevInvViewProj * float4(uv.x*2.0 - 1.0, 1.0 - uv.y*2.0, 1.0, 1.0);
+	float3 dir = normalize(f.xyz/f.w - p.prevEye.xyz);
+	return p.prevEye.xyz + dir*distance;
+}
+
+kernel void
+shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
+                 texture2d<float, access::read> hist [[texture(1)]],
+                 texture2d<float, access::read> motion [[texture(2)]],
+                 texture2d<float, access::read> normals [[texture(3)]],
+                 depth2d<float, access::read> depth [[texture(4)]],
+                 texture2d<float, access::write> out [[texture(5)]],
+                 constant ShadowAccumParams &p [[buffer(0)]],
+                 uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= p.size.x || gid.y >= p.size.y)
+		return;
+	float d = depth.read(gid);
+	if(d >= 1.0){
+		out.write(float4(1.0, 0.0, 0.0, 1.0), gid);
+		return;
+	}
+	float3 P = shadowWorld(p.invViewProj, gid, p.size, d);
+	float dist = length(P - p.eye.xyz);
+	int2 rp = int2(p.halfRes != 0 ? gid/2 : gid);
+	int2 rmax = int2(p.rawSize) - 1;
+	float cur = raw.read(uint2(min(rp, rmax))).r, lo = cur, hi = cur;
+	for(int y = -1; y <= 1; y++)
+		for(int x = -1; x <= 1; x++){
+			float r = raw.read(uint2(clamp(rp + int2(x, y), int2(0), rmax))).r;
+			lo = min(lo, r);
+			hi = max(hi, r);
+		}
+	SHAccum a = { cur, 1.0 };
+	float2 huv = (float2(gid) + 0.5)/float2(p.size) + motion.read(gid).xy;
+	if(p.valid != 0 && all(huv >= 0.0) && all(huv < 1.0)){
+		uint2 hp = min(uint2(huv*float2(p.size)), p.size - 1);
+		float4 h = hist.read(hp);
+		if(h.g > 0.0){
+			float3 Q = shadowHistoryPoint(p, hp, h.b);
+			float2 o = normals.read(gid).xy;
+			PPVec3 nv = ppOctDecode(o.x, o.y);
+			float3 N = normalize((p.viewToWorld * float4(nv.x, nv.y, nv.z, 0.0)).xyz);
+			if(shHistoryMatches(SHVec3{ Q.x, Q.y, Q.z }, SHVec3{ P.x, P.y, P.z }, SHVec3{ N.x, N.y, N.z }, h.b, dist))
+				a = shAccumulateClamped(h.r, h.g, cur, lo, hi, p.maxHistory);
+		}
+	}
+	out.write(float4(a.value, a.length, dist, 1.0), gid);
+}
+
+kernel void
+shadowClear(texture2d<float, access::write> t [[texture(0)]],
+            uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x < t.get_width() && gid.y < t.get_height())
+		t.write(float4(1.0, 0.0, 0.0, 1.0), gid);
+}

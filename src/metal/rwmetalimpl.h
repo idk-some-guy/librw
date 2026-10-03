@@ -139,6 +139,8 @@ void rtWaitForTest(void);
 void rtResetForTest(void);
 void setRtTimingForTest(bool32 on);
 bool32 rtFrameTimingForTest(RtFrameTiming *t);
+bool32 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 eye[3], const float32 target[3],
+	const float32 toSun[3], float32 *ms, float32 *ground);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);
@@ -188,6 +190,7 @@ bool32 antiAliasTextureForTest(void);
 bool32 readFrameOutput(int32 x, int32 y, float32 rgba[4]);
 bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
 bool32 readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
+bool32 readShadowForTest(int32 x, int32 y, float32 *value, float32 *length);
 void forcePrepassEqualForTest(void);
 bool32 readReactiveForTest(int32 x, int32 y, float32 *v);
 void setTemporalFailForTest(bool32 fail);
