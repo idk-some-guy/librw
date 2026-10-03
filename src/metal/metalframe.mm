@@ -349,14 +349,14 @@ frameStatsTail(void)
 		snprintf(pass, sizeof(pass), "%.2fms", r.passMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
 		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u"
-		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u build %u refit %u walk %.2fms shadow %s shadowmem %.0fMB",
+		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u build %u refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
 		prepassEqualLastFrame(), getStateStats().prepassUnkeyed,
 		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
 		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, r.frameBuilds, r.frameRefits, r.walkMs, pass,
-		r.shadowMegabytes);
+		r.shadowMegabytes, r.alphaInstances, r.alphaTextures);
 	return frame.tail;
 }
 

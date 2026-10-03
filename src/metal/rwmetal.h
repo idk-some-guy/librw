@@ -108,6 +108,7 @@ struct InstanceData
 	Material *material;
 	bool32    vertexAlpha;
 	uint32    offset;
+	float32   castAlphaRef;
 };
 
 struct InstanceDataHeader : rw::InstanceDataHeader
@@ -377,6 +378,7 @@ struct RayStats
 	float32 skinnedMegabytes, topMegabytes;
 	uint32 frameBuilds, frameRefits;
 	float32 walkMs, shadowMegabytes;
+	uint32 alphaInstances, alphaEntries, alphaTextures, alphaCapped, alphaKernel, alphaSkipped;
 };
 RayStats getRayStats(void);
 

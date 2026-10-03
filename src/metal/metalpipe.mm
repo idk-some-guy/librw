@@ -152,6 +152,7 @@ instanceMesh(Geometry *geo)
 		inst->numIndex = mesh->numIndices;
 		inst->material = mesh->material;
 		inst->vertexAlpha = 0;
+		inst->castAlphaRef = -1.0f;
 		inst->offset = offsets[i];
 		memcpy((uint8*)header->indexBuffer + inst->offset,
 		       mesh->indices, inst->numIndex*2);

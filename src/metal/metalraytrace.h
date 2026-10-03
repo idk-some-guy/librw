@@ -28,6 +28,7 @@ bool rtFrameWorkEnabled(void);
 void rtAddDrawCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const RawMatrix *bones);
 bool rtAddHostCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, const float32 sphere[4], uint32 mask);
 bool rtShadowsSupported(void);
+bool rtAlphaCastersSupported(void);
 void rtDropShadowTargets(void);
 
 #ifdef __OBJC__

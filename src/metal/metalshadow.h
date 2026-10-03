@@ -8,6 +8,7 @@
 #define SH_ABS fabs
 #define SH_MIN fmin
 #define SH_MAX fmax
+#define SH_FLOOR floor
 #else
 #include <math.h>
 #include <stdint.h>
@@ -18,6 +19,7 @@
 #define SH_ABS fabsf
 #define SH_MIN fminf
 #define SH_MAX fmaxf
+#define SH_FLOOR floorf
 #endif
 
 struct SHVec3 { float x, y, z; };
@@ -154,6 +156,48 @@ shLinearDepth(float d, float n, float f)
 {
 	float z = d*2.0f - 1.0f;
 	return 2.0f*n*f/((f + n) - z*(f - n));
+}
+
+enum { SH_CAST_NONE = 0, SH_CAST_OPAQUE = 1, SH_CAST_ALPHA = 2 };
+
+static inline int
+shMeshCast(bool vertexAlpha, int materialAlpha, bool textureAlpha, bool texCoords, bool alphaCasters)
+{
+	if(vertexAlpha || materialAlpha != 255)
+		return SH_CAST_NONE;
+	if(!textureAlpha)
+		return SH_CAST_OPAQUE;
+	return texCoords && alphaCasters ? SH_CAST_ALPHA : SH_CAST_NONE;
+}
+
+static inline bool
+shRecordsAlphaRef(bool depthWrite, int alphaFunc)
+{
+	return depthWrite && alphaFunc == 1;
+}
+
+static inline float
+shAlphaThreshold(float recorded)
+{
+	return SH_MAX(recorded, 0.5f);
+}
+
+static inline unsigned int
+shAddressMode(int addressing)
+{
+	return addressing == 2 ? 1u : addressing == 3 || addressing == 4 ? 2u : 0u;
+}
+
+static inline float
+shAddress(float t, unsigned int mode)
+{
+	if(mode == 1u){
+		float m = t - 2.0f*SH_FLOOR(t*0.5f);
+		return m > 1.0f ? 2.0f - m : m;
+	}
+	if(mode == 2u)
+		return SH_MIN(SH_MAX(t, 0.0f), 1.0f);
+	return t - SH_FLOOR(t);
 }
 
 #ifndef __METAL_VERSION__

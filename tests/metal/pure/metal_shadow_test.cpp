@@ -186,6 +186,49 @@ TestCap(void)
 	CHECK(shCapByDistance(tied, 5, 3, order) == 3 && order[0] == 1 && order[1] == 3 && order[2] == 0);
 }
 
+static void
+TestMeshCast(void)
+{
+	CHECK(shMeshCast(false, 255, true, true, true) == SH_CAST_ALPHA);
+	CHECK(shMeshCast(true, 255, true, true, true) == SH_CAST_NONE);
+	CHECK(shMeshCast(false, 254, true, true, true) == SH_CAST_NONE);
+	CHECK(shMeshCast(false, 255, true, false, true) == SH_CAST_NONE);
+	CHECK(shMeshCast(false, 255, true, true, false) == SH_CAST_NONE);
+	CHECK(shMeshCast(false, 255, false, true, true) == SH_CAST_OPAQUE);
+	CHECK(shMeshCast(false, 255, false, false, false) == SH_CAST_OPAQUE);
+	CHECK(shMeshCast(true, 255, false, true, true) == SH_CAST_NONE);
+	CHECK(shMeshCast(false, 128, false, true, true) == SH_CAST_NONE);
+}
+
+static void
+TestAlphaRecord(void)
+{
+	CHECK(shRecordsAlphaRef(true, 1));
+	CHECK(!shRecordsAlphaRef(false, 1));
+	CHECK(!shRecordsAlphaRef(true, 0));
+	CHECK(!shRecordsAlphaRef(true, 2));
+}
+
+static void
+TestAlphaThreshold(void)
+{
+	CHECK(shAlphaThreshold(-1.0f) == 0.5f);
+	CHECK(shAlphaThreshold(0.0f) == 0.5f);
+	CHECK(shAlphaThreshold(3/255.0f) == 0.5f);
+	CHECK(shAlphaThreshold(128/255.0f) == 128/255.0f);
+	CHECK(shAlphaThreshold(200/255.0f) == 200/255.0f);
+}
+
+static void
+TestAddress(void)
+{
+	CHECK(shAddressMode(1) == 0u && shAddressMode(2) == 1u && shAddressMode(3) == 2u && shAddressMode(4) == 2u && shAddressMode(0) == 0u);
+	CHECK(Near(shAddress(-0.25f, 0u), 0.75f, 1e-6f) && Near(shAddress(1.25f, 0u), 0.25f, 1e-6f));
+	CHECK(Near(shAddress(1.25f, 1u), 0.75f, 1e-6f) && Near(shAddress(-0.25f, 1u), 0.25f, 1e-6f));
+	CHECK(Near(shAddress(0.3f, 1u), 0.3f, 1e-6f));
+	CHECK(shAddress(-0.5f, 2u) == 0.0f && shAddress(1.5f, 2u) == 1.0f && Near(shAddress(0.3f, 2u), 0.3f, 1e-6f));
+}
+
 int
 main(void)
 {
@@ -199,6 +242,10 @@ main(void)
 	TestSunMoved();
 	TestHistoryMatches();
 	TestCap();
+	TestMeshCast();
+	TestAlphaRecord();
+	TestAlphaThreshold();
+	TestAddress();
 	if(failures == 0)
 		printf("all shadow tests passed\n");
 	return failures != 0;

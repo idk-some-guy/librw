@@ -141,6 +141,10 @@ void setRtTimingForTest(bool32 on);
 bool32 rtFrameTimingForTest(RtFrameTiming *t);
 bool32 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 eye[3], const float32 target[3],
 	const float32 toSun[3], float32 *ms, float32 *ground);
+void setRtAlphaCapForTest(uint32 entries);
+void setShadowAlphaKernelForTest(int32 mode);
+void rtWatchTextureForTest(Raster *raster);
+bool32 rtWatchedTextureAliveForTest(void);
 
 bool32 encodeTextureUpload(void *texture, int32 level, int32 width, int32 height,
 	const uint8 *bytes, uint32 bytesPerRow, uint32 bytesPerImage);

@@ -34,6 +34,7 @@ traceOne(instance_acceleration_structure as [[buffer(0)]],
 {
 	intersector<triangle_data, instancing> isect;
 	isect.accept_any_intersection(true);
+	isect.force_opacity(forced_opacity::opaque);
 	ray q(r[0].xyz, r[1].xyz, 0.0, r[0].w);
 	hit[0] = isect.intersect(q, as, mask).type == intersection_type::none ? 0u : 1u;
 }

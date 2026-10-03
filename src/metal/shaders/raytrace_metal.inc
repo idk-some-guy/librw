@@ -35,6 +35,7 @@ const char *raytrace_metal_src =
 "{\n"
 "	intersector<triangle_data, instancing> isect;\n"
 "	isect.accept_any_intersection(true);\n"
+"	isect.force_opacity(forced_opacity::opaque);\n"
 "	ray q(r[0].xyz, r[1].xyz, 0.0, r[0].w);\n"
 "	hit[0] = isect.intersect(q, as, mask).type == intersection_type::none ? 0u : 1u;\n"
 "}\n"
