@@ -247,8 +247,10 @@ applySettings(const RenderSettings *s)
 		frameTierChanged();
 	if(!sourceBefore && frameShadowSource())
 		prewarmShadowTwins();
-	if(realBefore && !realShadowSource())
+	if(realBefore && !realShadowSource()){
 		rtDropShadowTargets();
+		rtReleaseLevels();
+	}
 }
 
 void
@@ -344,18 +346,22 @@ frameStatsTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	RayStats r = getRayStats();
-	char pass[32] = "-";
+	char pass[32] = "-", top[32] = "-", build[32] = "-";
 	if(r.passMs >= 0.0f)
 		snprintf(pass, sizeof(pass), "%.2fms", r.passMs);
+	if(r.topMs >= 0.0f)
+		snprintf(top, sizeof(top), "%.2fms", r.topMs);
+	if(r.buildMs >= 0.0f)
+		snprintf(build, sizeof(build), "%.2fms", r.buildMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
 		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u"
-		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u build %u refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u",
+		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
 		prepassEqualLastFrame(), getStateStats().prepassUnkeyed,
 		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
-		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, r.frameBuilds, r.frameRefits, r.walkMs, pass,
+		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, top, r.frameBuilds, build, r.frameRefits, r.walkMs, pass,
 		r.shadowMegabytes, r.alphaInstances, r.alphaTextures);
 	return frame.tail;
 }
@@ -1350,6 +1356,14 @@ frameShadowSource(void)
 	return frame.testShadow != nil || realShadowSource();
 }
 
+bool
+frameShadowPassPlanned(void)
+{
+	ShadowSunInputs sun = shadowSunInputs();
+	return shPassRuns(frame.settings.shadowQuality, rtShadowsSupported(), frame.activeTier == TIER_MODERN, true, sun.toward[2],
+		sun.scale, sun.present);
+}
+
 void
 setShadowFactorForTest(float32 v)
 {
@@ -1951,8 +1965,7 @@ frameRayWork(void)
 	frame.rayWorkDone = true;
 	ShadowSunInputs sun = shadowSunInputs();
 	int32 q = frame.settings.shadowQuality;
-	bool casters = shPassRuns(q, rtShadowsSupported(), frame.activeTier == TIER_MODERN, true, sun.toward[2], sun.scale,
-		sun.present);
+	bool casters = frameShadowPassPlanned();
 	rtEncodeFrame(frameCommandBuffer(), casters);
 	if(!casters || !frame.prepassValid)
 		return;

@@ -76,6 +76,7 @@ bool frameModernTier(void);
 bool frameRelitActive(void);
 id<MTLTexture> frameShadowTexture(void);
 bool frameShadowSource(void);
+bool frameShadowPassPlanned(void);
 MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);
 
 }

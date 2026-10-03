@@ -1723,6 +1723,106 @@ CheckShadowSkipped(void)
 	return Report(ok, name);
 }
 
+struct OffState
+{
+	uint64 adds, palettes, heap;
+	uint32 levels, skinned, retired;
+	float megabytes;
+	bool hit, skinHit;
+};
+
+static void
+OffMeasure(OffState *o)
+{
+	metal::RayStats st = metal::getRayStats();
+	o->adds = metal::rtCasterAddsForTest();
+	o->palettes = metal::rtPaletteCopiesForTest();
+	o->heap = metal::rtHeapBytesForTest();
+	o->levels = st.bottomLevels;
+	o->skinned = st.skinnedLevels;
+	o->retired = metal::rtRetiredForTest();
+	o->megabytes = st.bottomMegabytes + st.skinnedMegabytes + st.topMegabytes;
+	o->hit = Hit(0.0f, 0.0f, 40.0f);
+	o->skinHit = Hit(0.0f, 10.0f, 25.0f, metal::SHADOWCASTER_SKINNED);
+}
+
+static bool
+CheckShadowOffReleases(void)
+{
+	const char *name = "a frame whose shadow pass will not run collects no caster and copies no bone palette; ShadowQuality off or leaving the modern tier releases the levels and heaps after one completed frame, and switching back rebuilds and traces";
+	Geometry *g, *gs = SkinnedQuadGeometry(1.0f);
+	Atomic *roof = Roof(&g, 2.0f, 2.0f), *skin = SkinnedAt(gs, 0.0f, 10.0f, 20.0f);
+	Place(roof, 0.0f, 0.0f, 30.0f, 0.0f);
+	auto draw = [&](bool prepass){
+		roof->render();
+		skin->render();
+		if(prepass)
+			metal::addShadowCaster(roof, metal::SHADOWCASTER_STATIC);
+	};
+	auto settle = [&](OffState *before, OffState *after){
+		CasterFrame(draw);
+		metal::rtWaitForTest();
+		OffMeasure(before);
+		CasterFrame(draw);
+		metal::rtWaitForTest();
+		OffMeasure(after);
+	};
+	CasterTiersOn();
+	OffState on0, on, night0, night, off0, off, back0, back, enhanced0, enhanced, modern0, modern;
+	settle(&on0, &on);
+
+	metal::RelitParams p = metal::getRelitParams();
+	p.sunScale = 0.0f;
+	metal::setRelitParams(&p);
+	settle(&night0, &night);
+	p.sunScale = 1.0f;
+	metal::setRelitParams(&p);
+
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	settle(&off0, &off);
+
+	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
+	settle(&back0, &back);
+
+	metal::RenderSettings s = metal::getRenderSettings();
+	s.tier = metal::TIER_ENHANCED;
+	metal::setRenderSettings(&s);
+	settle(&enhanced0, &enhanced);
+
+	s.tier = metal::TIER_MODERN;
+	metal::setRenderSettings(&s);
+	settle(&modern0, &modern);
+	CasterTiersOff();
+	DestroySkinAtomic(skin);
+	gs->destroy();
+	DestroyAtomic(roof);
+	g->destroy();
+
+	bool collected = on.adds > on0.adds && on.palettes > on0.palettes && on.hit && on.skinHit && on.levels > 0 && on.skinned > 0 &&
+		on.megabytes > 0.0f && on.heap > 0;
+	bool nightOk = night.adds == night0.adds && night.palettes == night0.palettes && night.levels == on.levels &&
+		night.skinned == on.skinned && night.heap == on.heap && !night.hit;
+	auto released = [&](const OffState &o, const OffState &before){
+		return o.adds == before.adds && o.palettes == before.palettes && o.levels == 0 && o.skinned == 0 &&
+			o.megabytes == 0.0f && o.heap == 0 && o.retired == 0 && !o.hit && !o.skinHit;
+	};
+	auto rebuilt = [](const OffState &o){
+		return o.hit && o.skinHit && o.levels > 0 && o.skinned > 0 && o.heap > 0;
+	};
+	bool ok = collected && nightOk && released(off, off0) && rebuilt(back) && released(enhanced, enhanced0) && rebuilt(modern);
+	if(!ok){
+		const OffState *all[12] = { &on0, &on, &night0, &night, &off0, &off, &back0, &back, &enhanced0, &enhanced, &modern0, &modern };
+		const char *names[12] = { "on0", "on", "night0", "night", "off0", "off", "back0", "back", "enhanced0", "enhanced", "modern0",
+			"modern" };
+		for(int i = 0; i < 12; i++)
+			Detail("  %s: adds %llu palettes %llu levels %u skinned %u retired %u %.2f MB heaps %llu hit %d skinned hit %d\n",
+				names[i], (unsigned long long)all[i]->adds, (unsigned long long)all[i]->palettes, all[i]->levels,
+				all[i]->skinned, all[i]->retired, all[i]->megabytes, (unsigned long long)all[i]->heap, all[i]->hit,
+				all[i]->skinHit);
+	}
+	return Report(ok, name);
+}
+
 static bool
 CheckShadowSunOnly(void)
 {
@@ -1753,10 +1853,12 @@ CheckShadowSunOnly(void)
 static bool
 CheckShadowStats(void)
 {
-	const char *name = "the stats line reports shadows, rays, levels, derived streams, instances, builds, refits, the walk, the pass time and the shadow memory";
+	const char *name = "the stats line reports shadows, rays, levels, derived streams, instances and their build time, builds and their time, refits, the walk, the pass time and the shadow memory";
 	ShadowScene s;
 	MakeShadowScene(&s, 1.0f);
-	ShadowFrame(&s, metal::SHADOWQUALITY_HIGH, 3);
+	ShadowFrame(&s, metal::SHADOWQUALITY_HIGH, 1);
+	metal::RayStats first = metal::getRayStats();
+	ShadowFrame(&s, metal::SHADOWQUALITY_HIGH, 2);
 	metal::RayStats st = metal::getRayStats();
 	metal::FrameInfo fi = metal::getFrameInfo();
 	metal::logStats();
@@ -1766,17 +1868,24 @@ CheckShadowStats(void)
 	uint32 want = rw*rh*q.raysPerPixel;
 	float wantMem = (float)(((double)rw*rh*2 + 2.0*fi.internalWidth*fi.internalHeight*8)/1048576.0);
 	const char *t = strstr(line, " shadows ");
-	char qn[16] = "", pass[16] = "";
+	char qn[16] = "", pass[16] = "", topTime[16] = "", buildTime[16] = "";
 	unsigned rays = 0, blas = 0, tlas = 0, builds = 0, refits = 0;
 	float blasMB = -1, normalsMB = -1, walk = -1, mem = -1;
-	int n = t ? sscanf(t, " shadows %15s rays %u blas %u %fMB normals %fMB tlas %u build %u refit %u walk %fms shadow %15s shadowmem %fMB",
-		qn, &rays, &blas, &blasMB, &normalsMB, &tlas, &builds, &refits, &walk, pass, &mem) : 0;
+	int n = t ? sscanf(t, " shadows %15s rays %u blas %u %fMB normals %fMB tlas %u %15s build %u %15s refit %u walk %fms shadow %15s shadowmem %fMB",
+		qn, &rays, &blas, &blasMB, &normalsMB, &tlas, topTime, &builds, buildTime, &refits, &walk, pass, &mem) : 0;
 	FreeShadowScene(&s);
 	bool timed = st.passMs < 0.0f ? strcmp(pass, "-") == 0 : strstr(pass, "ms") != nullptr;
-	bool ok = n == 11 && strcmp(qn, "high") == 0 && rays == want && st.raysPerFrame == want && tlas == 2 && blas >= 2 &&
-		fabsf(mem - wantMem) <= 0.5f && timed && walk >= 0.0f;
+	float topMs = -1, buildMs = -1;
+	bool topParsed = strcmp(topTime, "-") == 0 || sscanf(topTime, "%fms", &topMs) == 1;
+	bool buildParsed = strcmp(buildTime, "-") == 0 || sscanf(buildTime, "%fms", &buildMs) == 1;
+	bool counted = st.passMs < 0.0f ||
+		(topMs > 0.0f && fabsf(topMs - st.topMs) < 0.006f && buildMs >= 0.0f && fabsf(buildMs - st.buildMs) < 0.006f &&
+		 first.frameBuilds > 0 && first.buildMs > 0.0f && first.topMs > 0.0f);
+	bool ok = n == 13 && strcmp(qn, "high") == 0 && rays == want && st.raysPerFrame == want && tlas == 2 && blas >= 2 &&
+		fabsf(mem - wantMem) <= 0.5f && timed && walk >= 0.0f && topParsed && buildParsed && counted;
 	if(!ok)
-		Detail("  parsed %d, rays %u (expected %u), pass %.3f ms; line: %s", n, rays, want, st.passMs, line);
+		Detail("  parsed %d, rays %u (expected %u), pass %.3f ms, instance build %.3f ms, builds %.3f ms, first frame %u builds %.3f ms instance build %.3f ms; line: %s",
+			n, rays, want, st.passMs, st.topMs, st.buildMs, first.frameBuilds, first.buildMs, first.topMs, line);
 	return Report(ok, name);
 }
 
@@ -2546,6 +2655,8 @@ SettleRetired(void)
 		metal::rtWaitForTest();
 	}
 	CasterTiersOff();
+	CasterFrame([](bool){});
+	metal::rtWaitForTest();
 }
 
 static void
@@ -2689,6 +2800,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckShadowHistoryPlaneNormal();
 	CheckShadowHistoryRestarts();
 	CheckShadowSkipped();
+	CheckShadowOffReleases();
 	CheckShadowSunOnly();
 	CheckShadowStats();
 	CheckAlphaCheckerboard();

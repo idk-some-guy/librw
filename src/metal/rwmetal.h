@@ -379,6 +379,7 @@ struct RayStats
 	uint32 frameBuilds, frameRefits;
 	float32 walkMs, shadowMegabytes;
 	uint32 alphaInstances, alphaEntries, alphaTextures, alphaCapped, alphaKernel, alphaSkipped;
+	float32 topMs, buildMs;
 };
 RayStats getRayStats(void);
 

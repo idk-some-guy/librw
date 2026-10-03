@@ -415,7 +415,7 @@ beginPrepassState(bool continuous)
 	float32 eye[3];
 	for(int i = 0; i < 3; i++)
 		eye[i] = -(v[i*4]*v[12] + v[i*4 + 1]*v[13] + v[i*4 + 2]*v[14]);
-	rtBeginCasters(eye);
+	rtBeginCasters(eye, frameShadowPassPlanned());
 	drainNormalQueue();
 	prepassKeys.clear();
 	prepassFrame = true;

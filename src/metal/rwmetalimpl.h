@@ -93,6 +93,9 @@ uint32 rtQueuedForTest(void);
 uint32 rtBudgetLogsForTest(void);
 const char *rtRefusalLogForTest(void);
 uint32 rtRetiredForTest(void);
+uint64 rtCasterAddsForTest(void);
+uint64 rtPaletteCopiesForTest(void);
+uint64 rtHeapBytesForTest(void);
 uint64 rtLastUsedForTest(InstanceDataHeader *h);
 void setRtScratchFailForTest(bool32 fail);
 
