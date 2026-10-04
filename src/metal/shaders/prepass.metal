@@ -17,11 +17,13 @@ struct PrepassIn
 {
 	float3 pos [[attribute(ATTRIB_POS)]];
 	float4 normal [[attribute(ATTRIB_NORMAL)]];
+	float2 tex0 [[attribute(ATTRIB_TEXCOORDS0), function_constant(alphaTest)]];
 };
 
 struct PrepassOut
 {
 	float4 position [[position, invariant]];
+	float2 tex0;
 	float3 viewNormal;
 	float valid;
 	float3 viewPos;
@@ -32,6 +34,7 @@ struct PrepassOut
 struct PrepassFragIn
 {
 	float4 position [[position]];
+	float2 tex0;
 	float3 viewNormal;
 	float valid;
 	float3 viewPos;
@@ -60,8 +63,19 @@ prepassVS(PrepassIn in [[stage_in]],
 	out.viewPos = (scene.view * V).xyz;
 	out.curClip = pf.viewProj * V;
 	out.prevClip = pf.prevViewProj * (po.prevWorld * float4(in.pos, 1.0));
+	out.tex0 = float2(0.0);
+	if(alphaTest)
+		out.tex0 = in.tex0;
 	out.position = MetalDepth(out.position);
 	return out;
+}
+
+static void
+prepassCutout(float2 uv, texture2d<float> tex, sampler smp, constant State &state, bool layer)
+{
+	float a = tex.sample(smp, uv).a;
+	if(!(layer ? ppLayerKeep(a, state.alphaRef.x) : ppCutoutKeep(a, state.alphaRef.x)))
+		discard_fragment();
 }
 
 static PrepassTargets
@@ -79,18 +93,57 @@ prepassWrite(PrepassFragIn in, float3 g)
 
 // A GPU quad can hold two triangles that share an edge, so dfdx there mixes their planes.
 fragment PrepassTargets
-prepassFS(PrepassFragIn in [[stage_in]])
+prepassFS(PrepassFragIn in [[stage_in]],
+          constant State &state [[buffer(BUFFER_STATE), function_constant(alphaTest)]],
+          texture2d<float> tex0 [[texture(0), function_constant(alphaTest)]],
+          sampler tex0Sampler [[sampler(0), function_constant(alphaTest)]])
 {
-	return prepassWrite(in, cross(dfdx(in.viewPos), dfdy(in.viewPos)));
+	float3 g = cross(dfdx(in.viewPos), dfdy(in.viewPos));
+	if(alphaTest)
+		prepassCutout(in.tex0, tex0, tex0Sampler, state, false);
+	return prepassWrite(in, g);
+}
+
+fragment PrepassTargets
+prepassLayerFS(PrepassFragIn in [[stage_in]],
+               constant State &state [[buffer(BUFFER_STATE), function_constant(alphaTest)]],
+               texture2d<float> tex0 [[texture(0), function_constant(alphaTest)]],
+               sampler tex0Sampler [[sampler(0), function_constant(alphaTest)]])
+{
+	float3 g = cross(dfdx(in.viewPos), dfdy(in.viewPos));
+	if(alphaTest)
+		prepassCutout(in.tex0, tex0, tex0Sampler, state, true);
+	return prepassWrite(in, g);
 }
 
 fragment PrepassTargets
 prepassFaceFS(PrepassFragIn in [[stage_in]], uint pid [[primitive_id]],
               const device ushort *idx [[buffer(BUFFER_FACEINDICES)]],
               const device uchar *v [[buffer(BUFFER_FACEVERTICES)]],
-              constant FaceFetch &f [[buffer(BUFFER_FACELAYOUT)]])
+              constant FaceFetch &f [[buffer(BUFFER_FACELAYOUT)]],
+              constant State &state [[buffer(BUFFER_STATE), function_constant(alphaTest)]],
+              texture2d<float> tex0 [[texture(0), function_constant(alphaTest)]],
+              sampler tex0Sampler [[sampler(0), function_constant(alphaTest)]])
 {
 	float3 g = cross(dfdx(in.viewPos), dfdy(in.viewPos));
+	if(alphaTest)
+		prepassCutout(in.tex0, tex0, tex0Sampler, state, false);
+	faceFetchNormal(pid, idx, v, f, g);
+	return prepassWrite(in, g);
+}
+
+fragment PrepassTargets
+prepassLayerFaceFS(PrepassFragIn in [[stage_in]], uint pid [[primitive_id]],
+                   const device ushort *idx [[buffer(BUFFER_FACEINDICES)]],
+                   const device uchar *v [[buffer(BUFFER_FACEVERTICES)]],
+                   constant FaceFetch &f [[buffer(BUFFER_FACELAYOUT)]],
+                   constant State &state [[buffer(BUFFER_STATE), function_constant(alphaTest)]],
+                   texture2d<float> tex0 [[texture(0), function_constant(alphaTest)]],
+                   sampler tex0Sampler [[sampler(0), function_constant(alphaTest)]])
+{
+	float3 g = cross(dfdx(in.viewPos), dfdy(in.viewPos));
+	if(alphaTest)
+		prepassCutout(in.tex0, tex0, tex0Sampler, state, true);
 	faceFetchNormal(pid, idx, v, f, g);
 	return prepassWrite(in, g);
 }

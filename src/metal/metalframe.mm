@@ -137,6 +137,7 @@ struct FrameState
 	bool karis = true;
 	Raster *prepassRaster = nil;
 	id<MTLTexture> prepassNormal = nil, prepassMotion = nil, prepassNormalMS = nil, prepassMotionMS = nil;
+	id<MTLTexture> layerDepth = nil, layerNormal = nil, layerMotion = nil;
 	bool prepassOpen = false, prepassDone = false, prepassFail = false, prepassReported = false;
 	bool rayWorkDone = false;
 	bool normalsUnwrittenTest = false;
@@ -364,12 +365,12 @@ frameStatsTail(void)
 	if(r.buildMs >= 0.0f)
 		snprintf(build, sizeof(build), "%.2fms", r.buildMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
-		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u"
+		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u cutout %u"
 		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u large %u",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
-		prepassEqualLastFrame(), getStateStats().prepassUnkeyed,
+		prepassEqualLastFrame(), getStateStats().prepassUnkeyed, prepassCutoutLastFrame(),
 		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
 		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, top, r.frameBuilds, build, r.frameRefits, r.walkMs, pass,
 		r.shadowMegabytes, r.alphaInstances, r.alphaTextures, r.castersLarge);
@@ -1943,6 +1944,37 @@ dropPrepassTargets(void)
 	}
 	frame.prepassNormal = frame.prepassMotion = nil;
 	frame.prepassNormalMS = frame.prepassMotionMS = nil;
+	frame.layerDepth = frame.layerNormal = frame.layerMotion = nil;
+}
+
+static bool
+ensureLayerTargets(void)
+{
+	NSUInteger w = frame.prepassNormal.width, h = frame.prepassNormal.height;
+	if(frame.layerDepth && frame.layerDepth.width == w && frame.layerDepth.height == h)
+		return true;
+	MTLTextureUsage u = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	frame.layerDepth = newTexture(MTLPixelFormatDepth32Float_Stencil8, (int32)w, (int32)h, u, 1);
+	frame.layerNormal = newTexture(MTLPixelFormatRG16Snorm, (int32)w, (int32)h, u, 1);
+	frame.layerMotion = newTexture(MTLPixelFormatRG16Float, (int32)w, (int32)h, u, 1);
+	if(frame.layerDepth && frame.layerNormal && frame.layerMotion)
+		return true;
+	frame.layerDepth = frame.layerNormal = frame.layerMotion = nil;
+	return false;
+}
+
+static void
+encodeLayer(id<MTLCommandBuffer> cb, ShadowInputs *in)
+{
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:in->depth toTexture:frame.layerDepth];
+	[blit copyFromTexture:in->normals toTexture:frame.layerNormal];
+	[blit copyFromTexture:in->motion toTexture:frame.layerMotion];
+	[blit endEncoding];
+	encodeCutoutLayer(cb, frame.layerDepth, frame.layerNormal, frame.layerMotion);
+	in->depth = frame.layerDepth;
+	in->normals = frame.layerNormal;
+	in->motion = frame.layerMotion;
 }
 
 static bool
@@ -2057,6 +2089,8 @@ frameRayWork(void)
 		d.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 		[[frameCommandBuffer() renderCommandEncoderWithDescriptor:d] endEncoding];
 	}
+	if(ppLayerRuns(casters, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
+		encodeLayer(frameCommandBuffer(), &in);
 	frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
 }
 

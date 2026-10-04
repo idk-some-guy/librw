@@ -43,10 +43,13 @@ drawInst_GSemu(InstanceDataHeader *header, InstanceData *inst)
 
 			SetRenderState(rw::ALPHATESTFUNC, rw::ALPHAGREATEREQUAL);
 			SetRenderState(rw::ALPHATESTREF, gsalpharef);
+			setAlphaPairSecond(false);
 			drawInst_simple(header, inst);
 			SetRenderState(rw::ALPHATESTFUNC, rw::ALPHALESS);
 			SetRenderState(rw::ZWRITEENABLE, 0);
+			setAlphaPairSecond(true);
 			drawInst_simple(header, inst);
+			setAlphaPairSecond(false);
 			SetRenderState(rw::ZWRITEENABLE, 1);
 			SetRenderState(rw::ALPHATESTFUNC, alphafunc);
 			SetRenderState(rw::ALPHATESTREF, alpharef);

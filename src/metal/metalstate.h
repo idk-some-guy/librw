@@ -101,6 +101,8 @@ struct StateStats
 	uint32 prepassOrphanLogs;
 	uint32 prepassUnkeyed;
 	uint32 prepassFaceDraws;
+	uint32 prepassCutoutDraws;
+	uint32 prepassLayerDraws;
 	uint32 relitDraws;
 	uint32 relitFaceDraws;
 	uint32 relitShadowDraws;
@@ -150,6 +152,12 @@ ShadowSunInputs shadowSunInputs(void);
 uint32 endPrepassState(void);
 uint32 prepassDrawsSoFar(void);
 uint32 prepassEqualLastFrame(void);
+uint32 prepassCutoutLastFrame(void);
+uint32 cutoutLayerDraws(void);
+#ifdef __OBJC__
+uint32 encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion);
+#endif
+void setAlphaPairSecond(bool second);
 void setUnjitteredProjection(float32 *mat);
 void forgetObjectHistory(const void *object);
 void noteImmediateDraw(uint32 primitive, uint32 count, void *indexBuffer, uint32 indexOffset, uint32 indexType, bool indexed,

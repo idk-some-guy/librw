@@ -14,6 +14,10 @@ const char *prepassh_metal_src =
 "#endif\n"
 
 "#define PP_MOTION_OFFSCREEN 2.0f\n"
+"#define PP_CUTOUT_SOLID (254.0f/255.0f)\n"
+"#define PP_LAYER_MIN 0.5f\n"
+"#define PP_BLEND_SRCALPHA 5\n"
+"#define PP_BLEND_INVSRCALPHA 6\n"
 
 "struct PPVec2 { float x, y; };\n"
 "struct PPVec3 { float x, y, z; };\n"
@@ -108,6 +112,19 @@ const char *prepassh_metal_src =
 "	return m;\n"
 "}\n"
 
+"// Texels that blend keep the depth behind them, so only solid texels enter the prepass.\n"
+"static inline bool\n"
+"ppCutoutKeep(float alpha, float ref)\n"
+"{\n"
+"	return alpha >= (ref > PP_CUTOUT_SOLID ? ref : PP_CUTOUT_SOLID);\n"
+"}\n"
+
+"static inline bool\n"
+"ppLayerKeep(float alpha, float ref)\n"
+"{\n"
+"	return alpha >= (ref > PP_LAYER_MIN ? ref : PP_LAYER_MIN);\n"
+"}\n"
+
 "#ifndef __METAL_VERSION__\n"
 "struct PrepassDraw\n"
 "{\n"
@@ -116,12 +133,28 @@ const char *prepassh_metal_src =
 "	bool zwrite;\n"
 "	bool sceneDepth;\n"
 "	bool instanced;\n"
+"	bool alphaTested;\n"
+"	int srcBlend;\n"
+"	int destBlend;\n"
 "};\n"
 
 "inline bool\n"
 "prepassEligible(const PrepassDraw &d)\n"
 "{\n"
 "	return !d.blend && d.ztest && d.zwrite && d.sceneDepth && d.instanced;\n"
+"}\n"
+
+"inline bool\n"
+"prepassCutout(const PrepassDraw &d)\n"
+"{\n"
+"	return d.blend && d.srcBlend == PP_BLEND_SRCALPHA && d.destBlend == PP_BLEND_INVSRCALPHA && d.alphaTested && d.ztest &&\n"
+"		d.zwrite && d.sceneDepth && d.instanced;\n"
+"}\n"
+
+"inline bool\n"
+"ppLayerRuns(bool shadowPass, uint32_t layerDraws)\n"
+"{\n"
+"	return shadowPass && layerDraws > 0;\n"
 "}\n"
 
 "inline uint64_t\n"
@@ -136,10 +169,11 @@ const char *prepassh_metal_src =
 "}\n"
 
 "inline uint64_t\n"
-"prepassKey(const void *inst, const float world[16], const float *bone0)\n"
+"prepassKey(const void *inst, const float world[16], const float *bone0, bool cutout)\n"
 "{\n"
 "	uint64_t h = 14695981039346656037ull;\n"
 "	h = prepassMix(h, &inst, sizeof(inst));\n"
+"	h = prepassMix(h, &cutout, sizeof(cutout));\n"
 "	h = prepassMix(h, world, 16*sizeof(float));\n"
 "	if(bone0)\n"
 "		h = prepassMix(h, bone0, 16*sizeof(float));\n"

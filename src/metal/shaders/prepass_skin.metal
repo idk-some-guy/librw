@@ -4,6 +4,7 @@ struct PrepassSkinIn
 	float4 normal [[attribute(ATTRIB_NORMAL)]];
 	float4 weights [[attribute(ATTRIB_WEIGHTS)]];
 	uchar4 indices [[attribute(ATTRIB_INDICES)]];
+	float2 tex0 [[attribute(ATTRIB_TEXCOORDS0), function_constant(alphaTest)]];
 };
 
 vertex PrepassOut
@@ -33,6 +34,9 @@ prepassSkinVS(PrepassSkinIn in [[stage_in]],
 	out.viewPos = (scene.view * V).xyz;
 	out.curClip = pf.viewProj * V;
 	out.prevClip = pf.prevViewProj * (po.prevWorld * float4(PrevVertex, 1.0));
+	out.tex0 = float2(0.0);
+	if(alphaTest)
+		out.tex0 = in.tex0;
 	out.position = MetalDepth(out.position);
 	return out;
 }

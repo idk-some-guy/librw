@@ -3448,6 +3448,327 @@ CheckAlphaAddressAxes(void)
 	return Report(ok, name);
 }
 
+static Atomic*
+CutoutQuad(Geometry **geo, uint8 rightAlpha)
+{
+	RGBA t[16];
+	for(int i = 0; i < 16; i++)
+		t[i] = { 255, 96, 32, (uint8)(i % 4 < 2 ? 255 : rightAlpha) };
+	Material *m = Material::create();
+	SurfaceProperties sp = { 1.0f, 0.0f, 1.0f };
+	m->surfaceProps = sp;
+	Texture *tex = MakeTexture(4, 4, t, Texture::LINEAR, Texture::WRAP, Texture::WRAP);
+	m->setTexture(tex);
+	if(tex)
+		tex->destroy();
+	RGBA c = { 120, 120, 120, 255 };
+	RGBA col[4] = { c, c, c, c };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	*geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED, -5.0f, -1.0f, -3.0f, 1.0f,
+		-19.0f, col, uv, m);
+	m->destroy();
+	return MakeAtomic(*geo);
+}
+
+enum { CUTOUT_NONE, CUTOUT_BOTH, CUTOUT_FORWARD };
+enum { CUTOUT_ROW0 = 360, CUTOUT_ROWN = 52 };
+
+template<typename F> static void
+CutoutFrames(ShadowScene *s, Atomic *quad, int mode, int n, F read)
+{
+	for(int i = 0; i < n; i++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLNONE);
+			s->floor->render();
+			s->roof->render();
+			if(quad && (mode == CUTOUT_BOTH || (mode == CUTOUT_FORWARD && !prepass))){
+				SetRenderState(ALPHATESTFUNC, ALPHAGREATEREQUAL);
+				SetRenderState(ALPHATESTREF, 128);
+				quad->render();
+				SetRenderState(ALPHATESTREF, 3);
+			}
+			if(!prepass && i == n - 1)
+				read();
+		});
+	metal::rtWaitForTest();
+}
+
+static bool
+CheckCutoutReceives(void)
+{
+	const char *name = "an alpha-tested quad under a roof's shadow takes the shadow on its opaque texels, and the floor seen through its clear texels keeps its own factor";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	Geometry *gc, *go;
+	Atomic *cut = CutoutQuad(&gc, 0), *opaque = CutoutQuad(&go, 255);
+	Atomic *quads[4] = { cut, opaque, cut, nil };
+	const int modes[4] = { CUTOUT_BOTH, CUTOUT_BOTH, CUTOUT_FORWARD, CUTOUT_NONE };
+	float px[4][2][4];
+	bool read = true;
+	uint32 cutouts[4], shown = 0, shownDraws = 0, shownEqual = 0, shownUnkeyed = 0;
+	bool printed = false;
+	for(int k = 0; k < 4; k++){
+		metal::StateStats a0 = metal::getStateStats();
+		bool got = false;
+		CutoutFrames(&s, quads[k], modes[k], 24, [&](){
+			got = metal::readScenePixel(SX(-4.5f, 19.0f), 240, px[k][0]) && metal::readScenePixel(SX(-3.4f, 19.0f), 240, px[k][1]);
+		});
+		read = read && got;
+		cutouts[k] = metal::getStateStats().prepassCutoutDraws - a0.prepassCutoutDraws;
+		if(k == 0){
+			metal::logStats();
+			const char *tail = strstr(metal::getStatsLine(), " prepass ");
+			printed = tail && sscanf(tail, " prepass %u equal %u unkeyed %u cutout %u", &shownDraws, &shownEqual, &shownUnkeyed,
+				&shown) == 4 && shown == 1 && shownDraws == 3 && shownEqual == 3;
+		}
+	}
+	DestroyAtomic(cut);
+	DestroyAtomic(opaque);
+	gc->destroy();
+	go->destroy();
+	FreeShadowScene(&s);
+	bool shaded = true, floorKept = true;
+	for(int i = 0; i < 3; i++){
+		shaded = shaded && fabsf(px[0][0][i] - px[1][0][i]) <= 2.0f/255.0f;
+		floorKept = floorKept && fabsf(px[0][1][i] - px[3][1][i]) <= 2.0f/255.0f;
+	}
+	bool sunGone = px[2][0][0] - px[0][0][0] > 0.05f;
+	bool ok = read && shaded && floorKept && sunGone && cutouts[0] == 24 && cutouts[1] == 0 && cutouts[2] == 0 && printed;
+	Detail("  read %d; opaque texel: cutout %.4f %.4f %.4f, opaque quad %.4f %.4f %.4f, not in the prepass %.4f %.4f %.4f; clear texel: cutout %.4f %.4f %.4f, floor alone %.4f %.4f %.4f; cutout prepass draws %u %u %u; stats line prepass %u equal %u unkeyed %u cutout %u (%d)\n",
+			read, px[0][0][0], px[0][0][1], px[0][0][2], px[1][0][0], px[1][0][1], px[1][0][2], px[2][0][0], px[2][0][1], px[2][0][2],
+			px[0][1][0], px[0][1][1], px[0][1][2], px[3][1][0], px[3][1][1], px[3][1][2], cutouts[0], cutouts[1], cutouts[2], shownDraws,
+			shownEqual, shownUnkeyed, shown, printed);
+	return Report(ok, name);
+}
+
+static bool
+CutoutRow(ShadowScene *s, Atomic *quad, int mode, float row[CUTOUT_ROWN][4])
+{
+	bool read = true;
+	CutoutFrames(s, quad, mode, 2, [&](){
+		for(int i = 0; i < CUTOUT_ROWN; i++)
+			read = metal::readScenePixel(CUTOUT_ROW0 + i, 240, row[i]) && read;
+	});
+	return read;
+}
+
+static bool
+CutoutIdentity(const char *name)
+{
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	Geometry *g;
+	Atomic *cut = CutoutQuad(&g, 0);
+	static float rows[3][CUTOUT_ROWN][4];
+	metal::StateStats a0 = metal::getStateStats();
+	bool read = CutoutRow(&s, cut, CUTOUT_BOTH, rows[0]);
+	metal::StateStats a1 = metal::getStateStats();
+	read = CutoutRow(&s, cut, CUTOUT_FORWARD, rows[1]) && read;
+	metal::RenderSettings r = metal::getRenderSettings();
+	r.tier = metal::TIER_ENHANCED;
+	metal::setRenderSettings(&r);
+	read = CutoutRow(&s, cut, CUTOUT_BOTH, rows[2]) && read;
+	DestroyAtomic(cut);
+	g->destroy();
+	FreeShadowScene(&s);
+	uint32 cutouts = a1.prepassCutoutDraws - a0.prepassCutoutDraws;
+	float worst[2] = { 0.0f, 0.0f };
+	int at[2] = { -1, -1 };
+	for(int k = 0; k < 2; k++)
+		for(int i = 0; i < CUTOUT_ROWN; i++)
+			for(int c = 0; c < 3; c++){
+				float d = fabsf(rows[k][i][c] - rows[2][i][c]);
+				if(d > worst[k]){
+					worst[k] = d;
+					at[k] = CUTOUT_ROW0 + i;
+				}
+			}
+	float span = 0.0f;
+	for(int i = 0; i < CUTOUT_ROWN; i++)
+		span = fmaxf(span, fabsf(rows[2][i][1] - rows[2][0][1]));
+	bool ok = read && worst[0] <= 1.0f/255.0f && worst[1] <= 1.0f/255.0f && cutouts == 2 && span > 0.1f;
+	Detail("  read %d; largest step from the enhanced row: prepass cutout %.4f at x %d, cutout not in the prepass %.4f at x %d; cutout prepass draws %u; quad contrast %.3f\n",
+			read, worst[0], at[0], worst[1], at[1], cutouts, span);
+	return Report(ok, name);
+}
+
+static Geometry*
+LayerQuadGeometry(float x0, float x1, const uint8 alpha[4], bool skinned)
+{
+	RGBA t[16];
+	for(int i = 0; i < 16; i++)
+		t[i] = { 255, 96, 32, alpha[i % 4] };
+	Material *m = Material::create();
+	SurfaceProperties sp = { 1.0f, 0.0f, 1.0f };
+	m->surfaceProps = sp;
+	Texture *tex = MakeTexture(4, 4, t, Texture::LINEAR, Texture::CLAMP, Texture::CLAMP);
+	m->setTexture(tex);
+	if(tex)
+		tex->destroy();
+	RGBA c = { 120, 120, 120, 255 };
+	RGBA col[4] = { c, c, c, c };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	uint32 flags = Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED;
+	Geometry *geo = QuadGeometry(skinned ? flags | Geometry::NORMALS : flags, x0, -1.0f, x1, 1.0f, -19.0f, col, uv, m);
+	m->destroy();
+	if(skinned){
+		for(int i = 0; i < 4; i++)
+			geo->morphTargets[0].normals[i].set(0.0f, 0.0f, 1.0f);
+		Matrix ident;
+		ident.setIdentity();
+		uint8 idx[4][4] = {};
+		float wts[4][4] = { { 1, 0, 0, 0 }, { 1, 0, 0, 0 }, { 1, 0, 0, 0 }, { 1, 0, 0, 0 } };
+		AttachSkin(geo, 1, &ident, idx, wts);
+	}
+	return geo;
+}
+
+template<typename B, typename A> static void
+LayerFrames(ShadowScene *s, Atomic *quad, bool pair, int n, B before, A after)
+{
+	for(int i = 0; i < n; i++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLNONE);
+			s->floor->render();
+			s->roof->render();
+			bool last = !prepass && i == n - 1;
+			if(last)
+				before();
+			if(quad){
+				SetRenderState(ALPHATESTFUNC, ALPHAGREATEREQUAL);
+				SetRenderState(ALPHATESTREF, 128);
+				if(pair){
+					SetRenderState(GSALPHATEST, 1);
+					SetRenderState(GSALPHATESTREF, 128);
+				}
+				quad->render();
+				SetRenderState(GSALPHATEST, 0);
+				SetRenderState(ALPHATESTREF, 3);
+			}
+			if(last)
+				after();
+		});
+	metal::rtWaitForTest();
+}
+
+struct LayerRun
+{
+	float px[4];
+	float depth;
+	uint32 cutouts, shadowDraws;
+	bool read;
+};
+
+static LayerRun
+LayerPixel(ShadowScene *s, Atomic *quad, bool pair, int x, int y)
+{
+	LayerRun r = {};
+	float n[3], m[2];
+	bool before = false, after = false;
+	metal::StateStats a0 = metal::getStateStats();
+	LayerFrames(s, quad, pair, 24, [&](){
+		before = metal::readPrepassForTest(x, y, n, m, &r.depth);
+	}, [&](){
+		after = metal::readScenePixel(x, y, r.px);
+	});
+	metal::StateStats a1 = metal::getStateStats();
+	r.cutouts = a1.prepassCutoutDraws - a0.prepassCutoutDraws;
+	r.shadowDraws = a1.relitShadowDraws - a0.relitShadowDraws;
+	r.read = before && after;
+	return r;
+}
+
+static float
+BlendStep(const float got[4], float a, const float src[4], const float dst[4])
+{
+	float worst = 0.0f;
+	for(int c = 0; c < 3; c++)
+		worst = fmaxf(worst, fabsf(got[c] - (a*src[c] + (1.0f - a)*dst[c])));
+	return worst;
+}
+
+static LayerRun
+LayerQuadPixel(ShadowScene *s, float x0, float x1, const uint8 alpha[4], bool skinned, bool pair, int x)
+{
+	Geometry *g = LayerQuadGeometry(x0, x1, alpha, skinned);
+	Atomic *a = skinned ? SkinAtomic(g) : MakeAtomic(g);
+	if(skinned)
+		PoseSkin(a, 1);
+	LayerRun r = LayerPixel(s, a, pair, x, 240);
+	if(skinned)
+		DestroySkinAtomic(a);
+	else
+		DestroyAtomic(a);
+	g->destroy();
+	return r;
+}
+
+static void
+CheckCutoutLayer(void)
+{
+	const char *names[4] = {
+		"a cutout texel of alpha 0.75 inside a roof's shadow over a lit floor is darkened as the same quad drawn opaque, within the blend's share",
+		"a cutout texel of alpha 0.75 in the sun over a shadowed floor is lit",
+		"the fringe of a PS2 alpha test pair takes the shadow variant and the factor of its pixel",
+		"the main prepass depth under a cutout texel of alpha 0.75 is the floor's, and the floor behind it is drawn",
+	};
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	const uint8 edge[4] = { 255, 255, 191, 191 }, soft[4] = { 191, 191, 191, 191 }, fringe[4] = { 64, 64, 255, 255 };
+	const uint8 solid[4] = { 255, 255, 255, 255 };
+	int xa = SX(-3.4f, 19.0f), xb = SX(-5.5f, 19.0f), xc = SX(-4.5f, 19.0f), xs = SX(-5.0f, 20.0f), xl = SX(-2.0f, 20.0f);
+	LayerRun fa = LayerPixel(&s, nil, false, xa, 240), fs = LayerPixel(&s, nil, false, xs, 240);
+	LayerRun fl = LayerPixel(&s, nil, false, xl, 240), fc = LayerPixel(&s, nil, false, xc, 240);
+	LayerRun ca = LayerQuadPixel(&s, -5.0f, -3.0f, edge, false, false, xa), oa = LayerQuadPixel(&s, -5.0f, -3.0f, solid, false, false, xa);
+	LayerRun cb = LayerQuadPixel(&s, -6.0f, -4.0f, soft, false, false, xb), ob = LayerQuadPixel(&s, -6.0f, -4.0f, solid, false, false, xb);
+	LayerRun cc = LayerQuadPixel(&s, -5.0f, -3.0f, fringe, false, true, xc), oc = LayerQuadPixel(&s, -5.0f, -3.0f, solid, false, true, xc);
+	FreeShadowScene(&s);
+	bool read = fa.read && fs.read && fl.read && fc.read && ca.read && oa.read && cb.read && ob.read && cc.read && oc.read;
+	float stepA = BlendStep(ca.px, 191/255.0f, oa.px, fs.px), stepB = BlendStep(cb.px, 191/255.0f, ob.px, fl.px);
+	float stepC = BlendStep(cc.px, 64/255.0f, oc.px, fc.px);
+	float sunA = fl.px[0] - fs.px[0];
+	bool okA = read && stepA <= 2.0f/255.0f && ca.cutouts == 24 && sunA > 0.05f;
+	bool okB = read && stepB <= 2.0f/255.0f && cb.cutouts == 24;
+	bool okC = read && stepC <= 2.0f/255.0f && cc.cutouts == 24 && cc.shadowDraws == oc.shadowDraws + 24;
+	bool okD = read && fabsf(ca.depth - fa.depth) <= 1e-6f && fa.depth < 1.0f;
+	Detail("  read %d; in shadow over the lit floor: cutout %.4f %.4f %.4f, opaque quad %.4f %.4f %.4f, shadowed floor %.4f %.4f %.4f, lit floor %.4f %.4f %.4f, step %.4f, cutout draws %u\n",
+		read, ca.px[0], ca.px[1], ca.px[2], oa.px[0], oa.px[1], oa.px[2], fs.px[0], fs.px[1], fs.px[2], fl.px[0], fl.px[1], fl.px[2], stepA,
+		ca.cutouts);
+	Detail("  in the sun over the shadowed floor: cutout %.4f %.4f %.4f, opaque quad %.4f %.4f %.4f, step %.4f, cutout draws %u\n",
+		cb.px[0], cb.px[1], cb.px[2], ob.px[0], ob.px[1], ob.px[2], stepB, cb.cutouts);
+	Detail("  fringe: pair %.4f %.4f %.4f, opaque quad %.4f %.4f %.4f, floor %.4f %.4f %.4f, step %.4f, cutout draws %u, shadow draws %u against %u opaque\n",
+		cc.px[0], cc.px[1], cc.px[2], oc.px[0], oc.px[1], oc.px[2], fc.px[0], fc.px[1], fc.px[2], stepC, cc.cutouts, cc.shadowDraws,
+		oc.shadowDraws);
+	Detail("  main prepass depth under the 0.75 texel %.7f, floor alone %.7f\n", ca.depth, fa.depth);
+	Report(okA, names[0]);
+	Report(okB, names[1]);
+	Report(okC, names[2]);
+	Report(okD, names[3]);
+}
+
+static bool
+CheckSkinnedCutoutLayer(void)
+{
+	const char *name = "a skinned cutout texel of alpha 0.75 inside a roof's shadow over a lit floor is darkened as the same skinned quad drawn opaque, within the blend's share";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	const uint8 edge[4] = { 255, 255, 191, 191 }, solid[4] = { 255, 255, 255, 255 };
+	int xa = SX(-3.4f, 19.0f), xs = SX(-5.0f, 20.0f);
+	LayerRun fs = LayerPixel(&s, nil, false, xs, 240);
+	LayerRun ca = LayerQuadPixel(&s, -5.0f, -3.0f, edge, true, false, xa), oa = LayerQuadPixel(&s, -5.0f, -3.0f, solid, true, false, xa);
+	FreeShadowScene(&s);
+	bool read = fs.read && ca.read && oa.read;
+	float step = BlendStep(ca.px, 191/255.0f, oa.px, fs.px);
+	bool ok = read && step <= 2.0f/255.0f && ca.cutouts == 24 && oa.cutouts == 0;
+	Detail("  read %d; skinned cutout %.4f %.4f %.4f, skinned opaque quad %.4f %.4f %.4f, shadowed floor %.4f %.4f %.4f, step %.4f, cutout draws %u %u\n",
+		read, ca.px[0], ca.px[1], ca.px[2], oa.px[0], oa.px[1], oa.px[2], fs.px[0], fs.px[1], fs.px[2], step, ca.cutouts, oa.cutouts);
+	return Report(ok, name);
+}
+
 static Geometry*
 ShadowCylinder(float radius, float halfLength, float cz, int sides)
 {
@@ -3757,6 +4078,10 @@ RunRaytraceChecks(Camera *camera)
 	CheckAlphaRefSceneOnly();
 	CheckAlphaAddressAxes();
 	CheckSkinnedCasterUndrawn();
+	CheckCutoutReceives();
+	CutoutIdentity("a cutout draw with shadows off draws the enhanced frame's colour, and one the prepass did not draw keeps its own depth test, at one sample");
+	CheckCutoutLayer();
+	CheckSkinnedCutoutLayer();
 	PrintShadowTerminator();
 	PrintBuildTiming();
 	PrintCasterTiming();
@@ -3770,7 +4095,9 @@ RunRaytraceSampleChecks(Camera *camera)
 {
 	failures = 0;
 	rtCamera = camera;
-	if(metal::rtAvailable())
+	if(metal::rtAvailable()){
 		CheckShadowSkippedSamples();
+		CutoutIdentity("a cutout draw with shadows off draws the enhanced frame's colour, and one the prepass did not draw keeps its own depth test, at four samples");
+	}
 	return failures;
 }

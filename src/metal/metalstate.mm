@@ -332,6 +332,8 @@ im2DLayout(uint32 layout)
 static StateStats stats;
 
 Shader *prepassShader, *prepassSkinShader, *prepassFaceShader;
+static Shader *prepassLayerShader, *prepassLayerSkinShader, *prepassLayerFaceShader;
+static id<MTLDepthStencilState> prepassLayerDepth;
 static const void *currentDrawInst;
 static const void *currentObject;
 enum { PREPASS_KEYS = 8192 };
@@ -340,6 +342,7 @@ static bool prepassFrame;
 static bool orphanReported;
 static uint32 prepassDrawsThisFrame;
 static uint32 prepassEqualThisFrame, prepassEqualLast;
+static uint32 prepassCutoutThisFrame, prepassCutoutLast;
 static float32 prepassView[16], prepassProj[16];
 static bool prepassViewSame;
 static bool forceEqualNext;
@@ -358,6 +361,34 @@ struct PrepassFrameBlock
 };
 static PrepassFrameBlock prepassFrameBlock;
 static bool prepassFrameBound;
+static id<MTLBuffer> prepassFrameBuffer;
+static uint32 prepassFrameOffset;
+
+struct LayerDraw
+{
+	Shader *shader;
+	uint32 layout;
+	uint16 vertexBlocks, fragmentBlocks;
+	id<MTLBuffer> vertexBuffers[NUMBLOCKS], fragmentBuffers[NUMBLOCKS];
+	uint32 vertexOffsets[NUMBLOCKS], fragmentOffsets[NUMBLOCKS];
+	id<MTLTexture> texture;
+	id<MTLSamplerState> sampler;
+	id<MTLBuffer> frameBuffer;
+	uint32 frameOffset;
+	RawMatrix prevWorld;
+	id<MTLBuffer> prevBones;
+	uint32 prevBonesOffset;
+	id<MTLBuffer> stream, faceIndices, faceVertices;
+	FaceFetchBlock face;
+	int32 cull;
+	MTLViewport viewport;
+	id<MTLBuffer> vertices, indices;
+	uint32 indexOffset, numIndex;
+	uint32 primType;
+};
+static std::vector<LayerDraw> layerDraws;
+static bool layerWanted;
+static bool pairSecond, pairFirstMatched;
 
 static void
 mul44(float32 *out, const float32 *a, const float32 *b)
@@ -422,8 +453,12 @@ beginPrepassState(bool continuous)
 	prepassKeys.clear();
 	prepassFrame = true;
 	prepassFrameBound = false;
+	layerDraws.clear();
+	layerWanted = frameShadowPassPlanned() && prepassLayerShader && prepassLayerSkinShader && prepassLayerFaceShader &&
+		prepassLayerDepth;
 	prepassDrawsThisFrame = 0;
 	prepassEqualThisFrame = 0;
+	prepassCutoutThisFrame = 0;
 	memcpy(prepassView, uniformScene.view, sizeof(prepassView));
 	memcpy(prepassProj, uniformScene.proj, sizeof(prepassProj));
 	prepassViewSame = true;
@@ -481,10 +516,17 @@ prepassEqualLastFrame(void)
 	return prepassEqualLast;
 }
 
+uint32
+prepassCutoutLastFrame(void)
+{
+	return prepassCutoutLast;
+}
+
 void
 finishPrepassFrame(bool countOrphans)
 {
 	prepassEqualLast = prepassFrame ? prepassEqualThisFrame : 0;
+	prepassCutoutLast = prepassFrame ? prepassCutoutThisFrame : 0;
 	if(!prepassFrame)
 		return;
 	uint32 orphans = countOrphans ? prepassKeys.unused() : 0;
@@ -2271,7 +2313,7 @@ previousWorld(const void *object, const RawMatrix &current)
 }
 
 static bool
-bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
+bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object, id<MTLBuffer> *bound, uint32 *offset)
 {
 	RingSpace space;
 	if(!ringAlloc(sizeof(uniformSkin), 256, &space))
@@ -2286,12 +2328,14 @@ bindPreviousBones(id<MTLRenderCommandEncoder> e, const void *object)
 			src = prev;
 	}
 	memcpy(space.cpu, src, sizeof(uniformSkin));
-	[e setVertexBuffer:(__bridge id<MTLBuffer>)space.buffer offset:space.offset atIndex:BUFFER_PREVSKIN];
+	*bound = (__bridge id<MTLBuffer>)space.buffer;
+	*offset = space.offset;
+	[e setVertexBuffer:*bound offset:*offset atIndex:BUFFER_PREVSKIN];
 	return true;
 }
 
 static bool
-bindFaceFetch(id<MTLRenderCommandEncoder> e, const float32 *m, bool fetch, bool twoSided)
+bindFaceFetch(id<MTLRenderCommandEncoder> e, const float32 *m, bool fetch, bool twoSided, FaceFetchBlock *out = nil)
 {
 	const InstanceDataHeader *h = currentDrawHeader;
 	FaceFetchBlock b = {};
@@ -2315,6 +2359,8 @@ bindFaceFetch(id<MTLRenderCommandEncoder> e, const float32 *m, bool fetch, bool 
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlIndexBuffer offset:0 atIndex:BUFFER_FACEINDICES];
 	[e setFragmentBuffer:(__bridge id<MTLBuffer>)h->mtlVertexBuffer offset:0 atIndex:BUFFER_FACEVERTICES];
 	[e setFragmentBytes:&b length:sizeof(b) atIndex:BUFFER_FACELAYOUT];
+	if(out)
+		*out = b;
 	return b.numVertices != 0;
 }
 
@@ -2337,8 +2383,135 @@ relitVariant(Shader *shader, uint32 layout, uint32 variant)
 	return variant;
 }
 
+static bool
+cutoutAlphaTest(void)
+{
+	const InstanceData *inst = (const InstanceData*)currentDrawInst;
+	return alphaFunc == ALPHAGREATEREQUAL && rwStateCache.textureAlpha && inst && !inst->vertexAlpha && inst->material &&
+		inst->material->color.alpha == 255 && stageExt(rwStateCache.texstage[0].raster) &&
+		layoutHasAttrib(currentLayout, ATTRIB_TEXCOORDS0);
+}
+
+static void
+recordLayerDraw(Shader *sh, uint32 layout, const PipelineEntry *pipe, const RawMatrix &prevWorld, id<MTLBuffer> prevBones,
+                uint32 prevBonesOffset, id<MTLBuffer> stream, const FaceFetchBlock &face)
+{
+	const InstanceData *inst = (const InstanceData*)currentDrawInst;
+	LayerDraw r = {};
+	r.shader = sh == prepassFaceShader ? prepassLayerFaceShader : sh == prepassSkinShader ? prepassLayerSkinShader : prepassLayerShader;
+	r.layout = layout;
+	r.vertexBlocks = pipe->vertexBlocks;
+	r.fragmentBlocks = pipe->fragmentBlocks;
+	for(int i = 0; i < NUMBLOCKS; i++){
+		r.vertexBuffers[i] = enc.vertexBuffers[i];
+		r.vertexOffsets[i] = enc.vertexOffsets[i];
+		r.fragmentBuffers[i] = enc.fragmentBuffers[i];
+		r.fragmentOffsets[i] = enc.fragmentOffsets[i];
+	}
+	r.texture = enc.textures[0];
+	r.sampler = enc.samplers[0];
+	r.frameBuffer = prepassFrameBuffer;
+	r.frameOffset = prepassFrameOffset;
+	r.prevWorld = prevWorld;
+	r.prevBones = prevBones;
+	r.prevBonesOffset = prevBonesOffset;
+	if(stream){
+		r.stream = stream;
+		r.faceIndices = (__bridge id<MTLBuffer>)currentDrawHeader->mtlIndexBuffer;
+		r.faceVertices = (__bridge id<MTLBuffer>)currentDrawHeader->mtlVertexBuffer;
+		r.face = face;
+	}
+	r.cull = enc.cull;
+	r.viewport = enc.viewport;
+	r.vertices = (__bridge id<MTLBuffer>)currentDrawHeader->mtlVertexBuffer;
+	r.indices = (__bridge id<MTLBuffer>)currentDrawHeader->mtlIndexBuffer;
+	r.indexOffset = inst->offset;
+	r.numIndex = inst->numIndex;
+	r.primType = currentDrawHeader->primType;
+	layerDraws.push_back(r);
+}
+
+void
+setAlphaPairSecond(bool second)
+{
+	if(!second)
+		pairFirstMatched = false;
+	pairSecond = second;
+}
+
+uint32
+cutoutLayerDraws(void)
+{
+	return (uint32)layerDraws.size();
+}
+
+uint32
+encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion)
+{
+	MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+	id<MTLTexture> color[2] = { normal, motion };
+	for(int i = 0; i < 2; i++){
+		d.colorAttachments[i].texture = color[i];
+		d.colorAttachments[i].loadAction = MTLLoadActionLoad;
+		d.colorAttachments[i].storeAction = MTLStoreActionStore;
+	}
+	d.depthAttachment.texture = depth;
+	d.depthAttachment.loadAction = MTLLoadActionLoad;
+	d.depthAttachment.storeAction = MTLStoreActionStore;
+	d.stencilAttachment.texture = depth;
+	d.stencilAttachment.loadAction = MTLLoadActionDontCare;
+	d.stencilAttachment.storeAction = MTLStoreActionDontCare;
+	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+	[e setFrontFacingWinding:MTLWindingCounterClockwise];
+	[e setDepthStencilState:prepassLayerDepth];
+	[e setVertexBytes:&defaultAttribs length:sizeof(defaultAttribs) atIndex:BUFFER_DEFAULTATTRIBS];
+	uint32 drawn = 0;
+	for(const LayerDraw &r : layerDraws){
+		PipelineDesc pd = {};
+		pd.shader = r.shader->shaderId;
+		pd.variant = VARIANT_ALPHATEST;
+		pd.vertexLayout = r.layout;
+		pd.writeMask = MTLColorWriteMaskAll;
+		pd.colorFormat = COLORFMT_PREPASS;
+		pd.depthFormat = DEPTHFMT_D32S8;
+		pd.sampleCount = 1;
+		PipelineEntry *pipe = getPipeline(r.shader, pd, pipelineKey(pd));
+		if(pipe == nil)
+			continue;
+		[e setRenderPipelineState:pipe->state];
+		[e setCullMode:(MTLCullMode)r.cull];
+		[e setViewport:r.viewport];
+		for(int i = 0; i < NUMBLOCKS; i++){
+			if(r.vertexBlocks & (1<<i))
+				[e setVertexBuffer:r.vertexBuffers[i] offset:r.vertexOffsets[i] atIndex:blockInfo[i].index];
+			if(r.fragmentBlocks & (1<<i))
+				[e setFragmentBuffer:r.fragmentBuffers[i] offset:r.fragmentOffsets[i] atIndex:blockInfo[i].index];
+		}
+		[e setFragmentTexture:r.texture atIndex:0];
+		[e setFragmentSamplerState:r.sampler atIndex:0];
+		[e setVertexBuffer:r.frameBuffer offset:r.frameOffset atIndex:BUFFER_PREPASSFRAME];
+		[e setVertexBytes:&r.prevWorld length:sizeof(r.prevWorld) atIndex:BUFFER_PREPASSOBJECT];
+		if(r.prevBones)
+			[e setVertexBuffer:r.prevBones offset:r.prevBonesOffset atIndex:BUFFER_PREVSKIN];
+		if(r.stream){
+			[e setVertexBuffer:r.stream offset:0 atIndex:BUFFER_NORMALSTREAM];
+			[e setFragmentBuffer:r.faceIndices offset:0 atIndex:BUFFER_FACEINDICES];
+			[e setFragmentBuffer:r.faceVertices offset:0 atIndex:BUFFER_FACEVERTICES];
+			[e setFragmentBytes:&r.face length:sizeof(r.face) atIndex:BUFFER_FACELAYOUT];
+		}
+		[e setVertexBuffer:r.vertices offset:0 atIndex:BUFFER_VERTEX];
+		[e drawIndexedPrimitives:(MTLPrimitiveType)r.primType indexCount:r.numIndex indexType:MTLIndexTypeUInt16
+			indexBuffer:r.indices indexBufferOffset:r.indexOffset];
+		drawn++;
+	}
+	[e endEncoding];
+	stats.prepassLayerDraws += drawn;
+	layerDraws.clear();
+	return drawn;
+}
+
 static bool32
-flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
+flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key, bool cutout)
 {
 	bool skinned = layoutHasAttrib(currentLayout, ATTRIB_WEIGHTS);
 	Shader *sh = skinned ? prepassSkinShader : prepassShader;
@@ -2354,7 +2527,7 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 	}
 	PipelineDesc pd = {};
 	pd.shader = sh->shaderId;
-	pd.variant = 0;
+	pd.variant = cutout ? VARIANT_ALPHATEST : 0;
 	pd.vertexLayout = layout;
 	pd.blendEnable = false;
 	pd.writeMask = MTLColorWriteMaskAll;
@@ -2376,25 +2549,36 @@ flushPrepass(MetalContext *ctx, id<MTLRenderCommandEncoder> e, uint64 key)
 			return 0;
 		}
 		memcpy(space.cpu, &prepassFrameBlock, sizeof(prepassFrameBlock));
-		[e setVertexBuffer:(__bridge id<MTLBuffer>)space.buffer offset:space.offset atIndex:BUFFER_PREPASSFRAME];
+		prepassFrameBuffer = (__bridge id<MTLBuffer>)space.buffer;
+		prepassFrameOffset = space.offset;
+		[e setVertexBuffer:prepassFrameBuffer offset:prepassFrameOffset atIndex:BUFFER_PREPASSFRAME];
 		prepassFrameBound = true;
 	}
 	RawMatrix prevWorld = previousWorld(currentObject, uniformObject.world);
 	[e setVertexBytes:&prevWorld length:sizeof(prevWorld) atIndex:BUFFER_PREPASSOBJECT];
-	if(skinned && !bindPreviousBones(e, currentObject)){
+	id<MTLBuffer> prevBones = nil;
+	uint32 prevBonesOffset = 0;
+	if(skinned && !bindPreviousBones(e, currentObject, &prevBones, &prevBonesOffset)){
 		countDroppedDraw(DROP_NORINGSPACE, currentShader);
 		return 0;
 	}
+	FaceFetchBlock face = {};
 	if(stream){
 		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
 		float32 vw[16];
 		mul44(vw, uniformScene.view, (const float32*)&uniformObject.world);
-		bindFaceFetch(e, vw, true, false);
+		bindFaceFetch(e, vw, true, false, &face);
 	}
 	if(!encodeDraw(ctx, e, pipe, false))
 		return 0;
+	if(cutout && layerWanted)
+		recordLayerDraw(sh, layout, pipe, prevWorld, prevBones, prevBonesOffset, stream, face);
 	if(sh == prepassFaceShader)
 		stats.prepassFaceDraws++;
+	if(cutout){
+		stats.prepassCutoutDraws++;
+		prepassCutoutThisFrame++;
+	}
 	if(!prepassKeys.insert(key))
 		stats.prepassUnkeyed++;
 	prepassDrawsThisFrame++;
@@ -2421,27 +2605,32 @@ flushCache(void)
 	e = ctx->encoder;
 
 	bool prepassPass = ctx->encoderColorFormat == COLORFMT_PREPASS;
-	bool keyed = false;
+	bool keyed = false, cutout = false;
 	uint64 drawKey = 0;
 	if(prepassViewSame && (prepassPass || (prepassFrame && ctx->encoderColorFormat == COLORFMT_SCENE))){
 		PrepassDraw pdraw = { rwStateCache.blendEnable != 0, rwStateCache.ztest != 0, rwStateCache.zwrite != 0,
-			ctx->encoderHasDepth, currentDrawInst != nil };
-		if(prepassEligible(pdraw)){
+			ctx->encoderHasDepth, currentDrawInst != nil, cutoutAlphaTest(), (int)rwStateCache.srcblend, (int)rwStateCache.destblend };
+		cutout = prepassCutout(pdraw);
+		if(prepassEligible(pdraw) || cutout){
 			bool skinned = layoutHasAttrib(currentLayout, ATTRIB_WEIGHTS);
 			drawKey = prepassKey(currentDrawInst, (const float*)&uniformObject.world,
-				skinned ? (const float*)&uniformSkin.bones[0] : nil);
+				skinned ? (const float*)&uniformSkin.bones[0] : nil, cutout);
 			keyed = true;
 		}
 	}
 	if(prepassPass)
-		return keyed ? flushPrepass(ctx, e, drawKey) : (stats.prepassSkipped++, 0);
+		return keyed ? flushPrepass(ctx, e, drawKey, cutout) : (stats.prepassSkipped++, 0);
 	static_assert(ALPHAGREATEREQUAL == 1, "alpha test function");
+	static_assert(BLENDSRCALPHA == PP_BLEND_SRCALPHA && BLENDINVSRCALPHA == PP_BLEND_INVSRCALPHA, "blend factors");
 	if(currentDrawInst && ctx->encoderColorFormat == COLORFMT_SCENE && shRecordsAlphaRef(rwStateCache.zwrite != 0, alphaFunc))
 		((InstanceData*)currentDrawInst)->castAlphaRef = alphaRef;
 
 	bool matched = keyed && prepassKeys.markUsed(drawKey);
 	bool forced = forceEqualNext && ctx->encoderColorFormat == COLORFMT_SCENE;
-	bool depthEqual = matched || forced;
+	bool received = matched || forced || (pairSecond && pairFirstMatched && ctx->encoderColorFormat == COLORFMT_SCENE);
+	if(!pairSecond)
+		pairFirstMatched = matched && cutout && ctx->encoderColorFormat == COLORFMT_SCENE;
+	bool depthEqual = (matched && !cutout) || forced;
 	uint32 variant = currentVariant, layout = currentLayout;
 	id<MTLBuffer> stream = nil;
 	bool relitFrag = false, plainShadow = false;
@@ -2459,9 +2648,9 @@ flushCache(void)
 			else
 				queueNormalStream(currentDrawHeader);
 		}
-		if((variant & VARIANT_RELIT) && depthEqual && frameShadowSource())
+		if((variant & VARIANT_RELIT) && received && frameShadowSource())
 			variant |= VARIANT_RELITSHADOW;
-		else if((rv & VARIANT_RELITPRELIT) && (variant & VARIANT_RELIT) == 0 && depthEqual && frameShadowSource() &&
+		else if((rv & VARIANT_RELITPRELIT) && (variant & VARIANT_RELIT) == 0 && received && frameShadowSource() &&
 		        plainTwinFailed.count(currentShader->shaderId) == 0){
 			variant = currentVariant | VARIANT_RELITSHADOW;
 			plainShadow = true;
@@ -2783,13 +2972,23 @@ prewarmUV2Layouts(uint32 samples, uint32 fmt)
 static void
 prewarmPrepassLayout(uint32 layout, uint32 samples)
 {
-	prewarm(layoutHasAttrib(layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader, layout, 0, BLEND_OFF, DEPTHFMT_D32S8,
-		samples, COLORFMT_PREPASS);
-	if(!layoutHasAttrib(layout, ATTRIB_NORMAL) && !layoutHasAttrib(layout, ATTRIB_WEIGHTS)){
-		uint32 derived = derivedNormalLayout(layout);
+	Shader *sh = layoutHasAttrib(layout, ATTRIB_WEIGHTS) ? prepassSkinShader : prepassShader;
+	uint32 derived = 0;
+	if(!layoutHasAttrib(layout, ATTRIB_NORMAL) && !layoutHasAttrib(layout, ATTRIB_WEIGHTS))
+		derived = derivedNormalLayout(layout);
+	for(int32 cut = 0; cut < (layoutHasAttrib(layout, ATTRIB_TEXCOORDS0) ? 2 : 1); cut++){
+		uint32 v = cut ? VARIANT_ALPHATEST : 0;
+		prewarm(sh, layout, v, BLEND_OFF, DEPTHFMT_D32S8, samples, COLORFMT_PREPASS);
 		if(derived)
-			prewarm(prepassFaceShader, derived, 0, BLEND_OFF, DEPTHFMT_D32S8, samples, COLORFMT_PREPASS);
+			prewarm(prepassFaceShader, derived, v, BLEND_OFF, DEPTHFMT_D32S8, samples, COLORFMT_PREPASS);
 	}
+	if(samples != 1 || !layoutHasAttrib(layout, ATTRIB_TEXCOORDS0) || prepassLayerShader == nil || prepassLayerSkinShader == nil ||
+	   prepassLayerFaceShader == nil)
+		return;
+	prewarm(sh == prepassSkinShader ? prepassLayerSkinShader : prepassLayerShader, layout, VARIANT_ALPHATEST, BLEND_OFF,
+		DEPTHFMT_D32S8, 1, COLORFMT_PREPASS);
+	if(derived)
+		prewarm(prepassLayerFaceShader, derived, VARIANT_ALPHATEST, BLEND_OFF, DEPTHFMT_D32S8, 1, COLORFMT_PREPASS);
 }
 
 static void
@@ -2935,7 +3134,8 @@ hostPrewarmPrepass(const HostPrewarmRecord &r)
 	int32 i, n = prewarmSampleCounts(metalGlobals.numSamples, counts);
 	bool32 ok = 1;
 
-	if(r.blend || !r.depth || im2DLayout(r.layout) || !prepassShadersReady())
+	bool cut = r.blend && (r.variant & VARIANT_ALPHATEST) && layoutHasAttrib(r.layout, ATTRIB_TEXCOORDS0);
+	if((r.blend && !cut) || !r.depth || im2DLayout(r.layout) || !prepassShadersReady())
 		return 1;
 	bool skinned = layoutHasAttrib(r.layout, ATTRIB_WEIGHTS);
 	uint32 derived = skinned || layoutHasAttrib(r.layout, ATTRIB_NORMAL) ? 0 : derivedNormalLayout(r.layout);
@@ -2943,6 +3143,7 @@ hostPrewarmPrepass(const HostPrewarmRecord &r)
 		Shader *sh = skinned ? prepassSkinShader : prepassShader;
 		PipelineDesc d = {};
 		d.shader = sh->shaderId;
+		d.variant = cut ? VARIANT_ALPHATEST : 0;
 		d.vertexLayout = r.layout;
 		d.writeMask = MTLColorWriteMaskAll;
 		d.colorFormat = COLORFMT_PREPASS;
@@ -2955,6 +3156,19 @@ hostPrewarmPrepass(const HostPrewarmRecord &r)
 			d.vertexLayout = derived;
 			if(getPipeline(prepassFaceShader, d, pipelineKey(d)) == nil)
 				ok = 0;
+		}
+		if(cut && counts[i] == 1 && prepassLayerShader && prepassLayerSkinShader && prepassLayerFaceShader){
+			Shader *l = skinned ? prepassLayerSkinShader : prepassLayerShader;
+			d.shader = l->shaderId;
+			d.vertexLayout = r.layout;
+			if(getPipeline(l, d, pipelineKey(d)) == nil)
+				ok = 0;
+			if(derived){
+				d.shader = prepassLayerFaceShader->shaderId;
+				d.vertexLayout = derived;
+				if(getPipeline(prepassLayerFaceShader, d, pipelineKey(d)) == nil)
+					ok = 0;
+			}
 		}
 	}
 	return ok;
@@ -3138,9 +3352,16 @@ openPrepass(void)
 		prepass_skin_metal_src, nil };
 
 	@autoreleasepool {
-		prepassShader = Shader::create(ppSrc, "prepassVS", "prepassFS", 0);
-		prepassSkinShader = Shader::create(ppSkinSrc, "prepassSkinVS", "prepassFS", 0);
-		prepassFaceShader = Shader::create(ppSrc, "prepassVS", "prepassFaceFS", 0);
+		prepassShader = Shader::create(ppSrc, "prepassVS", "prepassFS");
+		prepassSkinShader = Shader::create(ppSkinSrc, "prepassSkinVS", "prepassFS");
+		prepassFaceShader = Shader::create(ppSrc, "prepassVS", "prepassFaceFS");
+		prepassLayerShader = Shader::create(ppSrc, "prepassVS", "prepassLayerFS");
+		prepassLayerSkinShader = Shader::create(ppSkinSrc, "prepassSkinVS", "prepassLayerFS");
+		prepassLayerFaceShader = Shader::create(ppSrc, "prepassVS", "prepassLayerFaceFS");
+		MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+		dd.depthCompareFunction = MTLCompareFunctionLess;
+		dd.depthWriteEnabled = YES;
+		prepassLayerDepth = [getContext()->device newDepthStencilStateWithDescriptor:dd];
 	}
 	if(!prepassShadersReady())
 		fprintf(stderr, "rw::metal: prepass shaders failed to build; modern frames draw without the prepass\n");
@@ -3215,6 +3436,15 @@ termState(void)
 	if(prepassFaceShader)
 		prepassFaceShader->destroy();
 	prepassFaceShader = nil;
+	Shader **layer[3] = { &prepassLayerShader, &prepassLayerSkinShader, &prepassLayerFaceShader };
+	for(Shader **l : layer){
+		if(*l)
+			(*l)->destroy();
+		*l = nil;
+	}
+	prepassLayerDepth = nil;
+	layerDraws.clear();
+	layerWanted = false;
 	prepassKeys = PrepassKeySet();
 	prepassFrame = false;
 	forceEqualNext = false;

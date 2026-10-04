@@ -5,6 +5,7 @@ const char *prepass_skin_metal_src =
 "	float4 normal [[attribute(ATTRIB_NORMAL)]];\n"
 "	float4 weights [[attribute(ATTRIB_WEIGHTS)]];\n"
 "	uchar4 indices [[attribute(ATTRIB_INDICES)]];\n"
+"	float2 tex0 [[attribute(ATTRIB_TEXCOORDS0), function_constant(alphaTest)]];\n"
 "};\n"
 
 "vertex PrepassOut\n"
@@ -34,6 +35,9 @@ const char *prepass_skin_metal_src =
 "	out.viewPos = (scene.view * V).xyz;\n"
 "	out.curClip = pf.viewProj * V;\n"
 "	out.prevClip = pf.prevViewProj * (po.prevWorld * float4(PrevVertex, 1.0));\n"
+"	out.tex0 = float2(0.0);\n"
+"	if(alphaTest)\n"
+"		out.tex0 = in.tex0;\n"
 "	out.position = MetalDepth(out.position);\n"
 "	return out;\n"
 "}\n"

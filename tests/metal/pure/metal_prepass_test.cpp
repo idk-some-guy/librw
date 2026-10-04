@@ -62,7 +62,7 @@ TestMotion(void)
 static void
 TestEligible(void)
 {
-	PrepassDraw d = { false, true, true, true, true };
+	PrepassDraw d = { false, true, true, true, true, false, PP_BLEND_SRCALPHA, PP_BLEND_INVSRCALPHA };
 	CHECK(prepassEligible(d));
 	d.blend = true;
 	CHECK(!prepassEligible(d));
@@ -77,6 +77,49 @@ TestEligible(void)
 }
 
 static void
+TestCutout(void)
+{
+	PrepassDraw d = { true, true, true, true, true, true, PP_BLEND_SRCALPHA, PP_BLEND_INVSRCALPHA };
+	CHECK(prepassCutout(d) && !prepassEligible(d));
+	d.destBlend = 2;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.destBlend = PP_BLEND_INVSRCALPHA; d.srcBlend = 2;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.srcBlend = PP_BLEND_INVSRCALPHA; d.destBlend = PP_BLEND_SRCALPHA;
+	CHECK(!prepassCutout(d));
+	d.srcBlend = PP_BLEND_SRCALPHA; d.destBlend = PP_BLEND_INVSRCALPHA; d.alphaTested = false;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.alphaTested = true; d.zwrite = false;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.zwrite = true; d.ztest = false;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.ztest = true; d.sceneDepth = false;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.sceneDepth = true; d.instanced = false;
+	CHECK(!prepassCutout(d) && !prepassEligible(d));
+	d.instanced = true; d.blend = false;
+	CHECK(!prepassCutout(d) && prepassEligible(d));
+	d.alphaTested = false;
+	CHECK(!prepassCutout(d) && prepassEligible(d));
+	CHECK(PP_BLEND_SRCALPHA == 5 && PP_BLEND_INVSRCALPHA == 6);
+	CHECK(PP_CUTOUT_SOLID > PP_LAYER_MIN && PP_CUTOUT_SOLID < 1.0f && 1.0f - PP_CUTOUT_SOLID <= 1.0f/255.0f);
+	CHECK(ppCutoutKeep(1.0f, 0.5f) && ppCutoutKeep(PP_CUTOUT_SOLID, 0.5f));
+	CHECK(!ppCutoutKeep(0.99f, 0.5f) && !ppCutoutKeep(0.75f, 0.5f) && !ppCutoutKeep(0.4f, 0.5f));
+	CHECK(!ppCutoutKeep(1.0f, 1.5f) && ppCutoutKeep(1.0f, 1.0f));
+}
+
+static void
+TestLayer(void)
+{
+	CHECK(PP_LAYER_MIN == 0.5f);
+	CHECK(ppLayerKeep(0.75f, 128/255.0f) && ppLayerKeep(0.75f, 3/255.0f) && ppLayerKeep(1.0f, 0.0f));
+	CHECK(ppLayerKeep(0.5f, 3/255.0f) && !ppLayerKeep(0.49f, 3/255.0f) && !ppLayerKeep(0.25f, 0.0f));
+	CHECK(ppLayerKeep(128/255.0f, 128/255.0f) && !ppLayerKeep(127/255.0f, 128/255.0f));
+	CHECK(ppLayerKeep(0.8f, 0.8f) && !ppLayerKeep(0.79f, 0.8f));
+	CHECK(!ppLayerRuns(false, 4) && !ppLayerRuns(true, 0) && ppLayerRuns(true, 1));
+}
+
+static void
 TestKey(void)
 {
 	int a, b;
@@ -84,11 +127,14 @@ TestKey(void)
 	float w2[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7.5f, 1 };
 	float bone[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 	float bone2[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0.25f, 1 };
-	CHECK(prepassKey(&a, w, nullptr) == prepassKey(&a, w, nullptr));
-	CHECK(prepassKey(&a, w, nullptr) != prepassKey(&b, w, nullptr));
-	CHECK(prepassKey(&a, w, nullptr) != prepassKey(&a, w2, nullptr));
-	CHECK(prepassKey(&a, w, nullptr) != prepassKey(&a, w, bone));
-	CHECK(prepassKey(&a, w, bone) != prepassKey(&a, w, bone2));
+	CHECK(prepassKey(&a, w, nullptr, false) == prepassKey(&a, w, nullptr, false));
+	CHECK(prepassKey(&a, w, nullptr, false) != prepassKey(&b, w, nullptr, false));
+	CHECK(prepassKey(&a, w, nullptr, false) != prepassKey(&a, w2, nullptr, false));
+	CHECK(prepassKey(&a, w, nullptr, false) != prepassKey(&a, w, bone, false));
+	CHECK(prepassKey(&a, w, bone, false) != prepassKey(&a, w, bone2, false));
+	CHECK(prepassKey(&a, w, nullptr, true) == prepassKey(&a, w, nullptr, true));
+	CHECK(prepassKey(&a, w, nullptr, true) != prepassKey(&a, w, nullptr, false));
+	CHECK(prepassKey(&a, w, bone, true) != prepassKey(&a, w, bone, false));
 }
 
 static void
@@ -208,6 +254,8 @@ main(void)
 	TestOctahedral();
 	TestMotion();
 	TestEligible();
+	TestCutout();
+	TestLayer();
 	TestKey();
 	TestKeySet();
 	TestPrevMap();
