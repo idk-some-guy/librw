@@ -431,6 +431,8 @@ void setEmissiveScale(float32 s);
 float32 getEmissiveScale(void);
 bool32 setGradeShader(const char *src);
 void displayChanged(void);
+void setDebugView(int32 view);
+int32 getDebugView(void);
 
 }
 }

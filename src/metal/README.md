@@ -311,6 +311,10 @@ At native resolution with AntiAliasing `taa`, the modern tier resolves the grade
 
 The temporal history (the scaler's or the resolve's) resets on `cameraCut()`, on a frame without a valid prepass and the frame after it, when the scene targets are rebuilt (a resize, a new upscale factor or sample count), and on any tier or settings change. `FrameInfo::temporalReset` tells whether the last frame reset it.
 
+### Debug views
+
+`setDebugView(view)` picks one of `DEBUGVIEW_NONE`, `DEBUGVIEW_SHADOW`, `DEBUGVIEW_NORMALS`, `DEBUGVIEW_MOTION` and `DEBUGVIEW_REACTIVE` (`metalsettings.h`); a value outside the enum is none, and `getDebugView()` returns the view in force. In a modern scene frame with a view other than none, the `debugView` kernel runs at the end of the grade, after FXAA, the TAA resolve, the temporal scaler or the spatial scaler, and overwrites the output with an internal-resolution target sampled nearest at the output size: the shadow factor (`frameShadowTexture`) as grey, the prepass normal as `0.5 + 0.5n` with black where no normal was stored, the motion target as `(0.5 + 20m.x, 0.5 + 20m.y, 0.5)`, and the reactive mask as grey. A view shows only what was written in that frame: the normals and motion views need a valid prepass, and the reactive view needs a reactive mask encoded that frame (by the TAA resolve, or for the temporal scaler on macOS 14.4 and later). Without one, or with no target at all, the output stays graded, and so it does when the kernel failed to build (logged once at engine start). The TAA and scaler histories never read the output, so a view leaves no trace once it is set back to none. 2D drawn after `endScene` (a HUD, menus) composites over the view as over the graded picture. Classic and enhanced frames ignore the view.
+
 ## Log lines
 
 The backend writes these lines to stderr, each starting with `rw::metal:`. Errors such as a pipeline that fails to build, an oversized custom block or a texture that cannot be created go through librw's error mechanism (`RWERROR`) instead.
@@ -324,6 +328,7 @@ The backend writes these lines to stderr, each starting with `rw::metal:`. Error
 - `anti-aliasing taa requested, using fxaa; taa needs depth and motion vectors` each time the setting becomes TAA outside the modern tier, or in it without the prepass shaders, the motion kernels or (at native) the TAA kernel.
 - `TAA history for <w>x<h> could not be created; using FXAA` once.
 - `TAA kernel failed to build: <error>` at start; TAA then runs as FXAA.
+- `debug view kernel failed to build: <error>` at start; a debug view then leaves the output as graded.
 - `temporal scaler unavailable for <iw>x<ih> to <ow>x<oh>; using the spatial scaler` once, when MetalFX cannot make the temporal scaler.
 - `temporal scaler unavailable for <iw>x<ih> to <ow>x<oh>; taa needs a depth raster; using the spatial scaler` once, and the same with `the prepass shaders`, when `taa` resolves to the spatial scaler for that reason.
 - `the temporal scaler has no motion target; using the spatial scaler` when the prepass targets cannot be created for it, instead of the first line.

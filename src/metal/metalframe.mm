@@ -36,6 +36,7 @@ namespace metal {
 #include "shaders/reactive_metal.inc"
 #include "shaders/temporalh_metal.inc"
 #include "shaders/taa_metal.inc"
+#include "shaders/debugview_metal.inc"
 extern const char *prepassh_metal_src;
 extern const char *header_metal_src;
 extern const char *im2d_metal_src;
@@ -67,6 +68,11 @@ struct TaaFrame
 {
 	uint32 width, height, valid, pad;
 	float32 jitterX, jitterY, pad2[2];
+};
+
+struct DebugViewFrame
+{
+	uint32 view, align, width, height, pad, pad2;
 };
 
 struct FrameState
@@ -165,6 +171,9 @@ struct FrameState
 	bool taaFail = false, taaGaveUp = false, taaReported = false;
 	uint32 taaAllocs = 0, taaLogs = 0, taaRequests = 0;
 	id<MTLTexture> white = nil, testShadow = nil;
+	int32 debugView = DEBUGVIEW_NONE;
+	bool reactiveEncoded = false;
+	id<MTLComputePipelineState> debugViewPipe = nil;
 	id<MTLTexture> shadow = nil, shadowShown = nil;
 	bool shadowShownReal = false;
 	char tail[1024] = "";
@@ -560,6 +569,14 @@ frameInit(void)
 		if(frame.taa == nil)
 			fprintf(stderr, "rw::metal: TAA kernel failed to build: %s\n",
 				terr ? terr.localizedDescription.UTF8String : taaLib ? "no taaResolve" : err ? err.UTF8String : "");
+		const char *viewParts[] = { frameHead, prepassh_metal_src, debugview_metal_src, nil };
+		NSError *verr = nil;
+		id<MTLLibrary> viewLib = frameLibrary(viewParts, &err);
+		id<MTLFunction> viewFn = viewLib ? [viewLib newFunctionWithName:@"debugView"] : nil;
+		frame.debugViewPipe = viewFn ? [getContext()->device newComputePipelineStateWithFunction:viewFn error:&verr] : nil;
+		if(frame.debugViewPipe == nil)
+			fprintf(stderr, "rw::metal: debug view kernel failed to build: %s\n",
+				verr ? verr.localizedDescription.UTF8String : viewLib ? "no debugView" : err ? err.UTF8String : "");
 		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
 			width:1 height:1 mipmapped:NO];
 		d.usage = MTLTextureUsageShaderRead;
@@ -1056,6 +1073,7 @@ encodeReactive(void)
 {
 	if(!ensureReactive())
 		return;
+	frame.reactiveEncoded = true;
 	frame.reactivePass.colorAttachments[0].texture = frame.reactive;
 	id<MTLRenderCommandEncoder> e = [frameCommandBuffer() renderCommandEncoderWithDescriptor:frame.reactivePass];
 	frame.reactivePass.colorAttachments[0].texture = nil;
@@ -1178,6 +1196,27 @@ encodeTaa(void)
 }
 
 static void
+encodeDebugView(void)
+{
+	if(frame.debugView == DEBUGVIEW_NONE || frame.activeTier != TIER_MODERN || frame.debugViewPipe == nil)
+		return;
+	id<MTLTexture> src = frame.debugView == DEBUGVIEW_SHADOW ? frameShadowTexture() :
+		frame.debugView == DEBUGVIEW_NORMALS ? (frame.prepassValid ? frame.prepassNormal : nil) :
+		frame.debugView == DEBUGVIEW_MOTION ? (frame.prepassValid ? frame.prepassMotion : nil) :
+		frame.reactiveEncoded ? frame.reactive : nil;
+	if(src == nil)
+		return;
+	DebugViewFrame v = { (uint32)frame.debugView, 0u, (uint32)frame.output.width, (uint32)frame.output.height, 0u, 0u };
+	id<MTLComputeCommandEncoder> enc = [frameCommandBuffer() computeCommandEncoder];
+	[enc setComputePipelineState:frame.debugViewPipe];
+	[enc setTexture:src atIndex:0];
+	[enc setTexture:frame.output atIndex:1];
+	[enc setBytes:&v length:sizeof(v) atIndex:0];
+	dispatchOver(enc, frame.output);
+	[enc endEncoding];
+}
+
+static void
 encodeGrade(const GradeParams *p)
 {
 	id<MTLTexture> dest = frame.graded ? frame.graded : frame.output;
@@ -1222,6 +1261,7 @@ encodeGrade(const GradeParams *p)
 		encodeTemporal();
 	}else if(frame.scaler)
 		encodeUpscale();
+	encodeDebugView();
 }
 
 void
@@ -1245,6 +1285,7 @@ beginScene(Camera *cam)
 		frame.prepassValid = false;
 		frame.reactiveDraws.clear();
 		frame.reactiveDepth = 0;
+		frame.reactiveEncoded = false;
 		Raster *main = cam->frameBuffer->parent;
 		Raster *depth = cam->zBuffer ? cam->zBuffer->parent : nil;
 		bool enhanced = frame.activeTier != TIER_CLASSIC && frame.available && main->type == Raster::CAMERA &&
@@ -1355,6 +1396,18 @@ bool32
 shadowSourceOn(void)
 {
 	return realShadowSource();
+}
+
+void
+setDebugView(int32 view)
+{
+	frame.debugView = view > DEBUGVIEW_NONE && view < NUMDEBUGVIEWS ? view : DEBUGVIEW_NONE;
+}
+
+int32
+getDebugView(void)
+{
+	return frame.debugView;
 }
 
 bool

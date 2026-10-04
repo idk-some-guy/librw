@@ -5210,6 +5210,407 @@ CheckRelitStatsSun(void)
 	return Report(none && lit && scaled, name);
 }
 
+static bool
+CheckDebugViewShadow(void)
+{
+	const char *name = "the shadow debug view shows the shadow factor as grey";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setShadowFactorForTest(0.25f);
+	metal::setDebugView(metal::DEBUGVIEW_SHADOW);
+	int32 set = metal::getDebugView();
+	Frames(&s, 1);
+	float px[4] = {};
+	bool read = metal::readFrameOutput(320, 240, px);
+	metal::setDebugView(metal::NUMDEBUGVIEWS);
+	int32 above = metal::getDebugView();
+	metal::setDebugView(-1);
+	int32 below = metal::getDebugView();
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	metal::setShadowFactorForTest(-1.0f);
+	TiersOff();
+	FreeScene(&s);
+	bool clamped = set == metal::DEBUGVIEW_SHADOW && above == metal::DEBUGVIEW_NONE && below == metal::DEBUGVIEW_NONE;
+	bool ok = read && clamped && fabsf(px[0] - 0.25f) < 0.01f && fabsf(px[1] - 0.25f) < 0.01f;
+	if(!ok)
+		Detail("  output %.3f,%.3f,%.3f; views read back %d, %d, %d\n", px[0], px[1], px[2], set, above, below);
+	return Report(ok, name);
+}
+
+static V3d
+YawPitch(V3d p, float yaw, float pitch)
+{
+	float x = p.x*cosf(yaw) + p.z*sinf(yaw), z = -p.x*sinf(yaw) + p.z*cosf(yaw);
+	V3d r = { x, p.y*cosf(pitch) - z*sinf(pitch), p.y*sinf(pitch) + z*cosf(pitch) };
+	return r;
+}
+
+static Atomic*
+SkewedQuad(Geometry **geo, float cx, float cy, float z, float yaw, float pitch, RGBA c, Material *mat)
+{
+	RGBA col[4] = { c, c, c, c };
+	*geo = QuadGeometry(Geometry::POSITIONS | Geometry::TEXTURED | Geometry::PRELIT | Geometry::NORMALS, 1.0f, 1.0f, -1.0f, -1.0f, 0.0f, col, nil, mat);
+	(*geo)->lock(Geometry::LOCKVERTICES | Geometry::LOCKNORMALS);
+	V3d *v = (*geo)->morphTargets[0].vertices;
+	V3d facing = { 0.0f, 0.0f, -1.0f };
+	for(int i = 0; i < 4; i++){
+		V3d r = YawPitch(v[i], yaw, pitch);
+		v[i].x = cx + r.x;
+		v[i].y = cy + r.y;
+		v[i].z = z + r.z;
+		(*geo)->morphTargets[0].normals[i] = YawPitch(facing, yaw, pitch);
+	}
+	(*geo)->calculateBoundingSphere();
+	(*geo)->unlock();
+	return MakeAtomic(*geo);
+}
+
+static bool
+CheckDebugViewNormals(void)
+{
+	const char *name = "the normals debug view shows a floor facing the camera as 0.5 + 0.5n and the sky as black";
+	Scene3D s;
+	MakeScene(&s);
+	RGBA grey = { 160, 160, 160, 255 };
+	Geometry *tiltGeo;
+	Atomic *tilted = SkewedQuad(&tiltGeo, -3.5f, -2.0f, 9.0f, 0.6f, 0.35f, grey, s.mat);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setDebugView(metal::DEBUGVIEW_NORMALS);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawOpaque(&s);
+		tilted->render();
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	tilted->render();
+	metal::endScene(nil);
+	WorldEnd();
+	int x = PX(0.5f, 10.0f), y = PY(0.25f, 10.0f), tx = PX(-3.5f, 9.0f), ty = PY(-2.0f, 9.0f);
+	float floorPx[4] = {}, skyPx[4] = { -1.0f, -1.0f, -1.0f, -1.0f }, tiltPx[4] = {}, n[3] = {}, tn[3] = {}, m[2], d;
+	bool read = metal::readFrameOutput(x, y, floorPx) && metal::readFrameOutput(20, 20, skyPx) &&
+		metal::readPrepassForTest(x, y, n, m, &d) && metal::readFrameOutput(tx, ty, tiltPx) &&
+		metal::readPrepassForTest(tx, ty, tn, m, &d);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	TiersOff();
+	DestroyAtomic(tilted);
+	tiltGeo->destroy();
+	FreeScene(&s);
+	bool floorOk = true, tiltOk = true;
+	for(int i = 0; i < 3; i++){
+		floorOk = floorOk && fabsf(floorPx[i] - (0.5f + 0.5f*n[i])) < 0.01f;
+		tiltOk = tiltOk && fabsf(tiltPx[i] - (0.5f + 0.5f*tn[i])) < 0.01f;
+	}
+	bool skewed = fabsf(tn[0]) > 0.2f && fabsf(tn[1]) > 0.2f && fabsf(fabsf(tn[0]) - fabsf(tn[1])) > 0.1f;
+	bool skyOk = skyPx[0] == 0.0f && skyPx[1] == 0.0f && skyPx[2] == 0.0f;
+	bool ok = read && floorOk && skyOk && fabsf(n[2] + 1.0f) < 0.01f && tiltOk && skewed;
+	if(!ok)
+		Detail("  floor %.3f,%.3f,%.3f for normal %.3f,%.3f,%.3f; tilted %.3f,%.3f,%.3f for normal %.3f,%.3f,%.3f; sky %.3f,%.3f,%.3f\n",
+			floorPx[0], floorPx[1], floorPx[2], n[0], n[1], n[2], tiltPx[0], tiltPx[1], tiltPx[2], tn[0], tn[1], tn[2],
+			skyPx[0], skyPx[1], skyPx[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDebugViewMotion(void)
+{
+	const char *name = "the motion debug view is mid grey for a still camera and moves off grey when the camera turns";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setDebugView(metal::DEBUGVIEW_MOTION);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	Frames(&s, 2);
+	float still[4] = {}, turned[4] = {}, n[3], m[2] = {}, d;
+	bool read = metal::readFrameOutput(320, 240, still);
+	PlaceCamera(1.0f, 0.0f, 0.0f, 0.0f);
+	Frames(&s, 1);
+	read = read && metal::readFrameOutput(320, 240, turned) && metal::readPrepassForTest(320, 240, n, m, &d);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	PlaceCamera(0.0f, 0.0f, 0.0f, 0.0f);
+	metal::cameraCut();
+	TiersOff();
+	FreeScene(&s);
+	bool stillOk = fabsf(still[0] - 0.5f) < 0.01f && fabsf(still[1] - 0.5f) < 0.01f && fabsf(still[2] - 0.5f) < 0.01f;
+	bool moved = fabsf(turned[0] - 0.5f) > 0.05f || fabsf(turned[1] - 0.5f) > 0.05f;
+	bool turnedOk = fabsf(turned[0] - (0.5f + 20.0f*m[0])) < 0.02f && fabsf(turned[1] - (0.5f + 20.0f*m[1])) < 0.02f &&
+		fabsf(turned[2] - 0.5f) < 0.01f;
+	bool ok = read && stillOk && moved && turnedOk;
+	if(!ok)
+		Detail("  still %.3f,%.3f,%.3f; turned %.3f,%.3f,%.3f for motion %.5f,%.5f\n", still[0], still[1], still[2],
+			turned[0], turned[1], turned[2], m[0], m[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDebugViewReactive(void)
+{
+	const char *name = "the reactive debug view lights the reactive mask only";
+	Scene3D s;
+	MakeScene(&s);
+	RGBA white = { 255, 255, 255, 255 };
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
+	metal::setDebugView(metal::DEBUGVIEW_REACTIVE);
+	Frames(&s, 1);
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawOpaque(&s);
+		metal::endPrepass();
+	}
+	DrawAll(&s);
+	metal::beginReactive();
+	Quad2D(20, 20, 60, 60, white, true);
+	metal::endReactive();
+	metal::endScene(nil);
+	WorldEnd();
+	float in[4] = {}, out[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	bool read = metal::readFrameOutput(40, 40, in) && metal::readFrameOutput(320, 240, out);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && fabsf(in[0] - 1.0f) < 0.01f && fabsf(in[1] - 1.0f) < 0.01f && fabsf(in[2] - 1.0f) < 0.01f &&
+		out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f;
+	if(!ok)
+		Detail("  inside %.3f,%.3f,%.3f; outside %.3f,%.3f,%.3f\n", in[0], in[1], in[2], out[0], out[1], out[2]);
+	return Report(ok, name);
+}
+
+static uint8*
+DebugViewComposite(Scene3D *s, int32 view)
+{
+	metal::setDebugView(view);
+	SceneFrame(s, true);
+	uint8 *px = CompositeNow();
+	cam->showRaster(0);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	return px;
+}
+
+static uint8*
+DebugViewRun(Scene3D *s, int32 upscale, const int32 *views, int n, int32 *upscaler)
+{
+	ModernOn(upscale, metal::ANTIALIAS_TAA);
+	metal::cameraCut();
+	metal::setJitterIndexForTest(0);
+	for(int i = 0; i < n; i++){
+		metal::setDebugView(views[i]);
+		SceneFrame(s, true);
+	}
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	if(upscaler)
+		*upscaler = metal::getFrameInfo().upscaler;
+	uint8 *px = CompositeNow();
+	cam->showRaster(0);
+	return px;
+}
+
+static bool
+CheckDebugViewIgnored(void)
+{
+	const char *name = "a debug view changes nothing in the enhanced tier, and view none restores the modern frame exactly";
+	Scene3D s;
+	MakeScene(&s);
+	int w = cam->frameBuffer->width, h = cam->frameBuffer->height;
+	cam->showRaster(0);
+	EnhancedOn();
+	uint8 *enhancedNone = DebugViewComposite(&s, metal::DEBUGVIEW_NONE);
+	uint8 *enhancedShadow = DebugViewComposite(&s, metal::DEBUGVIEW_SHADOW);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	uint8 *modernNever = DebugViewComposite(&s, metal::DEBUGVIEW_NONE);
+	uint8 *modernShadow = DebugViewComposite(&s, metal::DEBUGVIEW_SHADOW);
+	uint8 *modernAfter = DebugViewComposite(&s, metal::DEBUGVIEW_NONE);
+	static const int32 never[] = { metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE,
+		metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE };
+	static const int32 viewed[] = { metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_SHADOW, metal::DEBUGVIEW_SHADOW,
+		metal::DEBUGVIEW_NONE, metal::DEBUGVIEW_NONE };
+	uint8 *taaNever = DebugViewRun(&s, metal::UPSCALE_NATIVE, never, 6, nil);
+	uint8 *taaAfter = DebugViewRun(&s, metal::UPSCALE_NATIVE, viewed, 6, nil);
+	int32 upscaler = -1;
+	uint8 *scalerNever = DebugViewRun(&s, metal::UPSCALE_QUALITY, never, 6, &upscaler);
+	uint8 *scalerAfter = upscaler == metal::UPSCALER_TEMPORAL ? DebugViewRun(&s, metal::UPSCALE_QUALITY, viewed, 6, nil) : nil;
+	TiersOff();
+	FreeScene(&s);
+	bool enhancedSame = FramesEqual(enhancedNone, enhancedShadow, w, h, "enhanced with the shadow view against none");
+	bool modernSame = FramesEqual(modernNever, modernAfter, w, h, "modern with view none after a view frame against one that never set it");
+	bool viewShown = !FramesEqual(modernNever, modernShadow, w, h, "modern with the shadow view against none (should differ)");
+	bool taaSame = FramesEqual(taaNever, taaAfter, w, h, "modern TAA at native with view none after view frames against a run that never set one");
+	bool scalerSame = true;
+	if(scalerAfter)
+		scalerSame = FramesEqual(scalerNever, scalerAfter, w, h,
+			"the temporal scaler with view none after view frames against a run that never set one");
+	else
+		Detail("  no temporal scaler on this host; its run is left out\n");
+	delete[] enhancedNone;
+	delete[] enhancedShadow;
+	delete[] modernNever;
+	delete[] modernShadow;
+	delete[] modernAfter;
+	delete[] taaNever;
+	delete[] taaAfter;
+	delete[] scalerNever;
+	delete[] scalerAfter;
+	return Report(enhancedSame && modernSame && viewShown && taaSame && scalerSame, name);
+}
+
+static void
+ReactiveFrame(Scene3D *s, bool quad)
+{
+	RGBA white = { 255, 255, 255, 255 };
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		DrawOpaque(s);
+		metal::endPrepass();
+	}
+	DrawAll(s);
+	if(quad){
+		metal::beginReactive();
+		Quad2D(20, 20, 60, 60, white, true);
+		metal::endReactive();
+	}
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static bool
+SamePixel(const float a[4], const float b[4])
+{
+	return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static bool
+CheckDebugViewReactiveStale(void)
+{
+	const char *name = "the reactive debug view shows the graded picture on a frame that encodes no reactive mask";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_TAA);
+	metal::setDebugView(metal::DEBUGVIEW_REACTIVE);
+	ReactiveFrame(&s, true);
+	SetSettings(metal::TIER_MODERN, metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	float lit[4] = {}, stale[4] = {}, graded[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	bool read = metal::readFrameOutput(40, 40, lit);
+	ReactiveFrame(&s, false);
+	bool off = metal::getFrameInfo().antiAliasing == metal::ANTIALIAS_OFF;
+	read = read && metal::readFrameOutput(40, 40, stale);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	ReactiveFrame(&s, false);
+	read = read && metal::readFrameOutput(40, 40, graded);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && off && fabsf(lit[0] - 1.0f) < 0.01f && fabsf(graded[0] - 1.0f) > 0.1f && SamePixel(stale, graded);
+	if(!ok)
+		Detail("  anti-aliasing off %d; with the mask %.3f,%.3f,%.3f; without it %.3f,%.3f,%.3f; graded %.3f,%.3f,%.3f\n", off,
+			lit[0], lit[1], lit[2], stale[0], stale[1], stale[2], graded[0], graded[1], graded[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDebugViewNoPrepass(void)
+{
+	const char *name = "the normals and motion debug views show the graded picture on a modern frame without a valid prepass";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	Frames(&s, 2);
+	int x = PX(0.5f, 10.0f), y = PY(0.25f, 10.0f);
+	float normals[4] = {}, motion[4] = {}, graded[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+	metal::setDebugView(metal::DEBUGVIEW_NORMALS);
+	SceneFrame(&s, false);
+	bool read = metal::readFrameOutput(x, y, normals);
+	bool invalid = !metal::getFrameInfo().prepassValid;
+	metal::setDebugView(metal::DEBUGVIEW_MOTION);
+	SceneFrame(&s, false);
+	read = read && metal::readFrameOutput(x, y, motion);
+	invalid = invalid && !metal::getFrameInfo().prepassValid;
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	SceneFrame(&s, false);
+	read = read && metal::readFrameOutput(x, y, graded);
+	TiersOff();
+	FreeScene(&s);
+	bool ok = read && invalid && fabsf(graded[1] - 0.5f) > 0.1f && SamePixel(normals, graded) && SamePixel(motion, graded);
+	if(!ok)
+		Detail("  prepass invalid %d; normals view %.3f,%.3f,%.3f; motion view %.3f,%.3f,%.3f; graded %.3f,%.3f,%.3f\n", invalid,
+			normals[0], normals[1], normals[2], motion[0], motion[1], motion[2], graded[0], graded[1], graded[2]);
+	return Report(ok, name);
+}
+
+static void
+FrontOnlyFrame(Scene3D *s)
+{
+	metal::beginScene(cam);
+	WorldBegin(SKY);
+	if(metal::beginPrepass()){
+		s->front->render();
+		metal::endPrepass();
+	}
+	s->front->render();
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static bool
+CheckDebugViewUpscaled(void)
+{
+	const char *name = "with a spatial upscale the normals debug view shows the internal pixel each output pixel maps to beside a quad's edge";
+	Scene3D s;
+	MakeScene(&s);
+	ModernOn(metal::UPSCALE_QUALITY, metal::ANTIALIAS_FXAA);
+	metal::setDebugView(metal::DEBUGVIEW_NORMALS);
+	FrontOnlyFrame(&s);
+	FrontOnlyFrame(&s);
+	metal::FrameInfo fi = metal::getFrameInfo();
+	int x = PX(-1.0f, 10.0f) - 4, y = PY(0.25f, 10.0f);
+	int ix = (int)floorf((x + 0.5f)*fi.internalWidth/fi.outputWidth), iy = (int)floorf((y + 0.5f)*fi.internalHeight/fi.outputHeight);
+	float px[4] = {}, n[3] = {}, m[2], d;
+	bool read = metal::readFrameOutput(x, y, px) && metal::readPrepassForTest(ix, iy, n, m, &d);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	TiersOff();
+	FreeScene(&s);
+	bool spatial = fi.upscaler == metal::UPSCALER_SPATIAL && fi.internalWidth < fi.outputWidth;
+	bool mapped = true;
+	for(int i = 0; i < 3; i++)
+		mapped = mapped && fabsf(px[i] - (0.5f + 0.5f*n[i])) < 0.01f;
+	bool ok = read && spatial && fabsf(n[2] + 1.0f) < 0.01f && mapped;
+	if(!ok)
+		Detail("  upscaler %d internal %dx%d output %dx%d; output (%d,%d) %.3f,%.3f,%.3f; internal (%d,%d) normal %.3f,%.3f,%.3f\n",
+			fi.upscaler, fi.internalWidth, fi.internalHeight, fi.outputWidth, fi.outputHeight, x, y, px[0], px[1], px[2], ix, iy,
+			n[0], n[1], n[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckDebugViewUnder2D(void)
+{
+	const char *name = "2D drawn after the scene composites over a debug view";
+	static const float hud[4] = { 500.25f, 300.25f, 600.75f, 400.75f };
+	Scene3D s;
+	MakeScene(&s);
+	int w = cam->frameBuffer->width;
+	cam->showRaster(0);
+	ModernOn(metal::UPSCALE_NATIVE, metal::ANTIALIAS_OFF);
+	metal::setShadowFactorForTest(0.25f);
+	metal::setDebugView(metal::DEBUGVIEW_SHADOW);
+	Im2DSceneFrame(&s, 60.0f, 60.0f, hud);
+	uint8 *px = CompositeNow();
+	cam->showRaster(0);
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	metal::setShadowFactorForTest(-1.0f);
+	TiersOff();
+	FreeScene(&s);
+	int bad = -1;
+	bool hudOk = px && HudInPlace(px, w, hud, &bad);
+	const uint8 *view = px ? px + (240*w + 320)*4 : nil;
+	bool viewOk = view && view[0] == view[1] && view[1] == view[2] && view[0] > 20 && view[0] < 200;
+	if(!hudOk || !viewOk)
+		Detail("  2D probe %d failed; view pixel %d,%d,%d\n", bad, view ? view[0] : -1, view ? view[1] : -1, view ? view[2] : -1);
+	delete[] px;
+	return Report(hudOk && viewOk, name);
+}
+
 int
 RunModernChecks(Camera *camera)
 {
@@ -5324,6 +5725,15 @@ RunModernChecks(Camera *camera)
 	CheckRelitSunAtStart();
 	CheckRelitStatsSun();
 	CheckRelitCost("the GPU time of a modern frame of relit layers is measured with the face fetch on and off", 1);
+	CheckDebugViewShadow();
+	CheckDebugViewNormals();
+	CheckDebugViewMotion();
+	CheckDebugViewReactive();
+	CheckDebugViewIgnored();
+	CheckDebugViewReactiveStale();
+	CheckDebugViewNoPrepass();
+	CheckDebugViewUpscaled();
+	CheckDebugViewUnder2D();
 	WorldClose();
 	return failures;
 }
