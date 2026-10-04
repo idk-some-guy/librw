@@ -132,6 +132,21 @@ TestClampBoxNeeded(void)
 }
 
 static void
+TestClampBoxStart(void)
+{
+	CHECK(shClampBoxStart(0u) == -1);
+	CHECK(shClampBoxStart(1u) == 0);
+	bool inside = true;
+	for(unsigned int off = 0; off < 2; off++)
+		for(unsigned int g = 0; g < 9; g++)
+			for(int k = 0; k < 2; k++){
+				int d = (int)shUpsampleTap(g, off, k).index - (int)shUpsampleTap(g, off, 0).index;
+				inside = inside && d >= shClampBoxStart(1u) && d <= 1;
+			}
+	CHECK(inside);
+}
+
+static void
 TestGates(void)
 {
 	using namespace rw::metal;
@@ -399,6 +414,7 @@ main(void)
 	TestAccumulate();
 	TestClampedAccumulate();
 	TestClampBoxNeeded();
+	TestClampBoxStart();
 	TestGates();
 	TestOrigin();
 	TestPhase();

@@ -192,6 +192,12 @@ shClampBoxNeeded(float prev, float cur)
 	return prev != cur;
 }
 
+static inline int
+shClampBoxStart(unsigned int halfRes)
+{
+	return halfRes != 0u ? 0 : -1;
+}
+
 static inline bool
 shDisoccluded(float prevViewZ, float viewZ)
 {

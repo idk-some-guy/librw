@@ -2383,7 +2383,7 @@ MovingRoofBand(int32 quality, bool moving, float *v, int c0, int n, int row)
 static bool
 CheckShadowPanSmear(void)
 {
-	const char *name = "a camera pan smears a shadow at medium by at most two pixels more than at high, and a moving caster's shadow by at most one frame's motion per edge more, against each quality's own still frame";
+	const char *name = "a camera pan smears a shadow at medium by at most two pixels more than at high, and a moving caster's shadow by at most two pixels more than at high and at most two at high, against each quality's own still frame";
 	enum { N = 81, M = 128 };
 	int c0 = SX(-6.0f, 20.0f), row = SY(-4.0f, 20.0f), m0 = SX(1.0f, 20.0f), mrow = SY(0.0f, 20.0f);
 	const int32 q[2] = { metal::SHADOWQUALITY_MEDIUM, metal::SHADOWQUALITY_HIGH };
@@ -2403,7 +2403,7 @@ CheckShadowPanSmear(void)
 			shade[k] += still[i] >= 0.0f && still[i] < 0.5f;
 		}
 	}
-	bool ok = smear[0] <= smear[1] + 2 && dark[0] > 0 && dark[1] > 0 && trail[0] <= trail[1] + (int)(2*3.68f) && shade[0] > 0 && shade[1] > 0;
+	bool ok = smear[0] <= smear[1] + 2 && dark[0] > 0 && dark[1] > 0 && trail[0] <= trail[1] + 2 && trail[1] <= 2 && shade[0] > 0 && shade[1] > 0;
 	Detail("  pixels off their still value by more than 0.25 after the pan: medium %d, high %d (dark in the still frame: %d, %d of %d)\n",
 		smear[0], smear[1], dark[0], dark[1], (int)N);
 	Detail("  after the caster moved: medium %d, high %d (dark in the still frame: %d, %d of %d)\n",

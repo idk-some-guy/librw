@@ -193,6 +193,12 @@ const char *shadowh_metal_src =
 "	return prev != cur;\n"
 "}\n"
 
+"static inline int\n"
+"shClampBoxStart(unsigned int halfRes)\n"
+"{\n"
+"	return halfRes != 0u ? 0 : -1;\n"
+"}\n"
+
 "static inline bool\n"
 "shDisoccluded(float prevViewZ, float viewZ)\n"
 "{\n"

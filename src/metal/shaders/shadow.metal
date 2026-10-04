@@ -287,8 +287,9 @@ shadowClampBox(texture2d<float, access::read> raw, texture2d<float, access::read
 {
 	int2 rmax = int2(p.rawSize) - 1;
 	float lo = cur, hi = cur;
-	for(int y = -1; y <= 1; y++)
-		for(int x = -1; x <= 1; x++){
+	int b = shClampBoxStart(p.halfRes);
+	for(int y = b; y <= 1; y++)
+		for(int x = b; x <= 1; x++){
 			int2 h = clamp(rp + int2(x, y), int2(0), rmax);
 			float r = raw.read(uint2(h)).r;
 			float4 n = shadowStoredNormal(normals, shadowRawSource(p, h, off));
