@@ -246,6 +246,28 @@ addShadowCaster(Atomic *atomic, uint32 kind)
 }
 
 void
+addSkinnedShadowCaster(Atomic *atomic)
+{
+	if(atomic == nil || atomic->geometry == nil || !rtAvailable() || !rtCastersOpen())
+		return;
+	Geometry *geo = atomic->geometry;
+	if(skinGlobals.geoOffset <= 0 || Skin::get(geo) == nil)
+		return;
+	atomic->getPipeline()->instance(atomic);
+	InstanceDataHeader *h = (InstanceDataHeader*)geo->instData;
+	if(h == nil || h->platform != PLATFORM_METAL)
+		return;
+	RawMatrix world, palette[MAXSKINBONES];
+	convMatrix(&world, atomic->getFrame()->getLTM());
+	int32 n = skinPalette(atomic, palette);
+	Matrix ident;
+	ident.setIdentity();
+	for(int32 i = n; i < MAXSKINBONES; i++)
+		convMatrix(&palette[i], &ident);
+	rtAddDrawCaster(h, world, atomic, palette);
+}
+
+void
 requestShadowLevel(Atomic *atomic)
 {
 	if(atomic == nil || atomic->geometry == nil || !rtAvailable() || !rtCastersOpen())

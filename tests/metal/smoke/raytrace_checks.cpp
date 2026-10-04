@@ -1611,6 +1611,106 @@ SY(float y, float depth)
 	return (int)floorf(240.0f*(1.0f + y/(0.75f*depth)));
 }
 
+static Geometry*
+SkinnedArmGeometry(void)
+{
+	Geometry *geo = Geometry::create(8, 4, Geometry::POSITIONS | Geometry::TEXTURED | Geometry::NORMALS | Geometry::PRELIT);
+	V3d *v = geo->morphTargets[0].vertices;
+	float y0[2] = { -1.0f, 2.0f }, y1[2] = { 1.0f, 3.0f };
+	uint8 idx[8][4] = {};
+	float wts[8][4] = {};
+	Material *mat = Material::create();
+	geo->matList.appendMaterial(mat);
+	mat->destroy();
+	for(int q = 0; q < 2; q++){
+		v[4*q].set(-1.0f, y1[q], 0.0f);
+		v[4*q+1].set(1.0f, y1[q], 0.0f);
+		v[4*q+2].set(1.0f, y0[q], 0.0f);
+		v[4*q+3].set(-1.0f, y0[q], 0.0f);
+		for(int i = 4*q; i < 4*q+4; i++){
+			geo->morphTargets[0].normals[i].set(0.0f, 0.0f, -1.0f);
+			geo->colors[i] = { 100, 100, 100, 255 };
+			geo->texCoords[0][i] = { 0.0f, 0.0f };
+			idx[i][0] = (uint8)q;
+			wts[i][0] = 1.0f;
+		}
+		Triangle *t = &geo->triangles[2*q];
+		t[0].v[0] = 4*q; t[0].v[1] = 4*q+1; t[0].v[2] = 4*q+2; t[0].matId = 0;
+		t[1].v[0] = 4*q; t[1].v[1] = 4*q+2; t[1].v[2] = 4*q+3; t[1].matId = 0;
+	}
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	Matrix ident[2];
+	ident[0].setIdentity();
+	ident[1].setIdentity();
+	AttachSkin(geo, 2, ident, idx, wts);
+	return geo;
+}
+
+static void
+SkinnedCasterFrames(ShadowScene *s, Atomic *a, int n)
+{
+	for(int i = 0; i < n; i++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLNONE);
+			s->floor->render();
+			if(prepass)
+				metal::addSkinnedShadowCaster(a);
+		});
+	metal::rtWaitForTest();
+}
+
+static bool
+CheckSkinnedCasterUndrawn(void)
+{
+	const char *name = "a skinned atomic added without a draw casts its posed shadow, and does nothing outside the casters bracket";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	Geometry *geo = SkinnedArmGeometry();
+	Atomic *a = SkinAtomic(geo);
+	Place(a, 14.0f, 0.0f, -4.0f, 0.0f);
+	PoseSkin(a, 2);
+	V3d up = { 0.0f, 0.0f, 3.0f };
+	Skin::getHierarchy(a)->matrices[1].translate(&up, COMBINEPOSTCONCAT);
+	SkinnedCasterFrames(&s, a, 24);
+	metal::RayStats posedStats = metal::getRayStats();
+	float raised = -1, bodyPosed = -1, armRest = -1, len = 0;
+	bool read = metal::readShadowForTest(SX(-5.0f, 20.0f), SY(2.5f, 20.0f), &raised, &len) &&
+		metal::readShadowForTest(SX(-2.0f, 20.0f), SY(0.0f, 20.0f), &bodyPosed, &len);
+	PoseSkin(a, 2);
+	SkinnedCasterFrames(&s, a, 24);
+	float raisedBind = -1, bodyBind = -1;
+	read = read && metal::readShadowForTest(SX(-5.0f, 20.0f), SY(2.5f, 20.0f), &raisedBind, &len) &&
+		metal::readShadowForTest(SX(-2.0f, 20.0f), SY(0.0f, 20.0f), &bodyBind, &len) &&
+		metal::readShadowForTest(SX(-2.0f, 20.0f), SY(2.5f, 20.0f), &armRest, &len);
+
+	Geometry *geoOut = SkinnedArmGeometry();
+	Atomic *out = SkinAtomic(geoOut);
+	Place(out, 14.0f, 0.0f, -4.0f, 0.0f);
+	PoseSkin(out, 2);
+	metal::addSkinnedShadowCaster(out);
+	bool outInstanced = geoOut->instData != nil;
+	CasterFrame([&](bool){
+		SetRenderState(CULLMODE, CULLNONE);
+		s.floor->render();
+	});
+	metal::rtWaitForTest();
+	metal::RayStats outStats = metal::getRayStats();
+	DestroySkinAtomic(out);
+	geoOut->destroy();
+	DestroySkinAtomic(a);
+	geo->destroy();
+	FreeShadowScene(&s);
+	bool ok = read && raised < 0.3f && bodyPosed < 0.3f && raisedBind > 0.9f && bodyBind < 0.3f && armRest < 0.3f &&
+		posedStats.skinnedCasters == 1 && !outInstanced && outStats.skinnedCasters == 0;
+	if(!ok)
+		Detail("  read %d; posed: under the raised arm %.3f body %.3f skinned %u; bind pose: there %.3f body %.3f arm %.3f; "
+			"outside the bracket instanced %d skinned %u\n", read, raised, bodyPosed, posedStats.skinnedCasters, raisedBind,
+			bodyBind, armRest, outInstanced, outStats.skinnedCasters);
+	return Report(ok, name);
+}
+
 static bool
 CheckShadowHistoryPan(void)
 {
@@ -3656,6 +3756,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckAlphaTextureGone();
 	CheckAlphaRefSceneOnly();
 	CheckAlphaAddressAxes();
+	CheckSkinnedCasterUndrawn();
 	PrintShadowTerminator();
 	PrintBuildTiming();
 	PrintCasterTiming();

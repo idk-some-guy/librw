@@ -419,6 +419,7 @@ void setSunLight(const Light *light);
 void setRelitDraw(bool32 on);
 enum { SHADOWCASTER_STATIC = 1, SHADOWCASTER_MOVING = 2, SHADOWCASTER_SKINNED = 4 };
 void addShadowCaster(Atomic *atomic, uint32 kind);
+void addSkinnedShadowCaster(Atomic *atomic);
 void requestShadowLevel(Atomic *atomic);
 void setShadowCaster(bool32 on);
 bool32 shadowSourceOn(void);

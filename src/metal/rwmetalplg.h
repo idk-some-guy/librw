@@ -12,6 +12,7 @@ ObjPipeline *makeSkinPipeline(void);
 void skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance);
 void skinRenderCB(Atomic *atomic, InstanceDataHeader *header);
 void uploadSkinMatrices(Atomic *atomic);
+int32 skinPalette(Atomic *a, RawMatrix *out);
 
 }
 }

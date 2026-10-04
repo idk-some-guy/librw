@@ -80,8 +80,8 @@ skinInstanceCB(Geometry *geo, InstanceDataHeader *header, bool32 reinstance)
 	uploadInstanceVertices(header);
 }
 
-void
-uploadSkinMatrices(Atomic *a)
+int32
+skinPalette(Atomic *a, RawMatrix out[MAXSKINBONES])
 {
 	static bool reported;
 	int32 i, n;
@@ -104,7 +104,7 @@ uploadSkinMatrices(Atomic *a)
 			for(i = 0; i < n; i++){
 				invMats[i].flags = 0;
 				Matrix::mult(&m, &invMats[i], &hier->matrices[i]);
-				convMatrix(&skinMatrices[i], &m);
+				convMatrix(&out[i], &m);
 			}
 		}else{
 			Matrix invAtmMat;
@@ -113,15 +113,22 @@ uploadSkinMatrices(Atomic *a)
 				invMats[i].flags = 0;
 				Matrix::mult(&tmp, &hier->matrices[i], &invAtmMat);
 				Matrix::mult(&m, &invMats[i], &tmp);
-				convMatrix(&skinMatrices[i], &m);
+				convMatrix(&out[i], &m);
 			}
 		}
 	}else{
 		n = skin->numBones < MAXSKINBONES ? skin->numBones : MAXSKINBONES;
 		m.setIdentity();
 		for(i = 0; i < n; i++)
-			convMatrix(&skinMatrices[i], &m);
+			convMatrix(&out[i], &m);
 	}
+	return n;
+}
+
+void
+uploadSkinMatrices(Atomic *a)
+{
+	int32 n = skinPalette(a, skinMatrices);
 	setSkinMatrices(skinMatrices, n);
 }
 
