@@ -245,6 +245,21 @@ addShadowCaster(Atomic *atomic, uint32 kind)
 	rtAddHostCaster(h, world, atomic, sphere, kind);
 }
 
+void
+requestShadowLevel(Atomic *atomic)
+{
+	if(atomic == nil || atomic->geometry == nil || !rtAvailable() || !rtCastersOpen())
+		return;
+	Geometry *geo = atomic->geometry;
+	if(skinGlobals.geoOffset > 0 && Skin::get(geo) != nil)
+		return;
+	atomic->getPipeline()->instance(atomic);
+	InstanceDataHeader *h = (InstanceDataHeader*)geo->instData;
+	if(h == nil || h->platform != PLATFORM_METAL)
+		return;
+	rtEnsureBottom(h);
+}
+
 bool32
 drawIndexed(InstanceDataHeader *header, InstanceData *inst)
 {

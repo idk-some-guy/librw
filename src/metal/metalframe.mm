@@ -133,6 +133,7 @@ struct FrameState
 	id<MTLTexture> prepassNormal = nil, prepassMotion = nil, prepassNormalMS = nil, prepassMotionMS = nil;
 	bool prepassOpen = false, prepassDone = false, prepassFail = false, prepassReported = false;
 	bool rayWorkDone = false;
+	bool normalsUnwrittenTest = false;
 	uint32 prepassPasses = 0;
 	PassTarget prepassReturn = { nil, nil };
 	uint32 prepassDrawsLast = 0;
@@ -1462,6 +1463,12 @@ setTemporalFailForTest(bool32 fail)
 }
 
 void
+setPrepassNormalsUnwrittenForTest(bool32 on)
+{
+	frame.normalsUnwrittenTest = on != 0;
+}
+
+void
 setPrepassTargetsFailForTest(bool32 fail)
 {
 	frame.prepassFail = fail != 0;
@@ -1989,6 +1996,14 @@ frameRayWork(void)
 	memcpy(in.toSun, sun.toward, sizeof(in.toSun));
 	in.radius = sun.radius;
 	in.history = frame.prevPrepassValid;
+	if(frame.normalsUnwrittenTest){
+		MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+		d.colorAttachments[0].texture = frame.prepassNormal;
+		d.colorAttachments[0].loadAction = MTLLoadActionClear;
+		d.colorAttachments[0].storeAction = MTLStoreActionStore;
+		d.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+		[[frameCommandBuffer() renderCommandEncoderWithDescriptor:d] endEncoding];
+	}
 	frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
 }
 

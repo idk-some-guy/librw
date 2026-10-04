@@ -65,6 +65,12 @@ const char *prepassh_metal_src =
 "	return n;\n"
 "}\n"
 
+"static inline float\n"
+"ppNormalStored(float u, float v)\n"
+"{\n"
+"	return u != 0.0f || v != 0.0f ? 1.0f : 0.0f;\n"
+"}\n"
+
 "#define PP_FACING_REFLECT (-0.3f)\n"
 
 "static inline PPVec3\n"

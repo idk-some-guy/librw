@@ -84,7 +84,7 @@ shadowRayStart(constant ShadowRayParams &p, depth2d<float, access::read> depth, 
 	PPVec3 f = ppFacingNormal(PPVec3{ N.x, N.y, N.z }, PPVec3{ v.x, v.y, v.z });
 	SHVec3 o = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ f.x, f.y, f.z }, dist);
 	origin = float3(o.x, o.y, o.z);
-	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? 1.0 : 0.0);
+	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? ppNormalStored(e.x, e.y) : 0.0);
 	return true;
 }
 

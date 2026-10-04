@@ -85,7 +85,7 @@ const char *shadow_metal_src =
 "	PPVec3 f = ppFacingNormal(PPVec3{ N.x, N.y, N.z }, PPVec3{ v.x, v.y, v.z });\n"
 "	SHVec3 o = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ f.x, f.y, f.z }, dist);\n"
 "	origin = float3(o.x, o.y, o.z);\n"
-"	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? 1.0 : 0.0);\n"
+"	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? ppNormalStored(e.x, e.y) : 0.0);\n"
 "	return true;\n"
 "}\n"
 

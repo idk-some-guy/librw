@@ -37,6 +37,9 @@ TestOctahedral(void)
 	RoundTrip(-0.2f, -0.1f, -0.97f);
 	PPVec2 zero = ppOctEncode(0.0f, 0.0f, 0.0f);
 	CHECK(zero.x == 0.0f && zero.y == 0.0f);
+	CHECK(ppNormalStored(zero.x, zero.y) == 0.0f);
+	CHECK(ppNormalStored(0.0f, 0.5f) == 1.0f);
+	CHECK(ppNormalStored(-0.5f, 0.0f) == 1.0f);
 }
 
 static void

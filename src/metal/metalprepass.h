@@ -64,6 +64,12 @@ ppOctDecode(float u, float v)
 	return n;
 }
 
+static inline float
+ppNormalStored(float u, float v)
+{
+	return u != 0.0f || v != 0.0f ? 1.0f : 0.0f;
+}
+
 #define PP_FACING_REFLECT (-0.3f)
 
 static inline PPVec3

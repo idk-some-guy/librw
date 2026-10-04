@@ -1081,6 +1081,47 @@ CheckHostCasterOutside(void)
 }
 
 static bool
+CheckLevelRequested(void)
+{
+	const char *name = "requestShadowLevel builds an atomic's level and keeps it in use without making it a caster, and does nothing outside the prepass bracket";
+	Geometry *g, *go;
+	Atomic *roof = Roof(&g, 2.0f, 2.0f), *outside = Roof(&go, 2.0f, 2.0f);
+	Place(roof, 0.0f, 0.0f, 30.0f, 0.0f);
+	Place(outside, 20.0f, 0.0f, 30.0f, 0.0f);
+	CasterTiersOn();
+	CasterFrame([&](bool prepass){
+		if(prepass)
+			metal::requestShadowLevel(roof);
+	});
+	metal::RayStats st = metal::getRayStats();
+	metal::InstanceDataHeader *h = (metal::InstanceDataHeader*)g->instData;
+	bool built = h && Built(h), hit = Hit(0.0f, 0.0f, 40.0f);
+	uint64 used1 = h ? metal::rtLastUsedForTest(h) : 0, frame1 = metal::rtFrame();
+	CasterFrame([](bool){});
+	uint64 used2 = h ? metal::rtLastUsedForTest(h) : 0;
+	CasterFrame([&](bool prepass){
+		if(prepass)
+			metal::requestShadowLevel(roof);
+	});
+	uint64 used3 = h ? metal::rtLastUsedForTest(h) : 0, frame3 = metal::rtFrame();
+	metal::requestShadowLevel(outside);
+	bool outsideInstanced = go->instData != nil;
+	CasterFrame([](bool){});
+	CasterTiersOff();
+	DestroyAtomic(roof);
+	DestroyAtomic(outside);
+	g->destroy();
+	go->destroy();
+	bool ok = built && !hit && st.casters == 0 && st.instances == 0 && used1 == frame1 && used2 == frame1 &&
+		used3 == frame3 && frame3 > frame1 && !outsideInstanced;
+	if(!ok)
+		Detail("  built %d hit %d casters %u instances %u; last used %llu %llu %llu at frames %llu %llu; outside instanced %d\n",
+			built, hit, st.casters, st.instances, (unsigned long long)used1, (unsigned long long)used2,
+			(unsigned long long)used3, (unsigned long long)frame1, (unsigned long long)frame3, outsideInstanced);
+	return Report(ok, name);
+}
+
+static bool
 CheckDestroyedInBracket(void)
 {
 	const char *name = "an atomic destroyed inside the prepass after it was added is dropped from the walk and counted";
@@ -2209,15 +2250,45 @@ PanBand(int32 quality, bool pan, float *v, int c0, int n, int row)
 	FreeShadowScene(&s);
 }
 
+static void
+MovingRoofBand(int32 quality, bool moving, float *v, int c0, int n, int row)
+{
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetSunRadius(0.0f);
+	metal::cameraCut();
+	if(moving){
+		ShadowFrame(&s, quality, 16);
+		for(int f = 0; f < 16; f++){
+			MoveBy(s.roof->getFrame(), 0.23f, 0.0f, 0.0f);
+			CasterFrame([&](bool){
+				SetRenderState(CULLMODE, CULLNONE);
+				s.floor->render();
+				s.roof->render();
+			});
+		}
+		metal::rtWaitForTest();
+	}else{
+		MoveBy(s.roof->getFrame(), 3.68f, 0.0f, 0.0f);
+		ShadowFrame(&s, quality, 24);
+	}
+	for(int i = 0; i < n; i++){
+		float len = 0.0f;
+		v[i] = -1.0f;
+		metal::readShadowForTest(c0 + i, row, &v[i], &len);
+	}
+	FreeShadowScene(&s);
+}
+
 static bool
 CheckShadowPanSmear(void)
 {
-	const char *name = "a camera pan smears the two edges of a shadow at medium by at most one pixel each more than at high, against each quality's own still frame";
-	enum { N = 81 };
-	int c0 = SX(-6.0f, 20.0f), row = SY(-4.0f, 20.0f);
+	const char *name = "a camera pan smears a shadow at medium by at most two pixels more than at high, and a moving caster's shadow by at most one frame's motion per edge more, against each quality's own still frame";
+	enum { N = 81, M = 128 };
+	int c0 = SX(-6.0f, 20.0f), row = SY(-4.0f, 20.0f), m0 = SX(1.0f, 20.0f), mrow = SY(0.0f, 20.0f);
 	const int32 q[2] = { metal::SHADOWQUALITY_MEDIUM, metal::SHADOWQUALITY_HIGH };
-	float pan[N], still[N];
-	int smear[2] = { 0, 0 }, dark[2] = { 0, 0 };
+	float pan[M], still[M];
+	int smear[2] = { 0, 0 }, dark[2] = { 0, 0 }, trail[2] = { 0, 0 }, shade[2] = { 0, 0 };
 	for(int k = 0; k < 2; k++){
 		PanBand(q[k], true, pan, c0, N, row);
 		PanBand(q[k], false, still, c0, N, row);
@@ -2225,10 +2296,18 @@ CheckShadowPanSmear(void)
 			smear[k] += pan[i] < 0.0f || still[i] < 0.0f || fabsf(pan[i] - still[i]) > 0.25f;
 			dark[k] += still[i] >= 0.0f && still[i] < 0.5f;
 		}
+		MovingRoofBand(q[k], true, pan, m0, M, mrow);
+		MovingRoofBand(q[k], false, still, m0, M, mrow);
+		for(int i = 0; i < M; i++){
+			trail[k] += pan[i] < 0.0f || still[i] < 0.0f || fabsf(pan[i] - still[i]) > 0.25f;
+			shade[k] += still[i] >= 0.0f && still[i] < 0.5f;
+		}
 	}
-	bool ok = smear[0] <= smear[1] + 2 && dark[0] > 0 && dark[1] > 0;
+	bool ok = smear[0] <= smear[1] + 2 && dark[0] > 0 && dark[1] > 0 && trail[0] <= trail[1] + (int)(2*3.68f) && shade[0] > 0 && shade[1] > 0;
 	Detail("  pixels off their still value by more than 0.25 after the pan: medium %d, high %d (dark in the still frame: %d, %d of %d)\n",
 		smear[0], smear[1], dark[0], dark[1], (int)N);
+	Detail("  after the caster moved: medium %d, high %d (dark in the still frame: %d, %d of %d)\n",
+		trail[0], trail[1], shade[0], shade[1], (int)M);
 	return Report(ok, name);
 }
 
@@ -2291,6 +2370,62 @@ CheckShadowFacingAway(void)
 	if(!ok)
 		Detail("  read %d; N.L of the turned normal %.3f; facing away: medium %.4f high %.4f; facing the sun: medium %.4f high %.4f\n", read, nl,
 			v[0][0], v[1][0], v[0][1], v[1][1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckShadowEmptyNormal(void)
+{
+	const char *name = "a pixel whose stored normal is unwritten (the empty code) is traced, not skipped, though that code turns to face away from the sun, at medium and high";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	V3d yAxis = { 0.0f, 1.0f, 0.0f };
+	rtCamera->getFrame()->rotate(&yAxis, 45.0f, COMBINEREPLACE);
+	rtCamera->getFrame()->updateObjects();
+	V3d at = rtCamera->getFrame()->getLTM()->at, sunAt = s.sunFrame->getLTM()->at;
+	Geometry *geo = Geometry::create(4, 2, Geometry::POSITIONS | Geometry::NORMALS | Geometry::PRELIT | Geometry::TEXTURED);
+	V3d *v = geo->morphTargets[0].vertices;
+	const float corner[4][2] = { { -4.0f, 4.0f }, { 4.0f, 4.0f }, { 4.0f, -4.0f }, { -4.0f, -4.0f } };
+	for(int i = 0; i < 4; i++){
+		v[i].set(20.0f*at.x + corner[i][0]*at.z, 20.0f*at.y + corner[i][1], 20.0f*at.z - corner[i][0]*at.x);
+		geo->morphTargets[0].normals[i].set(-at.x, -at.y, -at.z);
+		geo->colors[i] = { 120, 120, 120, 255 };
+		geo->texCoords[0][i] = { 0.0f, 0.0f };
+	}
+	geo->matList.appendMaterial(s.mat);
+	Triangle *t = geo->triangles;
+	t[0].v[0] = 0; t[0].v[1] = 1; t[0].v[2] = 2; t[0].matId = 0;
+	t[1].v[0] = 0; t[1].v[1] = 2; t[1].v[2] = 3; t[1].matId = 0;
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	Atomic *quad = MakeAtomic(geo);
+	float val[2] = { -1.0f, -1.0f }, n[2][3], motion[2], depth[2] = { 1.0f, 1.0f };
+	const int32 q[2] = { metal::SHADOWQUALITY_MEDIUM, metal::SHADOWQUALITY_HIGH };
+	bool read = true, empty = true;
+	metal::setPrepassNormalsUnwrittenForTest(1);
+	for(int k = 0; k < 2; k++){
+		SetShadowQuality(q[k]);
+		for(int i = 0; i < 8; i++)
+			CasterFrame([&](bool){
+				SetRenderState(CULLMODE, CULLNONE);
+				s.floor->render();
+				metal::setShadowCaster(0);
+				quad->render();
+				metal::setShadowCaster(1);
+			});
+		metal::rtWaitForTest();
+		float len = 0.0f;
+		read = metal::readShadowForTest(320, 240, &val[k], &len) && metal::readPrepassForTest(320, 240, n[k], motion, &depth[k]) && read;
+		empty = empty && n[k][0] == 0.0f && n[k][1] == 0.0f && n[k][2] == 0.0f && depth[k] < 1.0f;
+	}
+	metal::setPrepassNormalsUnwrittenForTest(0);
+	DestroyAtomic(quad);
+	geo->destroy();
+	FreeShadowScene(&s);
+	float nl = at.x*sunAt.x + at.y*sunAt.y + at.z*sunAt.z;
+	bool ok = read && empty && val[0] == 1.0f && val[1] == 1.0f && nl < -0.9f;
+	Detail("  read %d, stored normal empty with depth %d (%.4f %.4f); N.L of the code turned toward the eye %.3f; medium %.4f high %.4f\n",
+		read, empty, depth[0], depth[1], nl, val[0], val[1]);
 	return Report(ok, name);
 }
 
@@ -3481,6 +3616,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckBoneClamp();
 	CheckDrawnCasterMoves();
 	CheckHostCasterOutside();
+	CheckLevelRequested();
 	CheckDestroyedInBracket();
 	CheckShadowOnScreen();
 	CheckShadowAccumulates();
@@ -3499,6 +3635,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckShadowPhaseStable();
 	CheckShadowPanSmear();
 	CheckShadowFacingAway();
+	CheckShadowEmptyNormal();
 	CheckShadowSmoothRim();
 	CheckPlainTwinFailure();
 	CheckCasterRadiusLimit();

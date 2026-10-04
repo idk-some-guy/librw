@@ -210,6 +210,7 @@ void forcePrepassEqualForTest(void);
 bool32 readReactiveForTest(int32 x, int32 y, float32 *v);
 void setTemporalFailForTest(bool32 fail);
 void setPrepassTargetsFailForTest(bool32 fail);
+void setPrepassNormalsUnwrittenForTest(bool32 on);
 uint32 temporalLogsForTest(void);
 void sceneProjectionForTest(float32 proj[16]);
 void setJitterIndexForTest(uint32 index);
