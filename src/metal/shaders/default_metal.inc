@@ -43,6 +43,8 @@ const char *default_metal_src =
 "		out.color *= material.matColor;\n"
 "		if(relit)\n"
 "			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);\n"
+"		if(relitPlain)\n"
+"			out.plainPos = V.xyz;\n"
 "	}\n"
 "	out.fog = DoFog(out.position.w, state);\n"
 "	out.pointSize = 1.0;\n"

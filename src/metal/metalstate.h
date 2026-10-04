@@ -124,6 +124,7 @@ PipelineBlendInfo pipelineBlendInfo(uint64 key);
 void setDrawEmissiveScale(float32 s);
 void setDrawRelitGeometry(bool32 lit);
 void relitSceneBegin(void);
+void setRelitShadowTraced(bool32 traced);
 void prewarmShadowTwins(void);
 void setDrawInstance(const void *inst);
 void setDrawHeader(InstanceDataHeader *header);

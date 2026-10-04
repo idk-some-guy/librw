@@ -26,6 +26,7 @@ struct EnvVertexOut
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
+	float3 plainPos [[function_constant(relitPlain)]];
 	float pointSize [[point_size]];
 };
 
@@ -41,6 +42,7 @@ struct EnvFragmentIn
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
+	float3 plainPos [[function_constant(relitPlain)]];
 };
 
 vertex EnvVertexOut
@@ -76,6 +78,8 @@ matfxEnvVS(EnvIn in [[stage_in]],
 		out.color *= material.matColor;
 		if(relit)
 			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
+		if(relitPlain)
+			out.plainPos = V.xyz;
 	}
 	out.fog = DoFog(out.position.w, state);
 	out.pointSize = 1.0;
@@ -102,7 +106,7 @@ matfxEnvFS(EnvFragmentIn in [[stage_in]],
 	float4 base = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
 		face, relitBlock, material, in.position, shadowTex) :
 		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
-		relitShadow ? RelitPlainShadow(in.color, in.position, shadowTex, relitBlock) : in.color;
+		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;
 	float4 pass1 = base*tex0.sample(tex0Sampler, in.tex0);
 	float4 pass2 = in.envColor*matfx.fxParams.x*tex1.sample(tex1Sampler, in.tex1);
 	pass1.rgb = mix(state.fogColor.rgb, pass1.rgb, in.fog);

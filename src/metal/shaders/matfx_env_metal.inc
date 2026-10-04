@@ -27,6 +27,7 @@ const char *matfx_env_metal_src =
 "	float4 classic1 [[function_constant(relitPrelit)]];\n"
 "	float4 relitNormal [[function_constant(relitPrelit)]];\n"
 "	float3 relitPos [[function_constant(relitPrelit)]];\n"
+"	float3 plainPos [[function_constant(relitPlain)]];\n"
 "	float pointSize [[point_size]];\n"
 "};\n"
 
@@ -42,6 +43,7 @@ const char *matfx_env_metal_src =
 "	float4 classic1 [[function_constant(relitPrelit)]];\n"
 "	float4 relitNormal [[function_constant(relitPrelit)]];\n"
 "	float3 relitPos [[function_constant(relitPrelit)]];\n"
+"	float3 plainPos [[function_constant(relitPlain)]];\n"
 "};\n"
 
 "vertex EnvVertexOut\n"
@@ -77,6 +79,8 @@ const char *matfx_env_metal_src =
 "		out.color *= material.matColor;\n"
 "		if(relit)\n"
 "			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);\n"
+"		if(relitPlain)\n"
+"			out.plainPos = V.xyz;\n"
 "	}\n"
 "	out.fog = DoFog(out.position.w, state);\n"
 "	out.pointSize = 1.0;\n"
@@ -103,7 +107,7 @@ const char *matfx_env_metal_src =
 "	float4 base = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,\n"
 "		face, relitBlock, material, in.position, shadowTex) :\n"
 "		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :\n"
-"		relitShadow ? RelitPlainShadow(in.color, in.position, shadowTex, relitBlock) : in.color;\n"
+"		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;\n"
 "	float4 pass1 = base*tex0.sample(tex0Sampler, in.tex0);\n"
 "	float4 pass2 = in.envColor*matfx.fxParams.x*tex1.sample(tex1Sampler, in.tex1);\n"
 "	pass1.rgb = mix(state.fogColor.rgb, pass1.rgb, in.fog);\n"

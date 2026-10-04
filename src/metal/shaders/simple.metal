@@ -14,7 +14,7 @@ simpleFS(FragmentIn in [[stage_in]],
 	float4 c = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
 		face, relitBlock, material, in.position, shadowTex) :
 		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
-		relitShadow ? RelitPlainShadow(in.color, in.position, shadowTex, relitBlock) : in.color;
+		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;
 	float4 color = c*tex0.sample(tex0Sampler, in.tex0);
 	color.rgb = mix(state.fogColor.rgb, color.rgb, in.fog);
 	DoAlphaTest(color.a, state);

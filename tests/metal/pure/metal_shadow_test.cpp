@@ -201,6 +201,24 @@ TestUpsample(void)
 }
 
 static void
+TestUpsampleNormal(void)
+{
+	CHECK(shUpsampleNormalWeight(1.0f, 1.0f, 1.0f) == 1.0f);
+	CHECK(Near(shUpsampleNormalWeight(1.0f, 1.0f, 0.9f), 0.43046721f, 1e-6f));
+	CHECK(shUpsampleNormalWeight(1.0f, 1.0f, 0.99f) > shUpsampleNormalWeight(1.0f, 1.0f, 0.9f));
+	CHECK(shUpsampleNormalWeight(1.0f, 1.0f, 0.70710678f) < 0.07f);
+	CHECK(shUpsampleNormalWeight(1.0f, 1.0f, 0.0f) == SH_NORMAL_WEIGHT_FLOOR && shUpsampleNormalWeight(1.0f, 1.0f, -1.0f) == SH_NORMAL_WEIGHT_FLOOR);
+	CHECK(shUpsampleNormalWeight(1.0f, 1.0f, NAN) == SH_NORMAL_WEIGHT_FLOOR);
+	CHECK(SH_NORMAL_WEIGHT_FLOOR > 0.0f && SH_NORMAL_WEIGHT_FLOOR <= 1e-4f);
+	CHECK(shUpsampleNormalWeight(0.0f, 1.0f, 0.0f) == 1.0f && shUpsampleNormalWeight(1.0f, 0.0f, -1.0f) == 1.0f);
+	CHECK(shClampTapAgrees(1.0f, 1.0f, 1.0f) && shClampTapAgrees(1.0f, 1.0f, 0.95f));
+	CHECK(!shClampTapAgrees(1.0f, 1.0f, 0.9f) && !shClampTapAgrees(1.0f, 1.0f, 0.0f) && !shClampTapAgrees(1.0f, 1.0f, NAN));
+	CHECK(shClampTapAgrees(0.0f, 1.0f, 0.0f) && shClampTapAgrees(1.0f, 0.0f, -1.0f));
+	float wall = shUpsampleWeight(20.0f, 20.0f)*shUpsampleNormalWeight(1.0f, 1.0f, 0.0f), ground = shUpsampleWeight(20.05f, 20.0f);
+	CHECK(wall/(wall + ground) < 0.01f);
+}
+
+static void
 TestSunMoved(void)
 {
 	float r1 = 1.0f*3.14159265f/180.0f, r3 = 3.0f*3.14159265f/180.0f;
@@ -304,6 +322,50 @@ TestAlphaIndex(void)
 	CHECK(!shAlphaIndexValid(1u, 0xFFFFFFFFu, 4096u));
 }
 
+static void
+TestBackFaces(void)
+{
+	CHECK(shCullsBackFaces(1.0f, -0.1f));
+	CHECK(shCullsBackFaces(0.5f, -1e-6f));
+	CHECK(!shCullsBackFaces(1.0f, 0.1f) && !shCullsBackFaces(1.0f, 0.0f));
+	CHECK(!shCullsBackFaces(0.0f, -0.1f));
+	CHECK(!shCullsBackFaces(1.0f, NAN));
+}
+
+static void
+TestClassDark(void)
+{
+	CHECK(SH_CLASS_DARK == -0.6f);
+	CHECK(shClassDark(-0.61f) && shClassDark(-1.0f));
+	CHECK(!shClassDark(-0.6f) && !shClassDark(-0.59f) && !shClassDark(0.0f) && !shClassDark(0.5f));
+	CHECK(!shClassDark(NAN));
+}
+
+static void
+TestFacetSide(void)
+{
+	CHECK(shFacetPositive(0.5f, 0.49f, 0.48f, 0.51f, 0.52f, true, true));
+	CHECK(!shFacetPositive(0.5f, 0.49f, 0.48f, 0.9f, 0.9f, true, true));
+	CHECK(shFacetPositive(0.5f, 0.9f, 0.9f, 0.51f, 0.52f, true, true));
+	CHECK(!shFacetPositive(0.5f, 0.49f, 0.48f, 0.52f, 0.55f, true, true));
+	CHECK(shFacetPositive(0.5f, 0.9f, 0.9f, 0.6f, 0.7f, true, true));
+	CHECK(shFacetPositive(0.5f, 0.51f, 0.40f, 0.55f, 0.60f, true, true));
+	CHECK(shFacetPositive(0.5f, 0.49f, 0.48f, 0.9f, 0.9f, false, true));
+	CHECK(!shFacetPositive(0.5f, 0.9f, 0.9f, 0.51f, 0.52f, true, false));
+}
+
+static void
+TestFrontWinding(void)
+{
+	SHVec3 x = { 1.0f, 0.0f, 0.0f }, y = { 0.0f, 1.0f, 0.0f }, z = { 0.0f, 0.0f, 1.0f };
+	SHVec3 mx = { -1.0f, 0.0f, 0.0f }, my = { 0.0f, -1.0f, 0.0f };
+	SHVec3 r = { 0.6f, 0.8f, 0.0f }, u = { -0.8f, 0.6f, 0.0f }, big = { 0.0f, 0.0f, 4.0f };
+	CHECK(!shFrontCounterClockwise(x, y, z));
+	CHECK(shFrontCounterClockwise(mx, y, z) && shFrontCounterClockwise(x, my, z));
+	CHECK(!shFrontCounterClockwise(mx, my, z));
+	CHECK(!shFrontCounterClockwise(r, u, big) && shFrontCounterClockwise(u, r, big));
+}
+
 int
 main(void)
 {
@@ -317,6 +379,7 @@ main(void)
 	TestPhase();
 	TestFacesAway();
 	TestUpsample();
+	TestUpsampleNormal();
 	TestSunMoved();
 	TestHistoryMatches();
 	TestCap();
@@ -325,6 +388,10 @@ main(void)
 	TestAlphaThreshold();
 	TestAddress();
 	TestAlphaIndex();
+	TestBackFaces();
+	TestClassDark();
+	TestFacetSide();
+	TestFrontWinding();
 	if(failures == 0)
 		printf("all shadow tests passed\n");
 	return failures != 0;

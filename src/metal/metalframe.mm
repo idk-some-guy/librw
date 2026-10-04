@@ -1265,6 +1265,12 @@ encodeGrade(const GradeParams *p)
 	encodeDebugView();
 }
 
+static void
+noteShadowTraced(void)
+{
+	setRelitShadowTraced(frame.testShadow != nil || frame.shadow != nil);
+}
+
 void
 beginScene(Camera *cam)
 {
@@ -1280,6 +1286,7 @@ beginScene(Camera *cam)
 		frame.prepassDone = false;
 		frame.rayWorkDone = false;
 		frame.shadow = nil;
+		noteShadowTraced();
 		frame.prepassPasses = 0;
 		frame.prepassDrawsLast = 0;
 		frame.prevPrepassValid = frame.prepassValid && frame.prepassValidShow + 1 == frame.shows;
@@ -1430,6 +1437,7 @@ setShadowFactorForTest(float32 v)
 {
 	if(v < 0.0f || getContext() == nil){
 		frame.testShadow = nil;
+		noteShadowTraced();
 		return;
 	}
 	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
@@ -1444,6 +1452,7 @@ setShadowFactorForTest(float32 v)
 		texel[i] = bits;
 	[frame.testShadow replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:texel bytesPerRow:sizeof(texel)];
 	prewarmShadowTwins();
+	noteShadowTraced();
 }
 
 bool
@@ -2092,6 +2101,7 @@ frameRayWork(void)
 	if(ppLayerRuns(casters, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
 		encodeLayer(frameCommandBuffer(), &in);
 	frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
+	noteShadowTraced();
 }
 
 void

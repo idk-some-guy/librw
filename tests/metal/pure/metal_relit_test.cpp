@@ -235,18 +235,34 @@ TestShadowedPrelit(void)
 	float strengths[3] = { 0.0f, 0.59f, 1.0f };
 	for(int i = 0; i < 3; i++)
 		for(int k = 0; k < 3; k++){
-			CHECK(relitShadowedPrelit(full[i], sun[i], classic[i], 1.0f, strengths[k]) == full[i]);
+			CHECK(relitShadowedPrelit(full[i], sun[i], classic[i], 1.0f, 1.0f, strengths[k]) == full[i]);
 			CHECK(relitPlainShadowed(classic[i], 1.0f, strengths[k]) == classic[i]);
 		}
 	for(int i = 0; i < 3; i++){
-		CHECK(relitShadowedPrelit(full[i], sun[i], classic[i], 0.3f, 0.0f) == relitShadowed(full[i], sun[i], 0.3f));
+		CHECK(relitShadowedPrelit(full[i], sun[i], classic[i], 0.3f, 0.3f, 0.0f) == relitShadowed(full[i], sun[i], 0.3f));
 		CHECK(relitPlainShadowed(classic[i], 0.3f, 0.0f) == classic[i]);
 	}
-	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 0.0f, 0.6f), 0.9f - 0.3f - 0.27f, 1e-6f));
-	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 0.5f, 0.6f), 0.9f - 0.15f - 0.135f, 1e-6f));
+	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 0.0f, 0.0f, 0.6f), 0.9f - 0.3f - 0.27f, 1e-6f));
+	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 0.5f, 0.5f, 0.6f), 0.9f - 0.15f - 0.135f, 1e-6f));
+	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 1.0f, 0.0f, 0.6f), 0.9f - 0.27f, 1e-6f));
+	CHECK(Near(relitShadowedPrelit(0.9f, 0.3f, 0.45f, 0.5f, 0.0f, 0.6f), 0.9f - 0.15f - 0.27f, 1e-6f));
 	CHECK(Near(relitPlainShadowed(0.5706f, 0.0f, 0.6f), 0.5706f*0.4f, 1e-6f));
 	CHECK(Near(relitPlainShadowed(0.5f, 0.25f, 0.8f), 0.5f*(1.0f - 0.8f*0.75f), 1e-6f));
 	CHECK(relitPlainShadowed(0.5f, 0.0f, 2.0f) == 0.0f && relitPlainShadowed(0.5f, -1.0f, 0.5f) == 0.25f);
+}
+
+static void
+TestFacedShadow(void)
+{
+	const float s[4] = { 0.0f, 0.37f, 1.0f, 0.999f };
+	for(int i = 0; i < 4; i++){
+		CHECK(relitFacedShadow(s[i], 0.4f, 1.0f) == s[i] && relitFacedShadow(s[i], 1e-6f, 1.0f) == s[i]);
+		CHECK(relitFacedShadow(s[i], 0.0f, 1.0f) == 0.0f && relitFacedShadow(s[i], -1e-6f, 1.0f) == 0.0f &&
+			relitFacedShadow(s[i], -0.9f, 1.0f) == 0.0f);
+		CHECK(relitFacedShadow(s[i], NAN, 1.0f) == 0.0f);
+		CHECK(relitFacedShadow(s[i], 0.4f, 0.0f) == s[i] && relitFacedShadow(s[i], 0.0f, 0.0f) == s[i] &&
+			relitFacedShadow(s[i], -0.9f, 0.0f) == s[i] && relitFacedShadow(s[i], NAN, 0.0f) == s[i]);
+	}
 }
 
 int
@@ -262,6 +278,7 @@ main(void)
 	TestSunCos();
 	TestCofactor();
 	TestShadowedPrelit();
+	TestFacedShadow();
 	if(failures == 0)
 		printf("all relit tests passed\n");
 	return failures != 0;

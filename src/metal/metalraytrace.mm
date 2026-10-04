@@ -198,7 +198,7 @@ struct ShadowRayParamsHost
 	simd_float4x4 invViewProj, viewToWorld;
 	simd_float4 sun, eye;
 	simd_uint2 size, depthSize;
-	uint32 frame, raysPerPixel, halfRes, alphaEntries;
+	uint32 frame, raysPerPixel, halfRes, alphaEntries, terminatorOff;
 };
 
 struct ShadowAccumParamsHost
@@ -218,14 +218,14 @@ struct ShadowAlphaEntryHost
 };
 
 static_assert(sizeof(ShadowAlphaEntryHost) == 16, "shadow alpha entry");
-static_assert(sizeof(ShadowRayParamsHost) == 192, "shadow ray params");
+static_assert(sizeof(ShadowRayParamsHost) == 208, "shadow ray params");
 static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
 
 static struct
 {
 	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear;
 	id<MTLFunction> alphaHit;
-	bool forceAlpha;
+	bool forceAlpha, terminatorOff;
 	id<MTLTexture> raw, history[2];
 	uint32 index, frame, width, height, samples;
 	int32 quality;
@@ -1429,7 +1429,10 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 			}
 		}
 		di[count].transformationMatrix = packed(c.world);
-		di[count].options = MTLAccelerationStructureInstanceOptionDisableTriangleCulling;
+		SHVec3 right = { c.world.right.x, c.world.right.y, c.world.right.z }, up = { c.world.up.x, c.world.up.y, c.world.up.z };
+		SHVec3 at = { c.world.at.x, c.world.at.y, c.world.at.z };
+		di[count].options = shFrontCounterClockwise(right, up, at) ? MTLAccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise :
+			MTLAccelerationStructureInstanceOptionNone;
 		di[count].mask = c.mask;
 		di[count].intersectionFunctionTableOffset = 0;
 		di[count].userID = user;
@@ -1690,7 +1693,8 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	bool valid = sh.valid && in.history && !rt.cutFrame && !shSunMoved(s0, s1);
 	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height, frameNo = sh.frame++;
 	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
-		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
+		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries,
+		sh.terminatorOff ? 1u : 0u };
 	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
 		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
 	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
@@ -2242,6 +2246,12 @@ void
 setShadowAlphaKernelForTest(int32 mode)
 {
 	sh.forceAlpha = mode == 1;
+}
+
+void
+setShadowTerminatorRuleForTest(bool32 on)
+{
+	sh.terminatorOff = !on;
 }
 
 void

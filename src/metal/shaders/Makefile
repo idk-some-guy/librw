@@ -92,9 +92,10 @@ aah_metal.inc: ../metalaa.h
 	 sed 's/..*/"&\\n"/' ../metalaa.h;\
 	 echo ';') >aah_metal.inc
 
-prepassh_metal.inc: ../metalprepass.h
+prepassh_metal.inc: ../metalprepass.h ../metalrelit.h
 	(echo 'const char *prepassh_metal_src =';\
-	 sed 's/..*/"&\\n"/' ../metalprepass.h;\
+	 sed 's/..*/"&\\n"/' ../metalrelit.h;\
+	 sed 's/"/\\"/g; s/..*/"&\\n"/' ../metalprepass.h;\
 	 echo ';') >prepassh_metal.inc
 
 temporalh_metal.inc: ../metaltemporal.h

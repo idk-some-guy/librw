@@ -71,10 +71,16 @@ relitShadowed(float full, float sunPart, float shadow)
 }
 
 static inline float
-relitShadowedPrelit(float full, float sunPart, float classic, float shadow, float strength)
+relitFacedShadow(float shadow, float nDotToSun, float traced)
 {
-	float open = 1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f);
-	return full - open*sunPart - RL_MIN(RL_MAX(strength, 0.0f), 1.0f)*open*classic;
+	return traced == 0.0f || nDotToSun > 0.0f ? shadow : 0.0f;
+}
+
+static inline float
+relitShadowedPrelit(float full, float sunPart, float classic, float shadow, float facedShadow, float strength)
+{
+	float open = 1.0f - RL_MIN(RL_MAX(shadow, 0.0f), 1.0f), facedOpen = 1.0f - RL_MIN(RL_MAX(facedShadow, 0.0f), 1.0f);
+	return full - open*sunPart - RL_MIN(RL_MAX(strength, 0.0f), 1.0f)*facedOpen*classic;
 }
 
 static inline float
@@ -159,6 +165,46 @@ relitFillNormal(RLVec3 n, float valid, RLVec3 g, RLVec3 fallback)
 	r.y /= rl;
 	r.z /= rl;
 	return r;
+}
+
+#define RL_FACING_REFLECT (-0.3f)
+
+static inline RLVec3
+relitFacingNormal(RLVec3 n, RLVec3 v)
+{
+	float c = n.x*v.x + n.y*v.y + n.z*v.z;
+	if(!(RL_ABS(c) <= 2.0f))
+		return v;
+	if(c >= 0.0f)
+		return n;
+	RLVec3 r = { -n.x, -n.y, -n.z };
+	if(c <= RL_FACING_REFLECT)
+		return r;
+	r.x = n.x - 2.0f*c*v.x;
+	r.y = n.y - 2.0f*c*v.y;
+	r.z = n.z - 2.0f*c*v.z;
+	float l = RL_SQRT(r.x*r.x + r.y*r.y + r.z*r.z);
+	r.x /= l;
+	r.y /= l;
+	r.z /= l;
+	return r;
+}
+
+static inline RLVec3
+relitSurfaceNormal(RLVec3 n, float valid, RLVec3 g, RLVec3 toEye, RLVec3 fallback)
+{
+	if(g.x*toEye.x + g.y*toEye.y + g.z*toEye.z < 0.0f){
+		g.x = -g.x;
+		g.y = -g.y;
+		g.z = -g.z;
+	}
+	RLVec3 f = relitFillNormal(n, valid, g, fallback);
+	float ee = toEye.x*toEye.x + toEye.y*toEye.y + toEye.z*toEye.z;
+	if(!(ee > 1e-30f))
+		return f;
+	float el = RL_SQRT(ee);
+	RLVec3 v = { toEye.x/el, toEye.y/el, toEye.z/el };
+	return relitFacingNormal(f, v);
 }
 
 #endif

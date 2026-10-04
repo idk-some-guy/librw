@@ -42,6 +42,8 @@ defaultVS(DefaultRelitIn in [[stage_in]],
 		out.color *= material.matColor;
 		if(relit)
 			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
+		if(relitPlain)
+			out.plainPos = V.xyz;
 	}
 	out.fog = DoFog(out.position.w, state);
 	out.pointSize = 1.0;

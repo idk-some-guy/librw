@@ -97,6 +97,36 @@ const char *shadowh_metal_src =
 "	return normalValid > 0.0f && nDotL <= -radius;\n"
 "}\n"
 
+"static inline bool\n"
+"shCullsBackFaces(float normalValid, float facetDotSun)\n"
+"{\n"
+"	return normalValid > 0.0f && facetDotSun < 0.0f;\n"
+"}\n"
+
+"#define SH_CLASS_DARK (-0.6f)\n"
+
+"static inline bool\n"
+"shClassDark(float normalDotSun)\n"
+"{\n"
+"	return normalDotSun < SH_CLASS_DARK;\n"
+"}\n"
+
+"// Depth is affine in screen space across a plane, so the side whose two taps extrapolate to the centre lies on its plane.\n"
+"static inline bool\n"
+"shFacetPositive(float d, float n1, float n2, float p1, float p2, bool hasN, bool hasP)\n"
+"{\n"
+"	if(!hasN || !hasP)\n"
+"		return !hasN;\n"
+"	return SH_ABS(2.0f*p1 - p2 - d) <= SH_ABS(2.0f*n1 - n2 - d);\n"
+"}\n"
+
+"static inline bool\n"
+"shFrontCounterClockwise(SHVec3 right, SHVec3 up, SHVec3 at)\n"
+"{\n"
+"	float det = (right.y*up.z - right.z*up.y)*at.x + (right.z*up.x - right.x*up.z)*at.y + (right.x*up.y - right.y*up.x)*at.z;\n"
+"	return det < 0.0f;\n"
+"}\n"
+
 "static inline unsigned int\n"
 "shPhaseX(unsigned int frame)\n"
 "{\n"
@@ -184,6 +214,26 @@ const char *shadowh_metal_src =
 "shUpsampleWeight(float tapDistance, float distance)\n"
 "{\n"
 "	return 1.0f/(1e-4f + SH_ABS(tapDistance - distance)/SH_MAX(distance, 1e-3f));\n"
+"}\n"
+
+"#define SH_NORMAL_WEIGHT_FLOOR 1e-4f\n"
+
+"static inline float\n"
+"shUpsampleNormalWeight(float validA, float validB, float cosine)\n"
+"{\n"
+"	if(!(validA > 0.0f) || !(validB > 0.0f))\n"
+"		return 1.0f;\n"
+"	float c = SH_MAX(cosine, 0.0f);\n"
+"	c *= c;\n"
+"	c *= c;\n"
+"	c *= c;\n"
+"	return SH_MAX(c, SH_NORMAL_WEIGHT_FLOOR);\n"
+"}\n"
+
+"static inline bool\n"
+"shClampTapAgrees(float validA, float validB, float cosine)\n"
+"{\n"
+"	return shUpsampleNormalWeight(validA, validB, cosine) >= 0.5f;\n"
 "}\n"
 
 "static inline bool\n"

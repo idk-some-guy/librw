@@ -15,7 +15,7 @@ const char *simple_metal_src =
 "	float4 c = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,\n"
 "		face, relitBlock, material, in.position, shadowTex) :\n"
 "		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :\n"
-"		relitShadow ? RelitPlainShadow(in.color, in.position, shadowTex, relitBlock) : in.color;\n"
+"		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;\n"
 "	float4 color = c*tex0.sample(tex0Sampler, in.tex0);\n"
 "	color.rgb = mix(state.fogColor.rgb, color.rgb, in.fog);\n"
 "	DoAlphaTest(color.a, state);\n"

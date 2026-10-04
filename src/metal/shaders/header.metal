@@ -35,6 +35,7 @@ constant bool relitPrelit [[function_constant(7)]];
 constant bool relitShadow [[function_constant(8)]];
 constant bool relitTexture = relit || relitShadow;
 constant bool relitFragmentBlock = relitPrelit || relitShadow;
+constant bool relitPlain = relitShadow && !relit && !relitPrelit;
 
 struct State
 {
@@ -117,6 +118,7 @@ struct VertexOut
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
+	float3 plainPos [[function_constant(relitPlain)]];
 	float pointSize [[point_size]];
 };
 
@@ -130,6 +132,7 @@ struct FragmentIn
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
+	float3 plainPos [[function_constant(relitPlain)]];
 };
 
 static float3
@@ -231,8 +234,9 @@ RelitFilledNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback
 static float3
 RelitSurfaceNormal(float3 n, float valid, float3 g, float3 toEye, float3 fallback)
 {
-	float3 f = RelitFilledNormal(n, valid, g, toEye, fallback);
-	return dot(f, toEye) < 0.0 ? -f : f;
+	RLVec3 r = relitSurfaceNormal(RLVec3{ n.x, n.y, n.z }, valid, RLVec3{ g.x, g.y, g.z }, RLVec3{ toEye.x, toEye.y, toEye.z },
+		RLVec3{ fallback.x, fallback.y, fallback.z });
+	return float3(r.x, r.y, r.z);
 }
 
 static float
@@ -252,9 +256,11 @@ RelitShadowSun(float4 color, float4 sun, float4 position, texture2d<float> shado
 }
 
 static float4
-RelitPlainShadow(float4 color, float4 position, texture2d<float> shadowTex, constant Relit &r)
+RelitPlainShadow(float4 color, float4 position, float3 pos, texture2d<float> shadowTex, constant Relit &r)
 {
-	float s = RelitShadowFactor(position, shadowTex), k = r.shadow.x;
+	float3 toEye = r.eye.xyz - pos, g = cross(dfdx(pos), dfdy(pos));
+	float3 n = RelitSurfaceNormal(g, 0.0, g, toEye, normalize(toEye));
+	float s = relitFacedShadow(RelitShadowFactor(position, shadowTex), dot(n, -r.sunDir.xyz), r.shadow.y), k = r.shadow.x;
 	return float4(relitPlainShadowed(color.r, s, k), relitPlainShadowed(color.g, s, k), relitPlainShadowed(color.b, s, k), color.a);
 }
 
@@ -268,7 +274,9 @@ RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, c
 	float v = 1.0;
 	bool known = false;
 	if(face.skipFull != 0 && face.numVertices != 0 && nrm.w >= 1.0 && dot(nrm.xyz, nrm.xyz) > 1e-30){
-		n = RelitSurfaceNormal(nrm.xyz, nrm.w, toEye, toEye, normalize(toEye));
+		float3 u = normalize(nrm.xyz), e = normalize(toEye);
+		RLVec3 q = relitFacingNormal(RLVec3{ u.x, u.y, u.z }, RLVec3{ e.x, e.y, e.z });
+		n = float3(q.x, q.y, q.z);
 		known = dot(n, toEye) != 0.0;
 	}
 	if(!known){
@@ -294,10 +302,11 @@ RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, c
 	float3 lit = float3(sr.full, sg.full, sb.full);
 	float3 c1 = classic1.rgb;
 	if(relitShadow){
-		float s = RelitShadowFactor(position, shadowTex), k = r.shadow.x;
-		lit = float3(relitShadowedPrelit(sr.full, sr.sun, color.r, s, k), relitShadowedPrelit(sg.full, sg.sun, color.g, s, k),
-			relitShadowedPrelit(sb.full, sb.sun, color.b, s, k));
-		c1 = float3(relitPlainShadowed(c1.r, s, k), relitPlainShadowed(c1.g, s, k), relitPlainShadowed(c1.b, s, k));
+		float s = RelitShadowFactor(position, shadowTex), k = r.shadow.x, f = relitFacedShadow(s, dot(n, -r.sunDir.xyz), r.shadow.y);
+		float ls = face.twoSided != 0 ? f : s;
+		lit = float3(relitShadowedPrelit(sr.full, sr.sun, color.r, ls, f, k), relitShadowedPrelit(sg.full, sg.sun, color.g, ls, f, k),
+			relitShadowedPrelit(sb.full, sb.sun, color.b, ls, f, k));
+		c1 = float3(relitPlainShadowed(c1.r, f, k), relitPlainShadowed(c1.g, f, k), relitPlainShadowed(c1.b, f, k));
 	}
 	if(v >= 1.0)
 		return float4(lit, color.a);

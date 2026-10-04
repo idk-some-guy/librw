@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "metalrelit.h"
 #define PP_ABS fabsf
 #define PP_SQRT sqrtf
 #endif
@@ -74,26 +75,13 @@ ppNormalStored(float u, float v)
 	return u != 0.0f || v != 0.0f ? 1.0f : 0.0f;
 }
 
-#define PP_FACING_REFLECT (-0.3f)
+#define PP_FACING_REFLECT RL_FACING_REFLECT
 
 static inline PPVec3
 ppFacingNormal(PPVec3 n, PPVec3 v)
 {
-	float c = n.x*v.x + n.y*v.y + n.z*v.z;
-	if(!(PP_ABS(c) <= 2.0f))
-		return v;
-	if(c >= 0.0f)
-		return n;
-	PPVec3 r = { -n.x, -n.y, -n.z };
-	if(c <= PP_FACING_REFLECT)
-		return r;
-	r.x = n.x - 2.0f*c*v.x;
-	r.y = n.y - 2.0f*c*v.y;
-	r.z = n.z - 2.0f*c*v.z;
-	float l = PP_SQRT(r.x*r.x + r.y*r.y + r.z*r.z);
-	r.x /= l;
-	r.y /= l;
-	r.z /= l;
+	RLVec3 f = relitFacingNormal(RLVec3{ n.x, n.y, n.z }, RLVec3{ v.x, v.y, v.z });
+	PPVec3 r = { f.x, f.y, f.z };
 	return r;
 }
 

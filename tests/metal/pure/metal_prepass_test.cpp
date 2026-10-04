@@ -248,6 +248,43 @@ TestFacing(void)
 	CHECK(PP_FACING_REFLECT < 0.0f && PP_FACING_REFLECT > -1.0f);
 }
 
+static void
+TestFacingAgree(void)
+{
+	const PPVec3 v = { 0.0f, -1.0f, 0.0f };
+	const PPVec3 cases[9] = { Unit({ 0.98f, 0.199f, 0.0f }), Unit({ 1.0f, 0.29f, 0.0f }), Unit({ 0.3f, 0.9f, 0.1f }),
+		Unit({ 1.0f, 0.32f, 0.0f }), Unit({ 0.2f, -0.9f, 0.3f }), { 0.0f, -1.0f, 0.0f }, { 1.0f, 0.0f, 0.0f },
+		{ NAN, 0.0f, 1.0f }, { INFINITY, 0.0f, 0.0f } };
+	bool agree = true;
+	for(const PPVec3 &n : cases){
+		PPVec3 want = ppFacingNormal(n, v);
+		RLVec3 named = relitFacingNormal(RLVec3{ n.x, n.y, n.z }, RLVec3{ v.x, v.y, v.z });
+		float c = Dot(n, v), m = c < 0.0f ? c : 0.0f;
+		RLVec3 g = std::isfinite(c) ? RLVec3{ n.x - 2.0f*m*v.x, n.y - 2.0f*m*v.y, n.z - 2.0f*m*v.z } : RLVec3{ v.x, v.y, v.z };
+		RLVec3 fwd = relitSurfaceNormal(RLVec3{ n.x, n.y, n.z }, 1.0f, g, RLVec3{ 4.0f*v.x, 4.0f*v.y, 4.0f*v.z }, RLVec3{ v.x, v.y, v.z });
+		agree = agree && named.x == want.x && named.y == want.y && named.z == want.z &&
+			Near(fwd.x, want.x, 1e-6f) && Near(fwd.y, want.y, 1e-6f) && Near(fwd.z, want.z, 1e-6f);
+	}
+	CHECK(agree);
+}
+
+static void
+TestFacingValues(void)
+{
+	CHECK(RL_FACING_REFLECT == -0.3f);
+	const RLVec3 v = { 0.0f, -1.0f, 0.0f };
+	PPVec3 u = Unit({ 0.98f, 0.199f, 0.0f });
+	RLVec3 r = relitFacingNormal(RLVec3{ u.x, u.y, u.z }, v);
+	CHECK(Near(r.x, u.x, 1e-6f) && Near(r.y, -u.y, 1e-6f) && r.z == 0.0f);
+	RLVec3 still = relitSurfaceNormal(RLVec3{ 0.0f, 0.0f, 1.0f }, 1.0f, RLVec3{ 0.0f, 0.0f, 1.0f }, RLVec3{ 0.0f, 0.0f, 0.0f },
+		RLVec3{ 0.0f, 1.0f, 0.0f });
+	CHECK(still.x == 0.0f && still.y == 0.0f && still.z == 1.0f);
+	float l = sqrtf(0.98f*0.98f + 0.2f*0.2f);
+	RLVec3 g = relitSurfaceNormal(RLVec3{ 0.0f, 0.0f, 0.0f }, 0.0f, RLVec3{ 0.98f, 0.0f, -0.2f }, RLVec3{ 0.0f, 0.0f, 3.0f },
+		RLVec3{ 0.0f, 0.0f, 1.0f });
+	CHECK(Near(g.x, -0.98f/l, 1e-6f) && g.y == 0.0f && Near(g.z, 0.2f/l, 1e-6f));
+}
+
 int
 main(void)
 {
@@ -260,6 +297,8 @@ main(void)
 	TestKeySet();
 	TestPrevMap();
 	TestFacing();
+	TestFacingAgree();
+	TestFacingValues();
 	if(failures == 0)
 		printf("all prepass tests passed\n");
 	return failures != 0;

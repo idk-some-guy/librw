@@ -1895,6 +1895,16 @@ setRelitParams(const RelitParams *p)
 	}
 }
 
+void
+setRelitShadowTraced(bool32 traced)
+{
+	float32 v = traced ? 1.0f : 0.0f;
+	if(uniformRelit.shadow[1] != v){
+		uniformRelit.shadow[1] = v;
+		blockDirty[BLOCK_RELIT] = true;
+	}
+}
+
 RelitParams
 getRelitParams(void)
 {
