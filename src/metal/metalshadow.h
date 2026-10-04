@@ -187,6 +187,12 @@ shAccumulateClamped(float prev, float length, float raw, float lo, float hi, flo
 }
 
 static inline bool
+shClampBoxNeeded(float prev, float cur)
+{
+	return prev != cur;
+}
+
+static inline bool
 shDisoccluded(float prevViewZ, float viewZ)
 {
 	return SH_ABS(prevViewZ - viewZ) > 0.05f*viewZ + 0.1f;

@@ -108,6 +108,30 @@ TestClampedAccumulate(void)
 }
 
 static void
+TestClampBoxNeeded(void)
+{
+	CHECK(!shClampBoxNeeded(0.5f, 0.5f) && !shClampBoxNeeded(0.0f, 0.0f) && !shClampBoxNeeded(1.0f, 1.0f));
+	CHECK(shClampBoxNeeded(0.4f, 0.5f) && shClampBoxNeeded(0.6f, 0.5f));
+	CHECK(shClampBoxNeeded(0.0f, 1.0f) && shClampBoxNeeded(1.0f, 0.0f));
+	const float values[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+	int needed = 0, changed = 0;
+	for(float prev : values)
+		for(float cur : values)
+			for(float lo : values)
+				for(float hi : values){
+					if(lo > cur || hi < cur)
+						continue;
+					SHAccum box = shAccumulateClamped(prev, 8.0f, cur, lo, hi, 12.0f), none = shAccumulateClamped(prev, 8.0f, cur, cur, cur, 12.0f);
+					bool same = box.value == none.value && box.length == none.length;
+					if(!shClampBoxNeeded(prev, cur))
+						CHECK(same);
+					needed += shClampBoxNeeded(prev, cur);
+					changed += !same;
+				}
+	CHECK(needed > 0 && changed > 0);
+}
+
+static void
 TestGates(void)
 {
 	using namespace rw::metal;
@@ -374,6 +398,7 @@ main(void)
 	TestDisc();
 	TestAccumulate();
 	TestClampedAccumulate();
+	TestClampBoxNeeded();
 	TestGates();
 	TestOrigin();
 	TestPhase();

@@ -280,6 +280,25 @@ shadowUpsample(texture2d<float, access::read> raw, depth2d<float, access::read> 
 	return sum/wsum;
 }
 
+// Every normal is read: a read behind a range test serialises the loop.
+static float2
+shadowClampBox(texture2d<float, access::read> raw, texture2d<float, access::read> normals, constant ShadowAccumParams &p, int2 rp, uint2 off,
+               float4 own, float cur)
+{
+	int2 rmax = int2(p.rawSize) - 1;
+	float lo = cur, hi = cur;
+	for(int y = -1; y <= 1; y++)
+		for(int x = -1; x <= 1; x++){
+			int2 h = clamp(rp + int2(x, y), int2(0), rmax);
+			float r = raw.read(uint2(h)).r;
+			float4 n = shadowStoredNormal(normals, shadowRawSource(p, h, off));
+			float t = shClampTapAgrees(own.w, n.w, dot(own.xyz, n.xyz)) ? r : cur;
+			lo = min(lo, t);
+			hi = max(hi, t);
+		}
+	return float2(lo, hi);
+}
+
 kernel void
 shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
                  texture2d<float, access::read> hist [[texture(1)]],
@@ -306,19 +325,6 @@ shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
 	bool own = p.halfRes == 0 || tx.weight*ty.weight == 1.0;
 	float4 on = shadowStoredNormal(normals, gid);
 	float cur = own ? raw.read(uint2(min(rp, rmax))).r : shadowUpsample(raw, depth, normals, p, gid, dist, on, off);
-	float lo = cur, hi = cur;
-	for(int y = -1; y <= 1; y++)
-		for(int x = -1; x <= 1; x++){
-			int2 h = clamp(rp + int2(x, y), int2(0), rmax);
-			float r = raw.read(uint2(h)).r;
-			if(r >= lo && r <= hi)
-				continue;
-			float4 n = shadowStoredNormal(normals, shadowRawSource(p, h, off));
-			if(!shClampTapAgrees(on.w, n.w, dot(on.xyz, n.xyz)))
-				continue;
-			lo = min(lo, r);
-			hi = max(hi, r);
-		}
 	SHAccum a = { cur, 1.0 };
 	float2 huv = (float2(gid) + 0.5)/float2(p.size) + motion.read(gid).xy;
 	if(p.valid != 0 && all(huv >= 0.0) && all(huv < 1.0)){
@@ -327,8 +333,10 @@ shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
 		if(h.g > 0.0){
 			float3 Q = shadowHistoryPoint(p, hp, h.b);
 			float3 N = normalize((p.viewToWorld * float4(on.xyz, 0.0)).xyz);
-			if(shHistoryMatches(SHVec3{ Q.x, Q.y, Q.z }, SHVec3{ P.x, P.y, P.z }, SHVec3{ N.x, N.y, N.z }, h.b, dist))
-				a = shAccumulateClamped(h.r, h.g, cur, lo, hi, p.maxHistory);
+			if(shHistoryMatches(SHVec3{ Q.x, Q.y, Q.z }, SHVec3{ P.x, P.y, P.z }, SHVec3{ N.x, N.y, N.z }, h.b, dist)){
+				float2 box = shClampBoxNeeded(h.r, cur) ? shadowClampBox(raw, normals, p, rp, off, on, cur) : float2(cur);
+				a = shAccumulateClamped(h.r, h.g, cur, box.x, box.y, p.maxHistory);
+			}
 		}
 	}
 	out.write(float4(a.value, a.length, dist, 1.0), gid);

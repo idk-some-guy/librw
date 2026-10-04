@@ -188,6 +188,12 @@ const char *shadowh_metal_src =
 "}\n"
 
 "static inline bool\n"
+"shClampBoxNeeded(float prev, float cur)\n"
+"{\n"
+"	return prev != cur;\n"
+"}\n"
+
+"static inline bool\n"
 "shDisoccluded(float prevViewZ, float viewZ)\n"
 "{\n"
 "	return SH_ABS(prevViewZ - viewZ) > 0.05f*viewZ + 0.1f;\n"
