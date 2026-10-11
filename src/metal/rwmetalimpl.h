@@ -148,6 +148,8 @@ bool32 rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const f
 void setRtAlphaCapForTest(uint32 entries);
 void setShadowAlphaKernelForTest(int32 mode);
 void setShadowTerminatorRuleForTest(bool32 on);
+void setShadowOwnerRuleForTest(bool32 on);
+void setShadowOwnerListCapForTest(uint32 cap);
 void setRtAlphaFunctionForTest(int32 mode);
 const void *rtAlphaTableForTest(void);
 void setRtSkinnedLimitForTest(uint32 cap, float32 distance);

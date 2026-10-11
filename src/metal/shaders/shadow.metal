@@ -11,6 +11,8 @@ struct ShadowRayParams
 	uint halfRes;
 	uint alphaEntries;
 	uint terminatorOff;
+	uint ownerOff;
+	uint listCap;
 };
 
 struct ShadowAccumParams
@@ -58,7 +60,7 @@ shadowAlphaBlocks(device const ShadowAlphaEntry *alpha, uint entries, uint base,
 	device const ShadowAlphaEntry &e = alpha[base + geometry];
 	device const ShadowAlphaTriangle &t = *(device const ShadowAlphaTriangle*)data;
 	float2 uv = float2(t.uv0)*(1.0 - bary.x - bary.y) + float2(t.uv1)*bary.x + float2(t.uv2)*bary.y;
-	uv = float2(shAddress(uv.x, e.address & 3u), shAddress(uv.y, e.address >> 2));
+	uv = float2(shAddress(uv.x, shAlphaAddressU(e.address)), shAddress(uv.y, shAlphaAddressV(e.address)));
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	return e.tex.sample(s, uv, level(0)).a >= e.threshold;
 }
@@ -90,7 +92,7 @@ shadowFacet(constant ShadowRayParams &p, depth2d<float, access::read> depth, uin
 
 static bool
 shadowRayStart(constant ShadowRayParams &p, depth2d<float, access::read> depth, texture2d<float, access::read> normals,
-               uint2 gid, thread float3 &origin, thread float4 &facing, thread bool &cull, thread bool &dark)
+               uint2 gid, thread float3 &origin, thread float4 &facing, thread bool &cull, thread bool &dark, thread float4 &back)
 {
 	uint2 src = gid;
 	if(p.halfRes != 0)
@@ -113,6 +115,7 @@ shadowRayStart(constant ShadowRayParams &p, depth2d<float, access::read> depth, 
 	facing = float4(f.x, f.y, f.z, nl > 1e-6 ? ppNormalStored(e.x, e.y) : 0.0);
 	float ns = dot(facing.xyz, p.sun.xyz);
 	cull = false;
+	back = float4(0.0);
 	dark = shFacesAwayFromSun(facing.w, ns, p.sun.w);
 	if(p.terminatorOff == 0u && facing.w > 0.0){
 		float3 g = shadowFacet(p, depth, src, d, P);
@@ -123,9 +126,18 @@ shadowRayStart(constant ShadowRayParams &p, depth2d<float, access::read> depth, 
 			g = normalize(g);
 			SHVec3 b = shRayOrigin(SHVec3{ P.x, P.y, P.z }, SHVec3{ -g.x, -g.y, -g.z }, dist);
 			origin = float3(b.x, b.y, b.z);
+			back = float4(g, shNormalOffset(dist));
 		}
 	}
 	return true;
+}
+
+static void
+shadowListAppend(device atomic_uint *listed, device uint2 *list, uint cap, uint2 gid, uint owner)
+{
+	uint i = atomic_fetch_add_explicit(listed, 1u, memory_order_relaxed);
+	if(i < cap)
+		list[i] = uint2(shListEntry(gid.x, gid.y), owner);
 }
 
 struct ShadowAlphaTableParams
@@ -146,7 +158,7 @@ shadowAlphaHit(uint user [[user_instance_id]],
 {
 	if(tp.mode != 0u)
 		return tp.mode == 1u;
-	return shadowAlphaBlocks(alpha, tp.entries, user, geometry, data, bary);
+	return shadowAlphaBlocks(alpha, tp.entries, shAlphaBaseOf(user), geometry, data, bary);
 }
 
 kernel void
@@ -155,14 +167,16 @@ shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
            depth2d<float, access::read> depth [[texture(0)]],
            texture2d<float, access::write> raw [[texture(1)]],
            texture2d<float, access::read> normals [[texture(2)]],
+           device atomic_uint *listed [[buffer(3)]],
+           device uint2 *list [[buffer(4)]],
            uint2 gid [[thread_position_in_grid]])
 {
 	if(gid.x >= p.size.x || gid.y >= p.size.y)
 		return;
 	float3 o;
-	float4 f;
+	float4 f, back;
 	bool cull, dark;
-	if(!shadowRayStart(p, depth, normals, gid, o, f, cull, dark)){
+	if(!shadowRayStart(p, depth, normals, gid, o, f, cull, dark, back)){
 		raw.write(float4(1.0), gid);
 		return;
 	}
@@ -179,12 +193,18 @@ shadowRays(instance_acceleration_structure tlas [[buffer(0)]],
 		isect.set_triangle_cull_mode(triangle_cull_mode::back);
 	isect.force_opacity(forced_opacity::opaque);
 	float vis = 0.0;
+	uint owned = 0u;
 	for(uint r = 0; r < p.raysPerPixel; r++){
 		SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
 		ray q(o, float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
-		vis += isect.intersect(q, tlas, 0xFF).type == intersection_type::none ? 1.0 : 0.0;
+		auto h = isect.intersect(q, tlas, 0xFF);
+		vis += h.type == intersection_type::none ? 1.0 : 0.0;
+		if(h.type != intersection_type::none && shOwnerListed(cull, shOwnerOf(h.user_instance_id), p.ownerOff == 0u))
+			owned = shOwnerOf(h.user_instance_id);
 	}
 	raw.write(float4(vis/float(p.raysPerPixel)), gid);
+	if(owned != 0u)
+		shadowListAppend(listed, list, p.listCap, gid, owned);
 }
 
 kernel void
@@ -194,14 +214,16 @@ shadowRaysAlpha(instance_acceleration_structure tlas [[buffer(0)]],
                 depth2d<float, access::read> depth [[texture(0)]],
                 texture2d<float, access::write> raw [[texture(1)]],
                 texture2d<float, access::read> normals [[texture(2)]],
+                device atomic_uint *listed [[buffer(3)]],
+                device uint2 *list [[buffer(4)]],
                 uint2 gid [[thread_position_in_grid]])
 {
 	if(gid.x >= p.size.x || gid.y >= p.size.y)
 		return;
 	float3 o;
-	float4 f;
+	float4 f, back;
 	bool cull, dark;
-	if(!shadowRayStart(p, depth, normals, gid, o, f, cull, dark)){
+	if(!shadowRayStart(p, depth, normals, gid, o, f, cull, dark, back)){
 		raw.write(float4(1.0), gid);
 		return;
 	}
@@ -217,12 +239,94 @@ shadowRaysAlpha(instance_acceleration_structure tlas [[buffer(0)]],
 	if(cull)
 		isect.set_triangle_cull_mode(triangle_cull_mode::back);
 	float vis = 0.0;
+	uint owned = 0u;
 	for(uint r = 0; r < p.raysPerPixel; r++){
 		SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
 		ray q(o, float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
-		vis += isect.intersect(q, tlas, 0xFF, ft).type == intersection_type::none ? 1.0 : 0.0;
+		auto h = isect.intersect(q, tlas, 0xFF, ft);
+		vis += h.type == intersection_type::none ? 1.0 : 0.0;
+		if(h.type != intersection_type::none && shOwnerListed(cull, shOwnerOf(h.user_instance_id), p.ownerOff == 0u))
+			owned = shOwnerOf(h.user_instance_id);
 	}
 	raw.write(float4(vis/float(p.raysPerPixel)), gid);
+	if(owned != 0u)
+		shadowListAppend(listed, list, p.listCap, gid, owned);
+}
+
+kernel void
+shadowOwnerReset(device uint *listed [[buffer(3)]])
+{
+	listed[0] = 0u;
+}
+
+static uint
+shadowOwnOwner(instance_acceleration_structure tlas, float3 o, float4 back)
+{
+	intersector<triangle_data, instancing> isect;
+	isect.assume_geometry_type(geometry_type::triangle);
+	isect.force_opacity(forced_opacity::opaque);
+	ray q(o + back.xyz*(2.0*back.w), -back.xyz, 0.0, 2.0*back.w);
+	auto h = isect.intersect(q, tlas, 0xFF);
+	return h.type == intersection_type::none ? 0u : shOwnerOf(h.user_instance_id);
+}
+
+static bool
+shadowCandidateBlocks(device const ShadowAlphaEntry *alpha, uint entries, uint user, uint geometry, const device void *data, float2 bary)
+{
+	uint base = shAlphaBaseOf(user);
+	if(!shAlphaIndexValid(base, 0u, entries) || !shAlphaCandidate(base, geometry, entries, shAlphaCountOf(alpha[base].address)))
+		return true;
+	return shadowAlphaBlocks(alpha, entries, base, geometry, data, bary);
+}
+
+kernel void
+shadowOwnerFix(instance_acceleration_structure tlas [[buffer(0)]],
+               constant ShadowRayParams &p [[buffer(1)]],
+               device const uint *listed [[buffer(3)]],
+               device const uint2 *list [[buffer(4)]],
+               device const ShadowAlphaEntry *alpha [[buffer(5)]],
+               depth2d<float, access::read> depth [[texture(0)]],
+               texture2d<float, access::write> raw [[texture(1)]],
+               texture2d<float, access::read> normals [[texture(2)]],
+               uint tid [[thread_position_in_grid]])
+{
+	uint n = min(listed[0], p.listCap);
+	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
+	for(uint i = tid; i < n; i += SH_OWNER_THREADS){
+		uint2 e = list[i];
+		uint2 gid = uint2(shListX(e.x), shListY(e.x));
+		float3 o;
+		float4 f, back;
+		bool cull, dark;
+		if(!shadowRayStart(p, depth, normals, gid, o, f, cull, dark, back) || !cull || dark)
+			continue;
+		uint own = shadowOwnOwner(tlas, o, back);
+		if(own != e.y)
+			continue;
+		intersection_params ip;
+		ip.assume_geometry_type(geometry_type::triangle);
+		ip.set_triangle_front_facing_winding(winding::clockwise);
+		ip.set_triangle_cull_mode(triangle_cull_mode::back);
+		ip.force_opacity(forced_opacity::non_opaque);
+		ip.accept_any_intersection(true);
+		float vis = 0.0;
+		for(uint r = 0; r < p.raysPerPixel; r++){
+			SHVec3 dd = shDiscDirection(sun, p.sun.w, shHash(gid.x, gid.y, p.frame, 2*r), shHash(gid.x, gid.y, p.frame, 2*r + 1));
+			ray q(o, float3(dd.x, dd.y, dd.z), 0.0, p.eye.w);
+			intersection_query<triangle_data, instancing> iq(q, tlas, 0xFF, ip);
+			while(iq.next()){
+				uint user = iq.get_candidate_user_instance_id();
+				if(shOwnerSkips(own, shOwnerOf(user)))
+					continue;
+				if(!shadowCandidateBlocks(alpha, p.alphaEntries, user, iq.get_candidate_geometry_id(), iq.get_candidate_primitive_data(),
+				                          iq.get_candidate_triangle_barycentric_coord()))
+					continue;
+				iq.commit_triangle_intersection();
+			}
+			vis += iq.get_committed_intersection_type() == intersection_type::none ? 1.0 : 0.0;
+		}
+		raw.write(float4(vis/float(p.raysPerPixel)), gid);
+	}
 }
 
 static float3

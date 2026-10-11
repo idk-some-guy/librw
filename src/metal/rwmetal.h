@@ -381,6 +381,7 @@ struct RayStats
 	uint32 alphaInstances, alphaEntries, alphaTextures, alphaCapped, alphaKernel, alphaSkipped;
 	float32 topMs, buildMs;
 	uint32 castersLarge;
+	uint32 ownedInstances;
 };
 RayStats getRayStats(void);
 
@@ -420,6 +421,7 @@ void setRelitDraw(bool32 on);
 enum { SHADOWCASTER_STATIC = 1, SHADOWCASTER_MOVING = 2, SHADOWCASTER_SKINNED = 4 };
 void addShadowCaster(Atomic *atomic, uint32 kind);
 void addSkinnedShadowCaster(Atomic *atomic);
+void setShadowOwner(uint32 owner);
 void requestShadowLevel(Atomic *atomic);
 void setShadowCaster(bool32 on);
 bool32 shadowSourceOn(void);

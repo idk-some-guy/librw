@@ -362,6 +362,49 @@ TestAlphaIndex(void)
 }
 
 static void
+TestOwnerUserId(void)
+{
+	CHECK(shUserId(0u, 0u) == 0u);
+	CHECK(shOwnerOf(shUserId(4095u, 255u)) == 255u && shAlphaBaseOf(shUserId(4095u, 255u)) == 4095u);
+	CHECK(shOwnerOf(shUserId(SH_ALPHA_NONE, 1u)) == 1u && shAlphaBaseOf(shUserId(SH_ALPHA_NONE, 1u)) == SH_ALPHA_NONE);
+	CHECK(shOwnerOf(shUserId(SH_ALPHA_NONE, 0u)) == 0u && shOwnerOf(shUserId(0u, 110u)) == 110u);
+	CHECK(!shAlphaIndexValid(shAlphaBaseOf(shUserId(SH_ALPHA_NONE, 7u)), 0u, 4096u));
+	CHECK(shAlphaIndexValid(shAlphaBaseOf(shUserId(5u, 200u)), 2u, 8u) && !shAlphaIndexValid(shUserId(5u, 200u), 2u, 8u));
+	CHECK(shAlphaIndexValid(shAlphaBaseOf(shUserId(4095u, 255u)), 0u, 4096u));
+}
+
+static void
+TestOwnerList(void)
+{
+	const unsigned int xy[5][2] = { { 0u, 0u }, { 8191u, 8191u }, { 8191u, 0u }, { 0u, 8191u }, { 3839u, 2159u } };
+	for(int i = 0; i < 5; i++){
+		unsigned int e = shListEntry(xy[i][0], xy[i][1]);
+		CHECK(shListX(e) == xy[i][0] && shListY(e) == xy[i][1]);
+	}
+	CHECK(shListEntry(1u, 0u) != shListEntry(0u, 1u));
+}
+
+static void
+TestOwnerRule(void)
+{
+	CHECK(shOwnerListed(true, 1u, true) && shOwnerListed(true, 255u, true));
+	CHECK(!shOwnerListed(false, 1u, true) && !shOwnerListed(true, 0u, true) && !shOwnerListed(true, 1u, false));
+	CHECK(shOwnerSkips(1u, 1u) && shOwnerSkips(110u, 110u));
+	CHECK(!shOwnerSkips(1u, 2u) && !shOwnerSkips(2u, 1u) && !shOwnerSkips(0u, 0u) && !shOwnerSkips(1u, 0u));
+}
+
+static void
+TestAlphaCount(void)
+{
+	unsigned int a = shAlphaAddressBits(1u, 2u, 3u), b = shAlphaAddressBits(2u, 2u, 4096u);
+	CHECK(shAlphaAddressU(a) == 1u && shAlphaAddressV(a) == 2u && shAlphaCountOf(a) == 3u);
+	CHECK(shAlphaAddressU(b) == 2u && shAlphaAddressV(b) == 2u && shAlphaCountOf(b) == 4096u);
+	CHECK(shAlphaCandidate(0u, 0u, 2u, 1u) && shAlphaCandidate(4u, 1u, 6u, 2u));
+	CHECK(!shAlphaCandidate(0u, 1u, 2u, 1u) && !shAlphaCandidate(4u, 2u, 8u, 2u));
+	CHECK(!shAlphaCandidate(SH_ALPHA_NONE, 0u, 4096u, 1u) && !shAlphaCandidate(3u, 0u, 3u, 1u));
+}
+
+static void
 TestBackFaces(void)
 {
 	CHECK(shCullsBackFaces(1.0f, -0.1f));
@@ -429,6 +472,10 @@ main(void)
 	TestAlphaThreshold();
 	TestAddress();
 	TestAlphaIndex();
+	TestOwnerUserId();
+	TestOwnerList();
+	TestOwnerRule();
+	TestAlphaCount();
 	TestBackFaces();
 	TestClassDark();
 	TestFacetSide();

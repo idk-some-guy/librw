@@ -120,6 +120,7 @@ struct Caster
 	float32 dist2;
 	uint32 mask;
 	int32 bones;
+	uint32 owner;
 };
 
 struct SkinnedLevel
@@ -167,7 +168,7 @@ static struct
 	id<MTLComputePipelineState> skinPipe, tracePipe;
 	float32 eye[3];
 	bool open, workOff;
-	uint32 cap, hostCount;
+	uint32 cap, hostCount, owner;
 	uint64 adds, palettes;
 	int32 skinModeTest;
 	id<MTLAccelerationStructure> current, last;
@@ -198,7 +199,7 @@ struct ShadowRayParamsHost
 	simd_float4x4 invViewProj, viewToWorld;
 	simd_float4 sun, eye;
 	simd_uint2 size, depthSize;
-	uint32 frame, raysPerPixel, halfRes, alphaEntries, terminatorOff;
+	uint32 frame, raysPerPixel, halfRes, alphaEntries, terminatorOff, ownerOff, listCap;
 };
 
 struct ShadowAccumParamsHost
@@ -223,9 +224,11 @@ static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params"
 
 static struct
 {
-	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear;
+	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear, ownerReset, ownerFix;
+	id<MTLBuffer> ownerList;
 	id<MTLFunction> alphaHit;
-	bool forceAlpha, terminatorOff;
+	bool forceAlpha, terminatorOff, ownerOff;
+	uint32 listCap = SH_OWNER_LIST;
 	id<MTLTexture> raw, history[2];
 	uint32 index, frame, width, height, samples;
 	int32 quality;
@@ -299,13 +302,18 @@ initShadows(id<MTLDevice> dev)
 		accumulate = accumulate && sh.accumulate[k];
 	}
 	sh.clear = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowClear"] error:&err] : nil;
-	if(sh.rays == nil || !accumulate || sh.clear == nil){
-		sh.rays = sh.clear = nil;
+	sh.ownerReset = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowOwnerReset"] error:&err] : nil;
+	sh.ownerFix = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"shadowOwnerFix"] error:&err] : nil;
+	sh.ownerList = [dev newBufferWithLength:16 + SH_OWNER_LIST*8 options:MTLResourceStorageModePrivate];
+	if(sh.rays == nil || !accumulate || sh.clear == nil || sh.ownerList == nil){
+		sh.rays = sh.clear = sh.ownerReset = sh.ownerFix = nil;
 		for(uint32 k = 0; k < 4; k++)
 			sh.accumulate[k] = nil;
 		fprintf(stderr, "rw::metal: the shadow kernels failed to build; ray-traced shadows are off: %s\n",
 			err ? err.localizedDescription.UTF8String : "");
 	}
+	if(sh.rays && (sh.ownerReset == nil || sh.ownerFix == nil))
+		fprintf(stderr, "rw::metal: the shadow owner kernel failed to build; class rays keep hits on their own body\n");
 	NSError *alphaErr = nil;
 	if(sh.rays && raysAlpha && sh.alphaHit){
 		MTLComputePipelineDescriptor *pd = [MTLComputePipelineDescriptor new];
@@ -414,7 +422,8 @@ rtTerm(void)
 	rf.deferred.clear();
 	rt.stats.instances = rt.stats.skinnedLevels = 0;
 	rtDropShadowTargets();
-	sh.rays = sh.raysAlpha = sh.clear = nil;
+	sh.rays = sh.raysAlpha = sh.clear = sh.ownerReset = sh.ownerFix = nil;
+	sh.ownerList = nil;
 	for(uint32 k = 0; k < 4; k++)
 		sh.accumulate[k] = nil;
 	sh.alphaHit = nil;
@@ -895,6 +904,7 @@ rtBeginCasters(const float32 eye[3], bool passRuns)
 	rf.byKey.clear();
 	rf.bones.clear();
 	rf.hostCount = 0;
+	rf.owner = 0;
 	memcpy(rf.eye, eye, sizeof(rf.eye));
 	rf.open = rt.available && passRuns;
 	rf.current = nil;
@@ -943,10 +953,12 @@ addCaster(InstanceDataHeader *h, const RawMatrix &world, const void *object, flo
 		Caster &c = rf.casters[it->second];
 		c.mask |= mask;
 		c.dist2 = std::min(c.dist2, dist2);
+		if(c.owner == 0)
+			c.owner = rf.owner;
 		return nil;
 	}
 	rf.byKey[k] = (uint32)rf.casters.size();
-	rf.casters.push_back({ h, object, world, dist2, mask, -1 });
+	rf.casters.push_back({ h, object, world, dist2, mask, -1, rf.owner });
 	return &rf.casters.back();
 }
 
@@ -963,6 +975,12 @@ rtAddDrawCaster(InstanceDataHeader *h, const RawMatrix &world, const void *objec
 		rf.bones.insert(rf.bones.end(), bones, bones + MAXSKINBONES);
 		rf.palettes++;
 	}
+}
+
+void
+setShadowOwner(uint32 owner)
+{
+	rf.owner = owner <= 255 ? owner : 0;
 }
 
 bool
@@ -1373,7 +1391,7 @@ alphaBase(AlphaFill &f, const InstanceDataHeader *h, const std::vector<uint32> &
 	}
 	if(f.entries + meshes.size() > f.cap || f.textures.size() + fresh > RT_MAX_ALPHA_TEXTURES){
 		f.capped++;
-		return 0xFFFFFFFFu;
+		return SH_ALPHA_NONE;
 	}
 	uint32 base = f.entries;
 	for(size_t g = 0; g < meshes.size(); g++){
@@ -1383,7 +1401,8 @@ alphaBase(AlphaFill &f, const InstanceDataHeader *h, const std::vector<uint32> &
 		id<MTLTexture> use = tex[g] ? tex[g] : white;
 		e.tex = use.gpuResourceID;
 		e.threshold = tex[g] ? shAlphaThreshold(inst->castAlphaRef) : 0.0f;
-		e.address = tex[g] ? shAddressMode(rwTex->getAddressU()) | shAddressMode(rwTex->getAddressV()) << 2 : 0u;
+		e.address = shAlphaAddressBits(tex[g] ? shAddressMode(rwTex->getAddressU()) : 0u, tex[g] ? shAddressMode(rwTex->getAddressV()) : 0u,
+			(uint32)meshes.size());
 		if(tex[g])
 			GETMETALRASTEREXT(rwTex->raster->parent)->lastUseFrame = getFrameId();
 		if(f.textures.emplace((__bridge const void*)use, (uint32)f.textures.size()).second){
@@ -1406,7 +1425,7 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 	f.cap = rf.alphaCap ? std::min<uint32>(rf.alphaCap, RT_MAX_ALPHA_ENTRIES) : (uint32)RT_MAX_ALPHA_ENTRIES;
 	f.keep = [NSMutableArray new];
 	rf.alphaTextures.clear();
-	uint32 count = 0, waiting = 0, past = ~0u;
+	uint32 count = 0, waiting = 0, past = ~0u, owned = 0;
 	for(uint32 i : chosen){
 		Caster &c = rf.casters[i];
 		id<MTLAccelerationStructure> as = nil;
@@ -1420,7 +1439,7 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 			waiting++;
 			continue;
 		}
-		uint32 user = 0xFFFFFFFFu;
+		uint32 user = SH_ALPHA_NONE;
 		if(c.bones < 0){
 			const std::vector<uint32> &meshes = rt.bottoms.find(c.header)->second.alphaMeshes;
 			if(!meshes.empty()){
@@ -1435,20 +1454,22 @@ encodeInstances(id<MTLCommandBuffer> cb, const std::vector<uint32> &chosen, TopS
 			MTLAccelerationStructureInstanceOptionNone;
 		di[count].mask = c.mask;
 		di[count].intersectionFunctionTableOffset = 0;
-		di[count].userID = user;
+		di[count].userID = shUserId(user, c.owner);
 		di[count].accelerationStructureID = as.gpuResourceID;
-		if(rf.alphaIndexPast && past == ~0u && user != 0xFFFFFFFFu)
+		if(rf.alphaIndexPast && past == ~0u && user != SH_ALPHA_NONE)
 			past = count;
+		owned += c.owner != 0;
 		count++;
 	}
 	if(past != ~0u)
-		di[past].userID = f.entries;
+		di[past].userID = shUserId(f.entries, shOwnerOf(di[past].userID));
 	rt.stats.instances = count;
 	rt.stats.castersWaiting = waiting;
 	rt.stats.alphaInstances = f.instances;
 	rt.stats.alphaEntries = f.entries;
 	rt.stats.alphaTextures = (uint32)f.textures.size();
 	rt.stats.alphaCapped = f.capped;
+	rt.stats.ownedInstances = owned;
 	uint32 *tp = (uint32*)t.alphaParams.contents;
 	tp[0] = f.entries;
 	tp[1] = (uint32)rf.alphaFunctionTest;
@@ -1692,9 +1713,10 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	SHVec3 s0 = { sh.prevSun.x, sh.prevSun.y, sh.prevSun.z }, s1 = { sun.x, sun.y, sun.z };
 	bool valid = sh.valid && in.history && !rt.cutFrame && !shSunMoved(s0, s1);
 	uint32 rw = (uint32)sh.raw.width, rh = (uint32)sh.raw.height, frameNo = sh.frame++;
+	bool owners = sh.ownerFix && sh.ownerReset && !sh.ownerOff && !sh.terminatorOff && rt.stats.ownedInstances > 0;
 	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(sun, in.radius), simd_make_float4(eye, SH_RAY_DISTANCE),
 		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries,
-		sh.terminatorOff ? 1u : 0u };
+		sh.terminatorOff ? 1u : 0u, owners ? 0u : 1u, sh.listCap };
 	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
 		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
 	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
@@ -1710,6 +1732,13 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	}
 	if(alpha)
 		encodeAlphaTable(e, rf.currentTable, rf.currentAlpha, rf.currentParams, textures);
+	[e setBuffer:sh.ownerList offset:0 atIndex:3];
+	[e setBuffer:sh.ownerList offset:16 atIndex:4];
+	if(owners){
+		[e setComputePipelineState:sh.ownerReset];
+		[e dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+		[e memoryBarrierWithScope:MTLBarrierScopeBuffers];
+	}
 	[e setComputePipelineState:alpha ? sh.raysAlpha : sh.rays];
 	rt.stats.alphaKernel = alpha ? 1 : 0;
 	rf.passTable = alpha ? rf.currentTable : nil;
@@ -1720,6 +1749,15 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	[e setTexture:sh.raw atIndex:1];
 	[e setTexture:in.normals atIndex:2];
 	[e dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	if(owners){
+		ShadowRayParamsHost fp = rp;
+		fp.alphaEntries = alpha ? rp.alphaEntries : 0u;
+		[e memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers];
+		[e setComputePipelineState:sh.ownerFix];
+		[e setBytes:&fp length:sizeof(fp) atIndex:1];
+		[e setBuffer:alpha ? rf.currentAlpha : sh.ownerList offset:0 atIndex:5];
+		[e dispatchThreads:MTLSizeMake(SH_OWNER_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	}
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 	[e setComputePipelineState:sh.accumulate[frameNo & 3]];
 	[e setTexture:sh.raw atIndex:0];
@@ -2255,6 +2293,18 @@ setShadowTerminatorRuleForTest(bool32 on)
 }
 
 void
+setShadowOwnerRuleForTest(bool32 on)
+{
+	sh.ownerOff = !on;
+}
+
+void
+setShadowOwnerListCapForTest(uint32 cap)
+{
+	sh.listCap = std::min<uint32>(cap, SH_OWNER_LIST);
+}
+
+void
 setRtAlphaFunctionForTest(int32 mode)
 {
 	rf.alphaFunctionTest = mode;
@@ -2474,7 +2524,7 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 		std::vector<float32> times;
 		for(uint32 k = 0; k < 5; k++){
 			ShadowRayParamsHost rp = { inv, simd_inverse(view), simd_make_float4(sun, 0.02f), simd_make_float4(e, SH_RAY_DISTANCE),
-				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries };
+				simd_make_uint2(rw, rh), simd_make_uint2(width, height), k, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries, 0u, 1u, 0u };
 			id<MTLCommandBuffer> tcb = [ctx->queue commandBuffer];
 			MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
 			pd.sampleBufferAttachments[0].sampleBuffer = sb;
@@ -2485,6 +2535,8 @@ rtShadowTimingForTest(uint32 width, uint32 height, int32 quality, const float32 
 			if(alpha)
 				encodeAlphaTable(enc, rf.lastTable, rf.lastAlpha, rf.lastParams, textures);
 			rtUseHeaps(enc);
+			[enc setBuffer:sh.ownerList offset:0 atIndex:3];
+			[enc setBuffer:sh.ownerList offset:16 atIndex:4];
 			[enc setAccelerationStructure:rf.last atBufferIndex:0];
 			[enc setBytes:&rp length:sizeof(rp) atIndex:1];
 			[enc setTexture:depthTex atIndex:0];

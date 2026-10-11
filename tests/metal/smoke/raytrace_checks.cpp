@@ -2892,7 +2892,7 @@ FacedQuads(Material *mat, const V3d (*c)[4], const V3d *out, int faces)
 }
 
 static bool
-ContactShadow(const char *name, bool body)
+ContactShadow(const char *name, bool body, bool owned = false)
 {
 	enum { H = 480, C = 8, R = 6 };
 	ShadowScene s;
@@ -2920,8 +2920,16 @@ ContactShadow(const char *name, bool body)
 		{ P(12.0f, 4.0f, -2.0f), P(16.0f, 4.0f, -2.0f), P(16.0f, 4.0f, 4.0f), P(12.0f, 4.0f, 4.0f) },
 		{ P(12.0f, -4.0f, -2.0f), P(16.0f, -4.0f, -2.0f), P(16.0f, 4.0f, -2.0f), P(12.0f, 4.0f, -2.0f) },
 		{ P(12.0f, -4.0f, 4.0f), P(16.0f, -4.0f, 4.0f), P(16.0f, 4.0f, 4.0f), P(12.0f, 4.0f, 4.0f) } };
-	const V3d up[1] = { Z }, out[6] = { scale(A, -1.0f), A, scale(Rt, -1.0f), Rt, scale(Z, -1.0f), Z };
-	Geometry *gg = FacedQuads(s.mat, ground, up, 1), *bg = FacedQuads(s.mat, box, out, body ? 6 : 1);
+	const V3d up[1] = { Z }, out[12] = { scale(A, -1.0f), A, scale(Rt, -1.0f), Rt, scale(Z, -1.0f), Z, A, scale(A, -1.0f), Rt, scale(Rt, -1.0f), Z,
+		scale(Z, -1.0f) };
+	V3d shell[12][4];
+	for(int f = 0; f < 6; f++)
+		for(int i = 0; i < 4; i++){
+			shell[f][i] = box[f][i];
+			V3d c = P(14.0f, 0.0f, 1.0f), d = sub(box[f][i], c);
+			shell[6 + f][i] = add(c, scale(d, 0.92f));
+		}
+	Geometry *gg = FacedQuads(s.mat, ground, up, 1), *bg = FacedQuads(s.mat, shell, out, owned ? 12 : body ? 6 : 1);
 	Atomic *ga = MakeAtomic(gg), *ba = MakeAtomic(bg);
 	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
 	static float nrm[H][3], dep[H];
@@ -2932,11 +2940,15 @@ ContactShadow(const char *name, bool body)
 	bool read = true;
 	auto frames = [&](int n, bool withBody){
 		for(int k = 0; k < n; k++)
-			CasterFrame([&](bool){
+			CasterFrame([&](bool prepass){
 				SetRenderState(CULLMODE, CULLBACK);
 				ga->render();
+				if(prepass && owned)
+					metal::setShadowOwner(1);
 				if(withBody)
 					ba->render();
+				if(prepass)
+					metal::setShadowOwner(0);
 			});
 		metal::rtWaitForTest();
 	};
@@ -2956,7 +2968,10 @@ ContactShadow(const char *name, bool body)
 	edge = above ? edge : edge + 1;
 	faceRow = edge - 4*step;
 	for(int pass = 0; pass < 2; pass++){
-		metal::setShadowTerminatorRuleForTest(pass == 1);
+		if(owned)
+			metal::setShadowOwnerRuleForTest(pass == 1);
+		else
+			metal::setShadowTerminatorRuleForTest(pass == 1);
 		metal::cameraCut();
 		frames(24, false);
 		for(int f = 0; f < F; f++){
@@ -2974,6 +2989,7 @@ ContactShadow(const char *name, bool body)
 		read = edge >= 0 && metal::readShadowForTest(320, faceRow, &face[pass], &len) && read;
 	}
 	metal::setShadowTerminatorRuleForTest(true);
+	metal::setShadowOwnerRuleForTest(true);
 	SetRenderState(CULLMODE, CULLNONE);
 	DestroyAtomic(ga);
 	DestroyAtomic(ba);
@@ -3014,6 +3030,13 @@ static bool
 CheckShadowContactBody(void)
 {
 	return ContactShadow("at medium the ground along the shaded side of a closed body resting on it keeps its shadow in every ray phase and from the frame the body appears, as with the terminator rule off", true);
+}
+
+static bool
+CheckShadowContactOwned(void)
+{
+	return ContactShadow("at medium the ground along the shaded side of a closed body with an inner shell under one owner keeps its shadow in every ray phase and from the frame the body appears, as with the owner rule off",
+		true, true);
 }
 
 static bool
@@ -4250,6 +4273,485 @@ CheckSkinnedCutoutLayer(void)
 }
 
 static Geometry*
+OwnerShell(Material *mat, float x, float z, float outer, float inner, float gap0, float gap1)
+{
+	enum { SEG = 8, CUTS = 4 };
+	const float ys[CUTS] = { -3.0f, gap0, gap1, 3.0f };
+	auto open = [](int slab, int k){ return slab == 1 && (k == 1 || k == 2); };
+	int tris = 0;
+	for(int sh = 0; sh < 2; sh++)
+		for(int slab = 0; slab < CUTS - 1; slab++)
+			for(int k = 0; k < SEG; k++)
+				tris += open(slab, k) ? 0 : 2;
+	Geometry *geo = Geometry::create(2*CUTS*SEG, tris, Geometry::POSITIONS | Geometry::NORMALS | Geometry::LIGHT);
+	V3d *v = geo->morphTargets[0].vertices, *n = geo->morphTargets[0].normals;
+	for(int sh = 0; sh < 2; sh++)
+		for(int c = 0; c < CUTS; c++)
+			for(int k = 0; k < SEG; k++){
+				float a = 6.28318531f*k/SEG, r = sh ? inner : outer, d = sh ? -1.0f : 1.0f;
+				int i = (sh*CUTS + c)*SEG + k;
+				v[i].set(x + r*cosf(a), ys[c], z + r*sinf(a));
+				n[i].set(d*cosf(a), 0.0f, d*sinf(a));
+			}
+	Triangle *t = geo->triangles;
+	for(int sh = 0; sh < 2; sh++)
+		for(int slab = 0; slab < CUTS - 1; slab++)
+			for(int k = 0; k < SEG; k++){
+				if(open(slab, k))
+					continue;
+				int lo = sh*CUTS*SEG + slab*SEG, hi = lo + SEG, k1 = (k + 1) % SEG;
+				int a0 = lo + k, a1 = hi + k, b0 = lo + k1, b1 = hi + k1;
+				t[0].v[0] = a0; t[0].v[1] = sh ? b0 : a1; t[0].v[2] = b1; t[0].matId = 0;
+				t[1].v[0] = a0; t[1].v[1] = b1; t[1].v[2] = sh ? a1 : b0; t[1].matId = 0;
+				t += 2;
+			}
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static Geometry*
+OwnerBox(Material *mat, V3d lo, V3d hi, bool skinned)
+{
+	const V3d c[6][4] = {
+		{ { lo.x, lo.y, lo.z }, { lo.x, hi.y, lo.z }, { lo.x, hi.y, hi.z }, { lo.x, lo.y, hi.z } },
+		{ { hi.x, lo.y, lo.z }, { hi.x, hi.y, lo.z }, { hi.x, hi.y, hi.z }, { hi.x, lo.y, hi.z } },
+		{ { lo.x, lo.y, lo.z }, { hi.x, lo.y, lo.z }, { hi.x, lo.y, hi.z }, { lo.x, lo.y, hi.z } },
+		{ { lo.x, hi.y, lo.z }, { hi.x, hi.y, lo.z }, { hi.x, hi.y, hi.z }, { lo.x, hi.y, hi.z } },
+		{ { lo.x, lo.y, lo.z }, { hi.x, lo.y, lo.z }, { hi.x, hi.y, lo.z }, { lo.x, hi.y, lo.z } },
+		{ { lo.x, lo.y, hi.z }, { hi.x, lo.y, hi.z }, { hi.x, hi.y, hi.z }, { lo.x, hi.y, hi.z } } };
+	const V3d out[6] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
+	if(!skinned)
+		return FacedQuads(mat, c, out, 6);
+	Geometry *geo = Geometry::create(24, 12, Geometry::POSITIONS | Geometry::TEXTURED | Geometry::NORMALS | Geometry::PRELIT);
+	V3d *v = geo->morphTargets[0].vertices;
+	uint8 idx[24][4] = {};
+	float wts[24][4] = {};
+	for(int f = 0; f < 6; f++){
+		int o[4] = { 0, 1, 2, 3 };
+		if(dot(cross(sub(c[f][1], c[f][0]), sub(c[f][2], c[f][0])), out[f]) < 0.0f)
+			std::swap(o[1], o[3]);
+		for(int i = 0; i < 4; i++){
+			v[4*f + i] = c[f][o[i]];
+			geo->morphTargets[0].normals[4*f + i] = out[f];
+			geo->colors[4*f + i] = { 100, 100, 100, 255 };
+			geo->texCoords[0][4*f + i] = { 0.0f, 0.0f };
+			wts[4*f + i][0] = 1.0f;
+		}
+		Triangle *t = &geo->triangles[2*f];
+		t[0].v[0] = 4*f; t[0].v[1] = 4*f + 1; t[0].v[2] = 4*f + 2; t[0].matId = 0;
+		t[1].v[0] = 4*f; t[1].v[1] = 4*f + 2; t[1].v[2] = 4*f + 3; t[1].matId = 0;
+	}
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	Matrix ident;
+	ident.setIdentity();
+	AttachSkin(geo, 1, &ident, idx, wts);
+	return geo;
+}
+
+static Geometry*
+OwnerPanel(Material *mat, float x, float y0, float y1, float z0, float z1)
+{
+	Geometry *geo = Geometry::create(4, 2, Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED);
+	V3d c[4] = { { x, y0, z0 }, { x, y1, z0 }, { x, y1, z1 }, { x, y0, z1 } }, out = { -1.0f, 0.0f, 0.0f };
+	TexCoords uv[4] = { { 0.1f, 0.5f }, { 0.1f, 0.5f }, { 0.9f, 0.5f }, { 0.9f, 0.5f } };
+	int o[4] = { 0, 1, 2, 3 };
+	if(dot(cross(sub(c[1], c[0]), sub(c[2], c[0])), out) < 0.0f)
+		std::swap(o[1], o[3]);
+	for(int i = 0; i < 4; i++){
+		geo->morphTargets[0].vertices[i] = c[o[i]];
+		geo->texCoords[0][i] = uv[o[i]];
+		geo->colors[i] = { 120, 120, 120, 255 };
+	}
+	geo->triangles[0].v[0] = 0; geo->triangles[0].v[1] = 1; geo->triangles[0].v[2] = 2; geo->triangles[0].matId = 0;
+	geo->triangles[1].v[0] = 0; geo->triangles[1].v[1] = 2; geo->triangles[1].v[2] = 3; geo->triangles[1].matId = 0;
+	geo->matList.appendMaterial(mat);
+	geo->calculateBoundingSphere();
+	geo->unlock();
+	return geo;
+}
+
+static const float ownerX = 1.5f, ownerZ = -15.0f, ownerR = 4.0f;
+static const V3d ownerSeatLo = { 1.1f, -1.5f, -11.6f }, ownerSeatHi = { 1.5f, 0.6f, -11.45f };
+static const V3d ownerRiderLo = { 1.55f, -1.5f, -11.8f }, ownerRiderHi = { 1.85f, 0.6f, -11.5f };
+static const float ownerPanelX = 1.3f, ownerPanelZ0 = -11.75f, ownerPanelZ1 = -11.32f;
+
+struct OwnerScene
+{
+	ShadowScene s;
+	Geometry *bodyGeo, *seatGeo;
+	Atomic *body, *seat;
+	V3d toSun;
+};
+
+static void
+MakeOwnerScene(OwnerScene *o, bool inner = true)
+{
+	MakeShadowScene(&o->s, 0.5f);
+	SetSunRadius(0.0f);
+	TurnSun(&o->s, -100.0f);
+	o->toSun = scale(o->s.sunFrame->getLTM()->at, -1.0f);
+	o->bodyGeo = inner ? OwnerShell(o->s.mat, ownerX, ownerZ, ownerR, 3.8f, 0.8f, 2.6f) : TerminatorCylinder(o->s.mat, ownerX, ownerR, ownerZ, false);
+	o->body = MakeAtomic(o->bodyGeo);
+	o->seatGeo = OwnerBox(o->s.mat, ownerSeatLo, ownerSeatHi, false);
+	o->seat = MakeAtomic(o->seatGeo);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+}
+
+static void
+FreeOwnerScene(OwnerScene *o)
+{
+	metal::setShadowOwnerRuleForTest(true);
+	metal::setShadowOwnerListCapForTest(SH_OWNER_LIST);
+	SetRenderState(CULLMODE, CULLNONE);
+	DestroyAtomic(o->body);
+	DestroyAtomic(o->seat);
+	o->bodyGeo->destroy();
+	o->seatGeo->destroy();
+	FreeShadowScene(&o->s);
+}
+
+template<typename F> static void
+OwnerFrames(OwnerScene *o, uint32 seatOwner, int n, F extra)
+{
+	metal::cameraCut();
+	for(int k = 0; k < n; k++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLBACK);
+			o->s.floor->render();
+			if(prepass)
+				metal::setShadowOwner(1);
+			o->body->render();
+			if(prepass)
+				metal::setShadowOwner(seatOwner);
+			o->seat->render();
+			if(prepass)
+				metal::setShadowOwner(0);
+			extra(prepass, k);
+		});
+	metal::rtWaitForTest();
+}
+
+static int
+OwnerCol(float degrees)
+{
+	float a = degrees*3.14159265f/180.0f;
+	return SX(ownerX + ownerR*cosf(a), -ownerZ - ownerR*sinf(a));
+}
+
+static bool
+OwnerRayStart(int col, float *px, float *pz)
+{
+	const float a90 = 3.14159265f/2.0f, a135 = 3.0f*3.14159265f/4.0f;
+	float ax = ownerX + ownerR*cosf(a90), az = ownerZ + ownerR*sinf(a90);
+	float bx = ownerX + ownerR*cosf(a135), bz = ownerZ + ownerR*sinf(a135);
+	float k = 1.0f - (col + 0.5f)/320.0f;
+	float u = (-k*az - ax)/((bx - ax) + k*(bz - az));
+	*px = ax + u*(bx - ax);
+	*pz = az + u*(bz - az);
+	return u > 0.03f && u < 0.97f;
+}
+
+static int
+OwnerRayCrosses(float px, float pz, V3d L, V3d lo, V3d hi, float m)
+{
+	auto hits = [&](float g){
+		float t0 = 0.0f, t1 = 100.0f;
+		const float o[2] = { px, pz }, d[2] = { L.x, L.z }, a[2] = { lo.x + g, lo.z + g }, b[2] = { hi.x - g, hi.z - g };
+		for(int i = 0; i < 2; i++){
+			if(fabsf(d[i]) < 1e-6f){
+				if(o[i] < a[i] || o[i] > b[i])
+					return false;
+				continue;
+			}
+			float ta = (a[i] - o[i])/d[i], tb = (b[i] - o[i])/d[i];
+			t0 = fmaxf(t0, fminf(ta, tb));
+			t1 = fminf(t1, fmaxf(ta, tb));
+		}
+		return t0 <= t1;
+	};
+	return hits(m) ? 1 : !hits(-m) ? 0 : -1;
+}
+
+static bool
+OwnerScanline(OwnerScene *o, uint32 seatOwner, float row[][4], int c0, int n)
+{
+	bool read = true;
+	OwnerFrames(o, seatOwner, 17, [&](bool prepass, int k){
+		if(!prepass && k == 16)
+			for(int i = 0; i < n; i++)
+				read = metal::readScenePixel(c0 + i, 240, row[i]) && read;
+	});
+	return read;
+}
+
+static void
+OwnerSteps(float row[][4], int n, float *step, float *rise, int *at)
+{
+	*step = *rise = 0.0f;
+	*at = -1;
+	for(int i = 0; i + 1 < n; i++)
+		for(int ch = 0; ch < 3; ch++){
+			float d = row[i][ch] - row[i + 1][ch];
+			if(d > *step){
+				*step = d;
+				*at = i;
+			}
+			*rise = fmaxf(*rise, -d);
+		}
+}
+
+static bool
+CheckOwnerTerminator(void)
+{
+	const char *name = "a closed body with an inner seat and an inner far panel, all under one owner, shades to its terminator under a low sun";
+	enum { N = 192 };
+	OwnerScene o;
+	MakeOwnerScene(&o);
+	int c0 = OwnerCol(45.0f), n = std::min(OwnerCol(135.0f) - c0 + 1, (int)N);
+	static float row[2][N][4];
+	bool read = n > 40;
+	for(int pass = 0; pass < 2; pass++){
+		metal::setShadowOwnerRuleForTest(pass == 0);
+		read = OwnerScanline(&o, 1, row[pass], c0, n) && read;
+	}
+	metal::RayStats st = metal::getRayStats();
+	FreeOwnerScene(&o);
+	float step[2], rise[2];
+	int at[2];
+	for(int pass = 0; pass < 2; pass++)
+		OwnerSteps(row[pass], n, &step[pass], &rise[pass], &at[pass]);
+	bool ok = read && st.ownedInstances == 2 && step[0] <= 4.0f/255.0f && rise[0] <= 1.0f/1024.0f && step[1] > 4.0f/255.0f;
+	Detail("  read %d over columns %d to %d; owned instances %u; with the owner rule: largest drop %.1f/255 after column %d, largest rise %.5f; without it: largest drop %.1f/255 after column %d\n",
+		read, c0, c0 + n - 1, st.ownedInstances, step[0]*255.0f, c0 + at[0], rise[0], step[1]*255.0f, c0 + at[1]);
+	return Report(ok, name);
+}
+
+template<typename Expect, typename F> static bool
+OwnerFactors(const char *name, uint32 seatOwner, Expect expect, F extra, bool inner = true)
+{
+	OwnerScene o;
+	MakeOwnerScene(&o, inner);
+	OwnerFrames(&o, seatOwner, 17, extra);
+	int c0 = OwnerCol(90.0f), c1 = OwnerCol(135.0f), dark = 0, lit = 0, wrong = 0, firstWrong = -1;
+	bool read = true;
+	float got = -1.0f;
+	for(int c = c0; c <= c1; c++){
+		float px, pz;
+		if(!OwnerRayStart(c, &px, &pz))
+			continue;
+		int e = expect(px, pz, o.toSun);
+		if(e < 0)
+			continue;
+		float v = -1.0f, len = 0.0f;
+		read = metal::readShadowForTest(c, 240, &v, &len) && read;
+		bool good = e ? Dark(v) : Lit(v);
+		(e ? dark : lit)++;
+		if(!good){
+			wrong++;
+			if(firstWrong < 0){
+				firstWrong = c;
+				got = v;
+			}
+		}
+	}
+	FreeOwnerScene(&o);
+	bool ok = read && dark >= 5 && lit >= 5 && wrong == 0;
+	Detail("  read %d; columns %d to %d: %d expected dark, %d expected lit, %d wrong (first at column %d, factor %.3f)\n", read, c0, c1, dark,
+		lit, wrong, firstWrong, got);
+	return Report(ok, name);
+}
+
+static bool
+CheckOwnerSeatOther(void)
+{
+	return OwnerFactors("a closed body whose seat has another owner is shadowed on its near side where the seat lies on the ray path and lit beside it", 2,
+		[](float px, float pz, V3d L){ return OwnerRayCrosses(px, pz, L, ownerSeatLo, ownerSeatHi, 0.03f); }, [](bool, int){});
+}
+
+static const V3d ownerOtherLo = { 6.0f, -1.5f, -10.6f }, ownerOtherHi = { 7.0f, 0.6f, -10.35f };
+
+static bool
+CheckOwnerOtherBody(void)
+{
+	Material *m = Material::create();
+	Geometry *g = OwnerBox(m, ownerOtherLo, ownerOtherHi, false);
+	m->destroy();
+	Atomic *a = MakeAtomic(g);
+	bool ok = OwnerFactors("a closed body is shadowed by a second body with another owner standing toward the sun", 1,
+		[](float px, float pz, V3d L){ return OwnerRayCrosses(px, pz, L, ownerOtherLo, ownerOtherHi, 0.03f); },
+		[&](bool prepass, int){
+			if(prepass)
+				metal::setShadowOwner(2);
+			a->render();
+			if(prepass)
+				metal::setShadowOwner(0);
+		}, false);
+	DestroyAtomic(a);
+	g->destroy();
+	return ok;
+}
+
+static bool
+CheckOwnerRider(bool skinned)
+{
+	Material *m = Material::create();
+	Geometry *g = OwnerBox(m, ownerRiderLo, ownerRiderHi, skinned);
+	m->destroy();
+	Atomic *a = skinned ? SkinAtomic(g) : MakeAtomic(g);
+	if(skinned)
+		PoseSkin(a, 1);
+	bool ok = OwnerFactors(skinned ? "a skinned occupant added after the owner scope closes still shadows the body it sits in" :
+		"an occupant drawn after the owner scope closes still shadows the body it sits in", 1,
+		[](float px, float pz, V3d L){ return OwnerRayCrosses(px, pz, L, ownerRiderLo, ownerRiderHi, 0.03f); },
+		[&](bool prepass, int){
+			if(skinned){
+				if(prepass)
+					metal::addSkinnedShadowCaster(a);
+			}else
+				a->render();
+		});
+	if(skinned)
+		DestroySkinAtomic(a);
+	else
+		DestroyAtomic(a);
+	g->destroy();
+	return ok;
+}
+
+static bool
+CheckOwnerOutsideClass(void)
+{
+	const char *name = "pixels outside the terminator class are bit-equal with the owner rule on and off: the floor, the body's sunlit top and the far inner panel seen through an opening";
+	struct Area { int x0, x1, y0, y1; };
+	const Area areas[4] = { { 200, 440, 120, 120 }, { 382, 445, 200, 200 }, { OwnerCol(50.0f), OwnerCol(85.0f), 240, 240 }, { 302, 330, 270, 282 } };
+	enum { MAXPX = 1024 };
+	static float px[2][MAXPX][4];
+	OwnerScene o;
+	MakeOwnerScene(&o);
+	bool read = true;
+	int count = 0;
+	float dTop = -1.0f, dPanel = -1.0f;
+	for(int pass = 0; pass < 2; pass++){
+		metal::setShadowOwnerRuleForTest(pass == 0);
+		OwnerFrames(&o, 1, 17, [&](bool prepass, int k){
+			if(prepass || k != 16)
+				return;
+			int i = 0;
+			for(const Area &a : areas)
+				for(int y = a.y0; y <= a.y1; y++)
+					for(int x = a.x0; x <= a.x1 && i < MAXPX; x++)
+						read = metal::readScenePixel(x, y, px[pass][i++]) && read;
+			count = i;
+		});
+	}
+	float nrm[3], mo[2];
+	read = metal::readPrepassForTest(OwnerCol(110.0f), 240, nrm, mo, &dTop) && metal::readPrepassForTest(316, 276, nrm, mo, &dPanel) && read;
+	FreeOwnerScene(&o);
+	int unequal = 0;
+	for(int i = 0; i < count; i++)
+		unequal += memcmp(px[0][i], px[1][i], 3*sizeof(float)) != 0;
+	bool ok = read && count > 400 && unequal == 0 && dPanel > dTop;
+	Detail("  read %d; %d pixels compared, %d not bit-equal; depth through the opening %.6f, at the near side %.6f\n", read, count, unequal,
+		dPanel, dTop);
+	return Report(ok, name);
+}
+
+static bool
+CheckOwnerCutout(void)
+{
+	const char *name = "an owned body with a cutout part lets the sun through its clear texels";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	Material *m = AlphaMaterial(patternAlpha, 4, 4);
+	Geometry *g;
+	Atomic *roof = AlphaRoof(&g, m, m);
+	AlphaFrames(&s, 16, [&](bool prepass){
+		if(prepass)
+			metal::setShadowOwner(1);
+		AlphaRoofPass(roof, prepass, 128);
+		if(prepass)
+			metal::setShadowOwner(0);
+	});
+	float v[16];
+	for(int r = 0; r < 4; r++)
+		for(int c = 0; c < 4; c++)
+			v[r*4 + c] = Floor(1.0f - (c + 0.5f)/2.0f - 5.0f, 1.0f - (r + 0.5f)/2.0f);
+	metal::RayStats st = metal::getRayStats();
+	DestroyAtomic(roof);
+	g->destroy();
+	FreeShadowScene(&s);
+	bool ok = st.alphaKernel == 1 && st.ownedInstances == 1;
+	for(int i = 0; i < 16; i++)
+		ok = ok && (patternAlpha[i] ? Dark(v[i]) : Lit(v[i]));
+	Detail("  floor under texel rows: %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f; alpha kernel %u, owned instances %u\n",
+		v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15], st.alphaKernel, st.ownedInstances);
+	return Report(ok, name);
+}
+
+static bool
+CheckOwnerCutoutRetrace(void)
+{
+	static const uint8 halfAlpha[2] = { 255, 0 };
+	Material *m = AlphaMaterial(halfAlpha, 2, 1);
+	Geometry *g = OwnerPanel(m, ownerPanelX, -1.5f, 1.5f, ownerPanelZ0, ownerPanelZ1);
+	m->destroy();
+	Atomic *a = MakeAtomic(g);
+	const float mid = 0.5f*(ownerPanelZ0 + ownerPanelZ1);
+	bool ok = OwnerFactors("a listed pixel whose second trace meets another owner's cutout part is lit through its clear texels and shadowed by its solid ones", 1,
+		[mid](float px, float pz, V3d L){
+			if(px >= ownerPanelX)
+				return -1;
+			float z = pz + (ownerPanelX - px)/L.x*L.z;
+			if(z > ownerPanelZ0 + 0.03f && z < mid - 0.03f)
+				return 1;
+			if(z > mid + 0.03f && z < ownerPanelZ1 - 0.03f)
+				return 0;
+			return -1;
+		},
+		[&](bool prepass, int){
+			if(!prepass)
+				return;
+			metal::setShadowOwner(2);
+			metal::addShadowCaster(a, metal::SHADOWCASTER_STATIC);
+			metal::setShadowOwner(0);
+		});
+	DestroyAtomic(a);
+	g->destroy();
+	return ok;
+}
+
+static bool
+CheckOwnerListFull(void)
+{
+	const char *name = "with the owner list full, a listed pixel keeps the result it has without the owner rule";
+	enum { N = 192 };
+	OwnerScene o;
+	MakeOwnerScene(&o);
+	int c0 = OwnerCol(45.0f), n = std::min(OwnerCol(135.0f) - c0 + 1, (int)N);
+	static float row[3][N][4];
+	bool read = n > 40;
+	for(int pass = 0; pass < 3; pass++){
+		metal::setShadowOwnerRuleForTest(pass != 0);
+		metal::setShadowOwnerListCapForTest(pass == 1 ? 0u : SH_OWNER_LIST);
+		read = OwnerScanline(&o, 1, row[pass], c0, n) && read;
+	}
+	FreeOwnerScene(&o);
+	int full = 0, listed = 0;
+	for(int i = 0; i < n; i++){
+		full += memcmp(row[0][i], row[1][i], 3*sizeof(float)) != 0;
+		listed += memcmp(row[0][i], row[2][i], 3*sizeof(float)) != 0;
+	}
+	bool ok = read && full == 0 && listed > 5;
+	Detail("  read %d over columns %d to %d; with the list full %d pixels not bit-equal to the rule off; with room %d pixels change\n", read, c0,
+		c0 + n - 1, full, listed);
+	return Report(ok, name);
+}
+
+static Geometry*
 ShadowCylinder(float radius, float halfLength, float cz, int sides)
 {
 	int nv = 2*(sides + 1);
@@ -4547,6 +5049,16 @@ RunRaytraceChecks(Camera *camera)
 	CheckShadowWallFacingAwayTwoSided();
 	CheckShadowContactWall();
 	CheckShadowContactBody();
+	CheckShadowContactOwned();
+	CheckOwnerTerminator();
+	CheckOwnerSeatOther();
+	CheckOwnerOtherBody();
+	CheckOwnerRider(false);
+	CheckOwnerRider(true);
+	CheckOwnerOutsideClass();
+	CheckOwnerCutout();
+	CheckOwnerCutoutRetrace();
+	CheckOwnerListFull();
 	CheckShadowClassDark();
 	CheckShadowSkippedWall();
 	CheckPlainTwinFailure();

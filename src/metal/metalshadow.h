@@ -316,6 +316,89 @@ shAlphaIndexValid(unsigned int base, unsigned int geometry, unsigned int count)
 	return base < count && geometry < count - base;
 }
 
+#define SH_ALPHA_NONE 0xFFFFFFu
+#define SH_OWNER_LIST 262144u
+#define SH_OWNER_THREADS 65536u
+
+static inline unsigned int
+shUserId(unsigned int base, unsigned int owner)
+{
+	return (base & SH_ALPHA_NONE) | owner << 24;
+}
+
+static inline unsigned int
+shOwnerOf(unsigned int user)
+{
+	return user >> 24;
+}
+
+static inline unsigned int
+shAlphaBaseOf(unsigned int user)
+{
+	return user & SH_ALPHA_NONE;
+}
+
+static inline unsigned int
+shAlphaAddressBits(unsigned int u, unsigned int v, unsigned int count)
+{
+	return u | v << 2 | count << 4;
+}
+
+static inline unsigned int
+shAlphaAddressU(unsigned int a)
+{
+	return a & 3u;
+}
+
+static inline unsigned int
+shAlphaAddressV(unsigned int a)
+{
+	return (a >> 2) & 3u;
+}
+
+static inline unsigned int
+shAlphaCountOf(unsigned int a)
+{
+	return a >> 4;
+}
+
+// Alpha geometries come first in a level, so the count tells them from the opaque ones.
+static inline bool
+shAlphaCandidate(unsigned int base, unsigned int geometry, unsigned int entries, unsigned int count)
+{
+	return shAlphaIndexValid(base, geometry, entries) && geometry < count;
+}
+
+static inline unsigned int
+shListEntry(unsigned int x, unsigned int y)
+{
+	return x | y << 16;
+}
+
+static inline unsigned int
+shListX(unsigned int e)
+{
+	return e & 0xFFFFu;
+}
+
+static inline unsigned int
+shListY(unsigned int e)
+{
+	return e >> 16;
+}
+
+static inline bool
+shOwnerListed(bool cull, unsigned int hitOwner, bool ruleOn)
+{
+	return ruleOn && cull && hitOwner != 0u;
+}
+
+static inline bool
+shOwnerSkips(unsigned int own, unsigned int candidate)
+{
+	return own != 0u && candidate == own;
+}
+
 #ifndef __METAL_VERSION__
 inline uint32_t
 shCapByDistance(const float *dist2, uint32_t n, uint32_t cap, uint32_t *order)
