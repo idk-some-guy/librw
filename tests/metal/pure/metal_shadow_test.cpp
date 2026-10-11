@@ -382,6 +382,12 @@ TestOwnerList(void)
 		CHECK(shListX(e) == xy[i][0] && shListY(e) == xy[i][1]);
 	}
 	CHECK(shListEntry(1u, 0u) != shListEntry(0u, 1u));
+	CHECK(shOwnerListCapacity(3840u, 2160u) >= 2760441u);
+	CHECK(shOwnerListCapacity(1920u, 1080u) >= 2760441u/4u);
+	CHECK(shOwnerListCapacity(0u, 0u) == 0u && shOwnerListCapacity(1u, 1u) == 1u && shOwnerListCapacity(3u, 3u) == 5u);
+	const unsigned int sizes[4][2] = { { 640u, 480u }, { 1u, 7u }, { 1920u, 1080u }, { 65535u, 65535u } };
+	for(int i = 0; i < 4; i++)
+		CHECK((unsigned long long)shOwnerListCapacity(sizes[i][0], sizes[i][1])*2ull >= (unsigned long long)sizes[i][0]*sizes[i][1]);
 }
 
 static void

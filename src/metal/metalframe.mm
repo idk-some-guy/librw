@@ -184,6 +184,8 @@ struct FrameState
 static FrameState frame;
 
 static bool realShadowSource(void);
+static void dropLayerTargets(void);
+static uint64 layerTargetBytes(void);
 
 static TierCaps
 deviceCaps(void)
@@ -261,6 +263,7 @@ applySettings(const RenderSettings *s)
 	if(realBefore && !realShadowSource()){
 		rtDropShadowTargets();
 		rtReleaseLevels();
+		dropLayerTargets();
 	}
 }
 
@@ -366,14 +369,15 @@ frameStatsTail(void)
 		snprintf(build, sizeof(build), "%.2fms", r.buildMs);
 	snprintf(frame.tail, sizeof(frame.tail), " tier %s internal %dx%d output %dx%d upscaler %s edr %s "
 		"headroom %.2f/%.2f peak %.2f bloom %.3f aa %s prepass %u equal %u unkeyed %u cutout %u"
-		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u large %u",
+		" shadows %s rays %u blas %u %.1fMB normals %.1fMB tlas %u %s build %u %s refit %u walk %.2fms shadow %s shadowmem %.0fMB alpha %u tex %u large %u owned %u listed %u overflow %u layer %.1fMB",
 		tierName(f.tier), f.internalWidth, f.internalHeight, f.outputWidth, f.outputHeight,
 		upscalerName(f.upscaler), f.edr ? "on" : "off",
 		f.headroom, f.potentialHeadroom, f.peak, f.bloom, antiAliasName(f.antiAliasing), frame.prepassDrawsLast,
 		prepassEqualLastFrame(), getStateStats().prepassUnkeyed, prepassCutoutLastFrame(),
 		realShadowSource() ? shadowQualityName(frame.settings.shadowQuality) : "off", r.raysPerFrame, r.bottomLevels,
 		r.bottomMegabytes, getInstanceStats().normalBytes/1048576.0, r.instances, top, r.frameBuilds, build, r.frameRefits, r.walkMs, pass,
-		r.shadowMegabytes, r.alphaInstances, r.alphaTextures, r.castersLarge);
+		r.shadowMegabytes, r.alphaInstances, r.alphaTextures, r.castersLarge, r.ownedInstances, r.ownerListed, r.ownerOverflow,
+		layerTargetBytes()/1048576.0);
 	return frame.tail;
 }
 
@@ -1945,6 +1949,18 @@ readScenePixel(int32 x, int32 y, float32 rgba[4])
 }
 
 static void
+dropLayerTargets(void)
+{
+	frame.layerDepth = frame.layerNormal = frame.layerMotion = nil;
+}
+
+static uint64
+layerTargetBytes(void)
+{
+	return frame.layerDepth.allocatedSize + frame.layerNormal.allocatedSize + frame.layerMotion.allocatedSize;
+}
+
+static void
 dropPrepassTargets(void)
 {
 	if(frame.prepassRaster){
@@ -1953,7 +1969,7 @@ dropPrepassTargets(void)
 	}
 	frame.prepassNormal = frame.prepassMotion = nil;
 	frame.prepassNormalMS = frame.prepassMotionMS = nil;
-	frame.layerDepth = frame.layerNormal = frame.layerMotion = nil;
+	dropLayerTargets();
 }
 
 static bool
@@ -1968,7 +1984,7 @@ ensureLayerTargets(void)
 	frame.layerMotion = newTexture(MTLPixelFormatRG16Float, (int32)w, (int32)h, u, 1);
 	if(frame.layerDepth && frame.layerNormal && frame.layerMotion)
 		return true;
-	frame.layerDepth = frame.layerNormal = frame.layerMotion = nil;
+	dropLayerTargets();
 	return false;
 }
 

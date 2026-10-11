@@ -2867,6 +2867,71 @@ CheckShadowWallFacingAwayTwoSided(void)
 		true);
 }
 
+enum { PLAIN_ROW0 = 70, PLAIN_ROWN = 54 };
+
+static bool
+PlainWallRow(float offset, float row[PLAIN_ROWN][4], uint32 *plainDraws)
+{
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	TurnSun(&s, -179.9f);
+	SetShadowStrength(0.6f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	Geometry *geo = SideWall(s.mat, 1.2f, -3.0f, 3.0f, -1.0f, -12.0f);
+	Atomic *wall = MakeAtomic(geo);
+	V3d t = { offset, offset, offset };
+	for(Atomic *a : { wall, s.floor, s.roof }){
+		a->getFrame()->translate(&t, COMBINEPOSTCONCAT);
+		a->getFrame()->updateObjects();
+	}
+	rtCamera->getFrame()->translate(&t, COMBINEPOSTCONCAT);
+	rtCamera->getFrame()->updateObjects();
+	bool read = true;
+	metal::StateStats a0 = metal::getStateStats();
+	for(int k = 0; k <= 16; k++)
+		CasterFrame([&](bool prepass){
+			SetRenderState(CULLMODE, CULLBACK);
+			wall->render();
+			if(!prepass && k == 16)
+				for(int i = 0; i < PLAIN_ROWN; i++)
+					read = metal::readScenePixel(PLAIN_ROW0 + 4*i, 240, row[i]) && read;
+		});
+	metal::rtWaitForTest();
+	*plainDraws = metal::getStateStats().plainShadowDraws - a0.plainShadowDraws;
+	SetRenderState(CULLMODE, CULLNONE);
+	DestroyAtomic(wall);
+	geo->destroy();
+	FreeShadowScene(&s);
+	return read;
+}
+
+static bool
+CheckPlainTwinFacetNearCamera(void)
+{
+	const char *name = "a prelit wall facing away from a grazing sun, a metre from the camera at coordinates of 100000, keeps the plain twin's facing rule along its length as it does at the origin";
+	static float row[2][PLAIN_ROWN][4];
+	uint32 draws[2];
+	bool read = PlainWallRow(0.0f, row[0], &draws[0]);
+	read = PlainWallRow(100000.0f, row[1], &draws[1]) && read;
+	int differ = 0, first = -1;
+	float worst = 0.0f, brightest = 0.0f;
+	for(int i = 0; i < PLAIN_ROWN; i++)
+		for(int c = 0; c < 3; c++){
+			float d = fabsf(row[0][i][c] - row[1][i][c]);
+			worst = fmaxf(worst, d);
+			brightest = fmaxf(brightest, row[0][i][c]);
+			if(d > 1.0f/255.0f){
+				differ++;
+				if(first < 0)
+					first = PLAIN_ROW0 + 4*i;
+			}
+		}
+	bool ok = read && differ == 0 && brightest < 0.3f && draws[0] >= 1 && draws[1] >= 1;
+	Detail("  read %d; %d of %d samples move by more than 1/255 between the origin and coordinates of 100000, largest %.4f, first at column %d; brightest sample at the origin %.4f; plain shadow draws %u %u\n",
+		read, differ, 3*PLAIN_ROWN, worst, first, brightest, draws[0], draws[1]);
+	return Report(ok, name);
+}
+
 static Geometry*
 FacedQuads(Material *mat, const V3d (*c)[4], const V3d *out, int faces)
 {
@@ -3037,6 +3102,89 @@ CheckShadowContactOwned(void)
 {
 	return ContactShadow("at medium the ground along the shaded side of a closed body with an inner shell under one owner keeps its shadow in every ray phase and from the frame the body appears, as with the owner rule off",
 		true, true);
+}
+
+static bool
+CheckShadowCreaseGround(void)
+{
+	const char *name = "at medium a lit ground pixel beside a wall whose factor reads 0 takes its new value at once, and a shadowed one beside a lit wall does too";
+	ShadowScene s;
+	MakeShadowScene(&s, 1.0f);
+	SetSunRadius(0.0f);
+	TurnSun(&s, -135.0f);
+	const V3d walls[2][4] = {
+		{ { 4.0f, -3.0f, -19.0f }, { 4.0f, 3.0f, -19.0f }, { 4.0f, 3.0f, -12.0f }, { 4.0f, -3.0f, -12.0f } },
+		{ { -4.0f, -3.0f, -19.0f }, { -4.0f, 3.0f, -19.0f }, { -4.0f, 3.0f, -12.0f }, { -4.0f, -3.0f, -12.0f } } };
+	const V3d cardA[1][4] = { { { 4.3f, -3.0f, -19.5f }, { 6.5f, -3.0f, -19.5f }, { 6.5f, 3.0f, -19.5f }, { 4.3f, 3.0f, -19.5f } } };
+	const V3d cardB[1][4] = { { { -3.7f, -3.0f, -19.5f }, { -3.1f, -3.0f, -19.5f }, { -3.1f, 3.0f, -19.5f }, { -3.7f, 3.0f, -19.5f } } };
+	const V3d wallOut[2] = { { -1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f } }, cardOut[1] = { { 0.0f, 0.0f, 1.0f } };
+	Geometry *wg = FacedQuads(s.mat, walls, wallOut, 2), *ag = FacedQuads(s.mat, cardA, cardOut, 1), *bg = FacedQuads(s.mat, cardB, cardOut, 1);
+	Atomic *wall = MakeAtomic(wg), *a = MakeAtomic(ag), *b = MakeAtomic(bg);
+	SetShadowQuality(metal::SHADOWQUALITY_MEDIUM);
+	bool read = true;
+	auto frames = [&](int n, bool withA, bool withB){
+		for(int k = 0; k < n; k++)
+			CasterFrame([&](bool){
+				SetRenderState(CULLMODE, CULLBACK);
+				s.floor->render();
+				wall->render();
+				if(withA)
+					a->render();
+				if(withB)
+					b->render();
+			});
+		metal::rtWaitForTest();
+	};
+	frames(2, true, false);
+	float nrm[3], mo[2], d = 1.0f;
+	int darkCol = -1, litCol = -1;
+	for(int c = 241; c < 270 && darkCol < 0; c++){
+		read = metal::readPrepassForTest(c, 240, nrm, mo, &d) && read;
+		if(fabsf(nrm[2]) > 0.7f)
+			darkCol = c;
+	}
+	for(int c = 395; c > 370 && litCol < 0; c--){
+		read = metal::readPrepassForTest(c, 240, nrm, mo, &d) && read;
+		if(fabsf(nrm[2]) > 0.7f)
+			litCol = c;
+	}
+	enum { N = 4 };
+	float wallRaw[2] = { -1.0f, -1.0f }, v[2][2][N];
+	auto sample = [&](int phase){
+		float len = 0.0f;
+		for(int k = 0; k < N; k++){
+			v[phase][0][k] = v[phase][1][k] = -1.0f;
+			read = metal::readShadowForTest(darkCol + k, 240, &v[phase][0][k], &len) && read;
+			read = metal::readShadowForTest(litCol - k, 240, &v[phase][1][k], &len) && read;
+		}
+	};
+	metal::cameraCut();
+	frames(24, true, false);
+	sample(0);
+	float len = 0.0f;
+	read = metal::readShadowForTest(darkCol - 1, 240, &wallRaw[0], &len) && metal::readShadowForTest(litCol + 1, 240, &wallRaw[1], &len) && read;
+	frames(1, false, true);
+	sample(1);
+	SetRenderState(CULLMODE, CULLNONE);
+	DestroyAtomic(wall);
+	DestroyAtomic(a);
+	DestroyAtomic(b);
+	wg->destroy();
+	ag->destroy();
+	bg->destroy();
+	FreeShadowScene(&s);
+	bool ok = read && darkCol > 0 && litCol > 0 && wallRaw[0] == 0.0f && wallRaw[1] == 1.0f;
+	for(int k = 0; k < 2; k++){
+		ok = ok && v[0][0][k] <= 0.05f && v[0][1][k] >= 0.95f;
+		ok = ok && v[1][0][k] >= 0.95f && v[1][1][k] <= 0.05f;
+	}
+	Detail("  read %d; ground beside the dark wall from column %d, beside the lit wall from column %d going down; wall factors %.3f and %.3f\n", read,
+		darkCol, litCol, wallRaw[0], wallRaw[1]);
+	for(int p = 0; p < 2; p++)
+		Detail("  %s: beside the dark wall %.4f %.4f %.4f %.4f, beside the lit wall %.4f %.4f %.4f %.4f\n",
+			p == 0 ? "card over the dark side" : "first frame after the cards swap", v[p][0][0], v[p][0][1],
+			v[p][0][2], v[p][0][3], v[p][1][0], v[p][1][1], v[p][1][2], v[p][1][3]);
+	return Report(ok, name);
 }
 
 static bool
@@ -3252,7 +3400,7 @@ CheckShadowStats(void)
 	SHQuality q = shQuality(metal::SHADOWQUALITY_HIGH);
 	uint32 rw = q.halfRes ? (fi.internalWidth + 1)/2 : fi.internalWidth, rh = q.halfRes ? (fi.internalHeight + 1)/2 : fi.internalHeight;
 	uint32 want = rw*rh*q.raysPerPixel;
-	float wantMem = (float)(((double)rw*rh*2 + 2.0*fi.internalWidth*fi.internalHeight*8)/1048576.0);
+	float wantMem = (float)(((double)rw*rh*2 + 2.0*fi.internalWidth*fi.internalHeight*8 + 16.0 + 8.0*shOwnerListCapacity(rw, rh))/1048576.0);
 	const char *t = strstr(line, " shadows ");
 	char qn[16] = "", pass[16] = "", topTime[16] = "", buildTime[16] = "";
 	unsigned rays = 0, blas = 0, tlas = 0, builds = 0, refits = 0, alphaN = ~0u, texN = ~0u, large = ~0u;
@@ -4252,6 +4400,52 @@ CheckCutoutLayer(void)
 	Report(okD, names[3]);
 }
 
+static float
+LayerMegabytes(void)
+{
+	metal::logStats();
+	const char *t = strstr(metal::getStatsLine(), " layer ");
+	float mb = -1.0f;
+	return t && sscanf(t, " layer %fMB", &mb) == 1 ? mb : -1.0f;
+}
+
+static bool
+CheckCutoutLayerReleased(void)
+{
+	const char *name = "the cutout layer's targets are released when ShadowQuality turns off or the modern tier is left, and built again by the next cutout frame";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	Geometry *gc;
+	Atomic *cut = CutoutQuad(&gc, 0);
+	float mb[5];
+	CutoutFrames(&s, cut, CUTOUT_BOTH, 3, [](){});
+	mb[0] = LayerMegabytes();
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	CutoutFrames(&s, cut, CUTOUT_BOTH, 3, [](){});
+	mb[1] = LayerMegabytes();
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	CutoutFrames(&s, cut, CUTOUT_BOTH, 3, [](){});
+	mb[2] = LayerMegabytes();
+	metal::RenderSettings r = metal::getRenderSettings();
+	r.tier = metal::TIER_ENHANCED;
+	metal::setRenderSettings(&r);
+	CutoutFrames(&s, cut, CUTOUT_BOTH, 3, [](){});
+	mb[3] = LayerMegabytes();
+	r.tier = metal::TIER_MODERN;
+	metal::setRenderSettings(&r);
+	CutoutFrames(&s, cut, CUTOUT_BOTH, 3, [](){});
+	mb[4] = LayerMegabytes();
+	DestroyAtomic(cut);
+	gc->destroy();
+	FreeShadowScene(&s);
+	bool built = mb[0] > 1.0f && mb[2] == mb[0] && mb[4] == mb[0];
+	bool ok = built && mb[1] == 0.0f && mb[3] == 0.0f;
+	Detail("  layer megabytes: shadows on %.2f, off %.2f, on again %.2f, enhanced tier %.2f, modern tier again %.2f\n",
+		mb[0], mb[1], mb[2], mb[3], mb[4]);
+	return Report(ok, name);
+}
+
 static bool
 CheckSkinnedCutoutLayer(void)
 {
@@ -4269,6 +4463,35 @@ CheckSkinnedCutoutLayer(void)
 	bool ok = read && step <= 2.0f/255.0f && ca.cutouts == 24 && oa.cutouts == 0;
 	Detail("  read %d; skinned cutout %.4f %.4f %.4f, skinned opaque quad %.4f %.4f %.4f, shadowed floor %.4f %.4f %.4f, step %.4f, cutout draws %u %u\n",
 		read, ca.px[0], ca.px[1], ca.px[2], oa.px[0], oa.px[1], oa.px[2], fs.px[0], fs.px[1], fs.px[2], step, ca.cutouts, oa.cutouts);
+	return Report(ok, name);
+}
+
+static bool
+CheckSkinnedCutoutSolid(void)
+{
+	const char *name = "a skinned cutout in a roof's shadow over a lit floor takes the shadow on its solid texels and shows the floor through its clear ones";
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	const uint8 right[4] = { 0, 0, 255, 255 }, solid[4] = { 255, 255, 255, 255 };
+	int xSolid = SX(-3.5f, 19.0f), xClear = SX(-4.7f, 19.0f);
+	LayerRun floorClear = LayerPixel(&s, nil, false, xClear, 240);
+	LayerRun cut = LayerQuadPixel(&s, -5.0f, -3.0f, right, true, false, xSolid), cutClear = LayerQuadPixel(&s, -5.0f, -3.0f, right, true, false, xClear);
+	LayerRun opaque = LayerQuadPixel(&s, -5.0f, -3.0f, solid, true, false, xSolid);
+	SetShadowQuality(metal::SHADOWQUALITY_OFF);
+	LayerRun unshaded = LayerQuadPixel(&s, -5.0f, -3.0f, right, true, false, xSolid);
+	FreeShadowScene(&s);
+	bool read = floorClear.read && cut.read && cutClear.read && opaque.read && unshaded.read;
+	float solidStep = 0.0f, clearStep = 0.0f;
+	for(int c = 0; c < 3; c++){
+		solidStep = fmaxf(solidStep, fabsf(cut.px[c] - opaque.px[c]));
+		clearStep = fmaxf(clearStep, fabsf(cutClear.px[c] - floorClear.px[c]));
+	}
+	float shade = unshaded.px[0] - cut.px[0];
+	bool ok = read && solidStep <= 2.0f/255.0f && clearStep <= 2.0f/255.0f && shade > 0.05f && cut.cutouts == 24 && cutClear.cutouts == 24;
+	Detail("  read %d; solid texel %.4f %.4f %.4f, the same quad opaque %.4f %.4f %.4f, without shadows %.4f %.4f %.4f; clear texel %.4f %.4f %.4f, floor alone %.4f %.4f %.4f; cutout draws %u %u\n",
+		read, cut.px[0], cut.px[1], cut.px[2], opaque.px[0], opaque.px[1], opaque.px[2], unshaded.px[0], unshaded.px[1], unshaded.px[2],
+		cutClear.px[0], cutClear.px[1], cutClear.px[2], floorClear.px[0], floorClear.px[1], floorClear.px[2], cut.cutouts, cutClear.cutouts);
 	return Report(ok, name);
 }
 
@@ -4405,7 +4628,7 @@ static void
 FreeOwnerScene(OwnerScene *o)
 {
 	metal::setShadowOwnerRuleForTest(true);
-	metal::setShadowOwnerListCapForTest(SH_OWNER_LIST);
+	metal::setShadowOwnerListCapForTest(~0u);
 	SetRenderState(CULLMODE, CULLNONE);
 	DestroyAtomic(o->body);
 	DestroyAtomic(o->seat);
@@ -4604,8 +4827,8 @@ CheckOwnerRider(bool skinned)
 	Atomic *a = skinned ? SkinAtomic(g) : MakeAtomic(g);
 	if(skinned)
 		PoseSkin(a, 1);
-	bool ok = OwnerFactors(skinned ? "a skinned occupant added after the owner scope closes still shadows the body it sits in" :
-		"an occupant drawn after the owner scope closes still shadows the body it sits in", 1,
+	bool ok = OwnerFactors(skinned ? "a skinned caster added after the owner scope closes still shadows the body around it" :
+		"a caster drawn after the owner scope closes still shadows the body around it", 1,
 		[](float px, float pz, V3d L){ return OwnerRayCrosses(px, pz, L, ownerRiderLo, ownerRiderHi, 0.03f); },
 		[&](bool prepass, int){
 			if(skinned){
@@ -4736,7 +4959,7 @@ CheckOwnerListFull(void)
 	bool read = n > 40;
 	for(int pass = 0; pass < 3; pass++){
 		metal::setShadowOwnerRuleForTest(pass != 0);
-		metal::setShadowOwnerListCapForTest(pass == 1 ? 0u : SH_OWNER_LIST);
+		metal::setShadowOwnerListCapForTest(pass == 1 ? 0u : ~0u);
 		read = OwnerScanline(&o, 1, row[pass], c0, n) && read;
 	}
 	FreeOwnerScene(&o);
@@ -4748,6 +4971,47 @@ CheckOwnerListFull(void)
 	bool ok = read && full == 0 && listed > 5;
 	Detail("  read %d over columns %d to %d; with the list full %d pixels not bit-equal to the rule off; with room %d pixels change\n", read, c0,
 		c0 + n - 1, full, listed);
+	return Report(ok, name);
+}
+
+static int
+OwnerListLine(unsigned *owned, unsigned *listed, unsigned *overflow)
+{
+	metal::logStats();
+	const char *t = strstr(metal::getStatsLine(), " owned ");
+	*owned = *listed = *overflow = ~0u;
+	return t ? sscanf(t, " owned %u listed %u overflow %u", owned, listed, overflow) : 0;
+}
+
+static bool
+CheckOwnerListOverflow(void)
+{
+	const char *name = "a body that fills the screen lists a third of its pixels without overflowing the owner list, and the stats line reports the list's fill and its overflow";
+	OwnerScene o;
+	MakeOwnerScene(&o);
+	V3d forward = { 0.0f, 0.0f, -9.5f };
+	rtCamera->getFrame()->translate(&forward, COMBINEPOSTCONCAT);
+	rtCamera->getFrame()->updateObjects();
+	OwnerFrames(&o, 1, 17, [](bool, int){});
+	metal::RayStats full = metal::getRayStats();
+	metal::FrameInfo fi = metal::getFrameInfo();
+	unsigned owned[2], listed[2], overflow[2];
+	int parsed[2];
+	parsed[0] = OwnerListLine(&owned[0], &listed[0], &overflow[0]);
+	uint32 tenth = full.ownerListed/10;
+	metal::setShadowOwnerListCapForTest(tenth);
+	OwnerFrames(&o, 1, 17, [](bool, int){});
+	metal::RayStats cut = metal::getRayStats();
+	parsed[1] = OwnerListLine(&owned[1], &listed[1], &overflow[1]);
+	FreeOwnerScene(&o);
+	uint32 texels = (uint32)(fi.internalWidth*fi.internalHeight);
+	bool ok = parsed[0] == 3 && parsed[1] == 3 && owned[0] == full.ownedInstances && listed[0] == full.ownerListed &&
+		overflow[0] == full.ownerOverflow && listed[1] == cut.ownerListed && overflow[1] == cut.ownerOverflow &&
+		full.ownerListed*4 > texels && full.ownerOverflow == 0 && cut.ownerListed == full.ownerListed &&
+		cut.ownerOverflow == full.ownerListed - tenth;
+	Detail("  stats line parsed %d and %d: owned %u listed %u overflow %u, then owned %u listed %u overflow %u; of %u texels the list took %u with overflow %u; with the list cut to a tenth (%u) it took %u with overflow %u\n",
+		parsed[0], parsed[1], owned[0], listed[0], overflow[0], owned[1], listed[1], overflow[1], texels, full.ownerListed, full.ownerOverflow, tenth,
+		cut.ownerListed, cut.ownerOverflow);
 	return Report(ok, name);
 }
 
@@ -5047,9 +5311,11 @@ RunRaytraceChecks(Camera *camera)
 	CheckShadowWallFacingAway();
 	CheckShadowWallFacingAwayRelit();
 	CheckShadowWallFacingAwayTwoSided();
+	CheckPlainTwinFacetNearCamera();
 	CheckShadowContactWall();
 	CheckShadowContactBody();
 	CheckShadowContactOwned();
+	CheckShadowCreaseGround();
 	CheckOwnerTerminator();
 	CheckOwnerSeatOther();
 	CheckOwnerOtherBody();
@@ -5059,6 +5325,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckOwnerCutout();
 	CheckOwnerCutoutRetrace();
 	CheckOwnerListFull();
+	CheckOwnerListOverflow();
 	CheckShadowClassDark();
 	CheckShadowSkippedWall();
 	CheckPlainTwinFailure();
@@ -5084,7 +5351,9 @@ RunRaytraceChecks(Camera *camera)
 	CheckCutoutReceives();
 	CutoutIdentity("a cutout draw with shadows off draws the enhanced frame's colour, and one the prepass did not draw keeps its own depth test, at one sample");
 	CheckCutoutLayer();
+	CheckCutoutLayerReleased();
 	CheckSkinnedCutoutLayer();
+	CheckSkinnedCutoutSolid();
 	PrintShadowTerminator();
 	PrintBuildTiming();
 	PrintCasterTiming();

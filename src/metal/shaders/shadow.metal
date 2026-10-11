@@ -285,11 +285,14 @@ shadowOwnerFix(instance_acceleration_structure tlas [[buffer(0)]],
                device const uint *listed [[buffer(3)]],
                device const uint2 *list [[buffer(4)]],
                device const ShadowAlphaEntry *alpha [[buffer(5)]],
+               device uint *taken [[buffer(6)]],
                depth2d<float, access::read> depth [[texture(0)]],
                texture2d<float, access::write> raw [[texture(1)]],
                texture2d<float, access::read> normals [[texture(2)]],
                uint tid [[thread_position_in_grid]])
 {
+	if(tid == 0u)
+		taken[0] = listed[0];
 	uint n = min(listed[0], p.listCap);
 	SHVec3 sun = { p.sun.x, p.sun.y, p.sun.z };
 	for(uint i = tid; i < n; i += SH_OWNER_THREADS){

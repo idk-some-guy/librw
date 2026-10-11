@@ -382,6 +382,7 @@ struct RayStats
 	float32 topMs, buildMs;
 	uint32 castersLarge;
 	uint32 ownedInstances;
+	uint32 ownerListed, ownerOverflow;
 };
 RayStats getRayStats(void);
 

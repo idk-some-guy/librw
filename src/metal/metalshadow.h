@@ -317,8 +317,13 @@ shAlphaIndexValid(unsigned int base, unsigned int geometry, unsigned int count)
 }
 
 #define SH_ALPHA_NONE 0xFFFFFFu
-#define SH_OWNER_LIST 262144u
 #define SH_OWNER_THREADS 65536u
+
+static inline unsigned int
+shOwnerListCapacity(unsigned int rawWidth, unsigned int rawHeight)
+{
+	return (rawWidth*rawHeight + 1u)/2u;
+}
 
 static inline unsigned int
 shUserId(unsigned int base, unsigned int owner)

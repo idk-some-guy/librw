@@ -466,10 +466,17 @@ const char *header_metal_src =
 "	return float4(relitShadowed(color.r, sun.r, s), relitShadowed(color.g, sun.g, s), relitShadowed(color.b, sun.b, s), color.a);\n"
 "}\n"
 
+"static float3\n"
+"RelitPlainPos(float3 world, float4x4 view)\n"
+"{\n"
+"	float3 eye = -float3(dot(view[0].xyz, view[3].xyz), dot(view[1].xyz, view[3].xyz), dot(view[2].xyz, view[3].xyz));\n"
+"	return world - eye;\n"
+"}\n"
+
 "static float4\n"
 "RelitPlainShadow(float4 color, float4 position, float3 pos, texture2d<float> shadowTex, constant Relit &r)\n"
 "{\n"
-"	float3 toEye = r.eye.xyz - pos, g = cross(dfdx(pos), dfdy(pos));\n"
+"	float3 toEye = -pos, g = cross(dfdx(pos), dfdy(pos));\n"
 "	float3 n = RelitSurfaceNormal(g, 0.0, g, toEye, normalize(toEye));\n"
 "	float s = relitFacedShadow(RelitShadowFactor(position, shadowTex), dot(n, -r.sunDir.xyz), r.shadow.y), k = r.shadow.x;\n"
 "	return float4(relitPlainShadowed(color.r, s, k), relitPlainShadowed(color.g, s, k), relitPlainShadowed(color.b, s, k), color.a);\n"

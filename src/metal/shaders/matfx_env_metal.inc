@@ -80,7 +80,7 @@ const char *matfx_env_metal_src =
 "		if(relit)\n"
 "			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);\n"
 "		if(relitPlain)\n"
-"			out.plainPos = V.xyz;\n"
+"			out.plainPos = RelitPlainPos(V.xyz, scene.view);\n"
 "	}\n"
 "	out.fog = DoFog(out.position.w, state);\n"
 "	out.pointSize = 1.0;\n"

@@ -318,8 +318,13 @@ const char *shadowh_metal_src =
 "}\n"
 
 "#define SH_ALPHA_NONE 0xFFFFFFu\n"
-"#define SH_OWNER_LIST 262144u\n"
 "#define SH_OWNER_THREADS 65536u\n"
+
+"static inline unsigned int\n"
+"shOwnerListCapacity(unsigned int rawWidth, unsigned int rawHeight)\n"
+"{\n"
+"	return (rawWidth*rawHeight + 1u)/2u;\n"
+"}\n"
 
 "static inline unsigned int\n"
 "shUserId(unsigned int base, unsigned int owner)\n"

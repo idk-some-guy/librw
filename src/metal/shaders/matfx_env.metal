@@ -79,7 +79,7 @@ matfxEnvVS(EnvIn in [[stage_in]],
 		if(relit)
 			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
 		if(relitPlain)
-			out.plainPos = V.xyz;
+			out.plainPos = RelitPlainPos(V.xyz, scene.view);
 	}
 	out.fog = DoFog(out.position.w, state);
 	out.pointSize = 1.0;

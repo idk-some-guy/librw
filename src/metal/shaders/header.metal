@@ -255,10 +255,17 @@ RelitShadowSun(float4 color, float4 sun, float4 position, texture2d<float> shado
 	return float4(relitShadowed(color.r, sun.r, s), relitShadowed(color.g, sun.g, s), relitShadowed(color.b, sun.b, s), color.a);
 }
 
+static float3
+RelitPlainPos(float3 world, float4x4 view)
+{
+	float3 eye = -float3(dot(view[0].xyz, view[3].xyz), dot(view[1].xyz, view[3].xyz), dot(view[2].xyz, view[3].xyz));
+	return world - eye;
+}
+
 static float4
 RelitPlainShadow(float4 color, float4 position, float3 pos, texture2d<float> shadowTex, constant Relit &r)
 {
-	float3 toEye = r.eye.xyz - pos, g = cross(dfdx(pos), dfdy(pos));
+	float3 toEye = -pos, g = cross(dfdx(pos), dfdy(pos));
 	float3 n = RelitSurfaceNormal(g, 0.0, g, toEye, normalize(toEye));
 	float s = relitFacedShadow(RelitShadowFactor(position, shadowTex), dot(n, -r.sunDir.xyz), r.shadow.y), k = r.shadow.x;
 	return float4(relitPlainShadowed(color.r, s, k), relitPlainShadowed(color.g, s, k), relitPlainShadowed(color.b, s, k), color.a);
