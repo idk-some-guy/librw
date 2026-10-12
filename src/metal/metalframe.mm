@@ -229,6 +229,8 @@ clampSettings(const RenderSettings *s)
 		n.antiAliasing = ANTIALIAS_OFF;
 	if(n.shadowQuality < SHADOWQUALITY_OFF || n.shadowQuality >= NUMSHADOWQUALITIES)
 		n.shadowQuality = SHADOWQUALITY_MEDIUM;
+	n.lights = n.lights < 0 ? 0 : n.lights > 2 ? 2 : n.lights;
+	n.shadowedLights = n.shadowedLights < -1 ? -1 : n.shadowedLights > 8 ? 8 : n.shadowedLights;
 	return n;
 }
 

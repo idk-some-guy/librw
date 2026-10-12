@@ -338,6 +338,8 @@ struct RenderSettings
 	float32 softness;
 	int32 antiAliasing;
 	int32 shadowQuality;
+	int32 lights;
+	int32 shadowedLights;
 };
 
 struct FrameInfo
