@@ -208,6 +208,7 @@ bool32 antiAliasTextureForTest(void);
 bool32 readFrameOutput(int32 x, int32 y, float32 rgba[4]);
 bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
 bool32 readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
+bool32 readLayerForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
 bool32 readShadowForTest(int32 x, int32 y, float32 *value, float32 *length);
 void forcePrepassEqualForTest(void);
 bool32 readReactiveForTest(int32 x, int32 y, float32 *v);

@@ -334,6 +334,8 @@ static StateStats stats;
 Shader *prepassShader, *prepassSkinShader, *prepassFaceShader;
 static Shader *prepassLayerShader, *prepassLayerSkinShader, *prepassLayerFaceShader;
 static id<MTLDepthStencilState> prepassLayerDepth;
+static id<MTLRenderPipelineState> layerCopyPipe;
+static id<MTLDepthStencilState> layerCopyDepth;
 static const void *currentDrawInst;
 static const void *currentObject;
 enum { PREPASS_KEYS = 8192 };
@@ -455,7 +457,7 @@ beginPrepassState(bool continuous)
 	prepassFrameBound = false;
 	layerDraws.clear();
 	layerWanted = frameShadowPassPlanned() && prepassLayerShader && prepassLayerSkinShader && prepassLayerFaceShader &&
-		prepassLayerDepth;
+		prepassLayerDepth && layerCopyPipe && layerCopyDepth;
 	prepassDrawsThisFrame = 0;
 	prepassEqualThisFrame = 0;
 	prepassCutoutThisFrame = 0;
@@ -2456,26 +2458,42 @@ cutoutLayerDraws(void)
 }
 
 uint32
-encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion)
+encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> srcDepth, id<MTLTexture> srcNormal, id<MTLTexture> srcMotion,
+                  id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion)
 {
 	MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
 	id<MTLTexture> color[2] = { normal, motion };
 	for(int i = 0; i < 2; i++){
 		d.colorAttachments[i].texture = color[i];
-		d.colorAttachments[i].loadAction = MTLLoadActionLoad;
+		d.colorAttachments[i].loadAction = MTLLoadActionDontCare;
 		d.colorAttachments[i].storeAction = MTLStoreActionStore;
 	}
 	d.depthAttachment.texture = depth;
-	d.depthAttachment.loadAction = MTLLoadActionLoad;
+	d.depthAttachment.loadAction = MTLLoadActionDontCare;
 	d.depthAttachment.storeAction = MTLStoreActionStore;
 	d.stencilAttachment.texture = depth;
 	d.stencilAttachment.loadAction = MTLLoadActionDontCare;
 	d.stencilAttachment.storeAction = MTLStoreActionDontCare;
 	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+	[e setRenderPipelineState:layerCopyPipe];
+	[e setDepthStencilState:layerCopyDepth];
+	[e setCullMode:MTLCullModeNone];
+	[e setFragmentTexture:srcDepth atIndex:0];
+	[e setFragmentTexture:srcNormal atIndex:1];
+	[e setFragmentTexture:srcMotion atIndex:2];
+	[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[e setFrontFacingWinding:MTLWindingCounterClockwise];
 	[e setDepthStencilState:prepassLayerDepth];
 	[e setVertexBytes:&defaultAttribs length:sizeof(defaultAttribs) atIndex:BUFFER_DEFAULTATTRIBS];
 	uint32 drawn = 0;
+	uint64 lastKey = 0;
+	PipelineEntry *lastEntry = nil, *boundPipe = nil;
+	int32 lastCull = -1;
+	id<MTLBuffer> lastVB[NUMBLOCKS] = {}, lastFB[NUMBLOCKS] = {};
+	uint32 lastVO[NUMBLOCKS] = {}, lastFO[NUMBLOCKS] = {};
+	id<MTLTexture> lastTexture = nil;
+	id<MTLSamplerState> lastSampler = nil;
+	id<MTLBuffer> lastVertices = nil;
 	for(const LayerDraw &r : layerDraws){
 		PipelineDesc pd = {};
 		pd.shader = r.shader->shaderId;
@@ -2485,20 +2503,45 @@ encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> 
 		pd.colorFormat = COLORFMT_PREPASS;
 		pd.depthFormat = DEPTHFMT_D32S8;
 		pd.sampleCount = 1;
-		PipelineEntry *pipe = getPipeline(r.shader, pd, pipelineKey(pd));
+		uint64 key = pipelineKey(pd);
+		PipelineEntry *pipe = key == lastKey && lastEntry ? lastEntry : getPipeline(r.shader, pd, key);
+		lastKey = key;
+		lastEntry = pipe;
 		if(pipe == nil)
 			continue;
-		[e setRenderPipelineState:pipe->state];
-		[e setCullMode:(MTLCullMode)r.cull];
+		if(pipe != boundPipe){
+			[e setRenderPipelineState:pipe->state];
+			boundPipe = pipe;
+		}
+		if(r.cull != lastCull){
+			[e setCullMode:(MTLCullMode)r.cull];
+			lastCull = r.cull;
+		}
 		[e setViewport:r.viewport];
 		for(int i = 0; i < NUMBLOCKS; i++){
-			if(r.vertexBlocks & (1<<i))
-				[e setVertexBuffer:r.vertexBuffers[i] offset:r.vertexOffsets[i] atIndex:blockInfo[i].index];
-			if(r.fragmentBlocks & (1<<i))
-				[e setFragmentBuffer:r.fragmentBuffers[i] offset:r.fragmentOffsets[i] atIndex:blockInfo[i].index];
+			if(r.vertexBlocks & (1<<i)){
+				if(lastVB[i] != r.vertexBuffers[i])
+					[e setVertexBuffer:r.vertexBuffers[i] offset:r.vertexOffsets[i] atIndex:blockInfo[i].index];
+				else if(lastVO[i] != r.vertexOffsets[i])
+					[e setVertexBufferOffset:r.vertexOffsets[i] atIndex:blockInfo[i].index];
+				lastVB[i] = r.vertexBuffers[i];
+				lastVO[i] = r.vertexOffsets[i];
+			}
+			if(r.fragmentBlocks & (1<<i)){
+				if(lastFB[i] != r.fragmentBuffers[i])
+					[e setFragmentBuffer:r.fragmentBuffers[i] offset:r.fragmentOffsets[i] atIndex:blockInfo[i].index];
+				else if(lastFO[i] != r.fragmentOffsets[i])
+					[e setFragmentBufferOffset:r.fragmentOffsets[i] atIndex:blockInfo[i].index];
+				lastFB[i] = r.fragmentBuffers[i];
+				lastFO[i] = r.fragmentOffsets[i];
+			}
 		}
-		[e setFragmentTexture:r.texture atIndex:0];
-		[e setFragmentSamplerState:r.sampler atIndex:0];
+		if(r.texture != lastTexture || r.sampler != lastSampler){
+			[e setFragmentTexture:r.texture atIndex:0];
+			[e setFragmentSamplerState:r.sampler atIndex:0];
+			lastTexture = r.texture;
+			lastSampler = r.sampler;
+		}
 		[e setVertexBuffer:r.frameBuffer offset:r.frameOffset atIndex:BUFFER_PREPASSFRAME];
 		[e setVertexBytes:&r.prevWorld length:sizeof(r.prevWorld) atIndex:BUFFER_PREPASSOBJECT];
 		if(r.prevBones)
@@ -2509,7 +2552,10 @@ encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> 
 			[e setFragmentBuffer:r.faceVertices offset:0 atIndex:BUFFER_FACEVERTICES];
 			[e setFragmentBytes:&r.face length:sizeof(r.face) atIndex:BUFFER_FACELAYOUT];
 		}
-		[e setVertexBuffer:r.vertices offset:0 atIndex:BUFFER_VERTEX];
+		if(r.vertices != lastVertices){
+			[e setVertexBuffer:r.vertices offset:0 atIndex:BUFFER_VERTEX];
+			lastVertices = r.vertices;
+		}
 		[e drawIndexedPrimitives:(MTLPrimitiveType)r.primType indexCount:r.numIndex indexType:MTLIndexTypeUInt16
 			indexBuffer:r.indices indexBufferOffset:r.indexOffset];
 		drawn++;
@@ -3354,6 +3400,30 @@ prewarmShader(Shader *shader, const AttribDesc *attribs, int32 numAttribs, uint3
 	return hostPrewarm(shader, layout, variant, blend, srcBlend, destBlend, depth);
 }
 
+static void
+openLayerCopy(void)
+{
+	if(prepassShader == nil)
+		return;
+	id<MTLDevice> dev = getContext()->device;
+	id<MTLLibrary> lib = (__bridge id<MTLLibrary>)prepassShader->library;
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = [lib newFunctionWithName:@"layerCopyVS"];
+	pd.fragmentFunction = [lib newFunctionWithName:@"layerCopyFS"];
+	pd.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Snorm;
+	pd.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Float;
+	pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+	pd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+	NSError *err = nil;
+	layerCopyPipe = pd.vertexFunction && pd.fragmentFunction ? [dev newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+	MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+	dd.depthCompareFunction = MTLCompareFunctionAlways;
+	dd.depthWriteEnabled = YES;
+	layerCopyDepth = [dev newDepthStencilStateWithDescriptor:dd];
+	if(layerCopyPipe == nil)
+		fprintf(stderr, "rw::metal: the cutout layer copy failed to build: %s\n", err ? err.localizedDescription.UTF8String : "no function");
+}
+
 void
 openPrepass(void)
 {
@@ -3372,6 +3442,7 @@ openPrepass(void)
 		dd.depthCompareFunction = MTLCompareFunctionLess;
 		dd.depthWriteEnabled = YES;
 		prepassLayerDepth = [getContext()->device newDepthStencilStateWithDescriptor:dd];
+		openLayerCopy();
 	}
 	if(!prepassShadersReady())
 		fprintf(stderr, "rw::metal: prepass shaders failed to build; modern frames draw without the prepass\n");
@@ -3453,6 +3524,8 @@ termState(void)
 		*l = nil;
 	}
 	prepassLayerDepth = nil;
+	layerCopyPipe = nil;
+	layerCopyDepth = nil;
 	layerDraws.clear();
 	layerWanted = false;
 	prepassKeys = PrepassKeySet();

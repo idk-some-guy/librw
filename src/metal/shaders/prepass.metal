@@ -147,3 +147,31 @@ prepassLayerFaceFS(PrepassFragIn in [[stage_in]], uint pid [[primitive_id]],
 	faceFetchNormal(pid, idx, v, f, g);
 	return prepassWrite(in, g);
 }
+
+struct LayerCopyTargets
+{
+	float2 normal [[color(0)]];
+	float2 motion [[color(1)]];
+	float depth [[depth(any)]];
+};
+
+vertex float4
+layerCopyVS(uint vid [[vertex_id]])
+{
+	float2 p = float2((vid << 1) & 2, vid & 2);
+	return float4(p*2.0 - 1.0, 0.0, 1.0);
+}
+
+fragment LayerCopyTargets
+layerCopyFS(float4 position [[position]],
+            depth2d<float> srcDepth [[texture(0)]],
+            texture2d<float> srcNormal [[texture(1)]],
+            texture2d<float> srcMotion [[texture(2)]])
+{
+	uint2 p = uint2(position.xy);
+	LayerCopyTargets t;
+	t.normal = srcNormal.read(p).xy;
+	t.motion = srcMotion.read(p).xy;
+	t.depth = srcDepth.read(p);
+	return t;
+}

@@ -4400,6 +4400,117 @@ CheckCutoutLayer(void)
 	Report(okD, names[3]);
 }
 
+struct LayerSample
+{
+	float normal[3], motion[2], depth;
+	bool read;
+};
+
+static bool
+SameValues(const LayerSample &a, const LayerSample &b)
+{
+	return a.read && b.read && a.normal[0] == b.normal[0] && a.normal[1] == b.normal[1] && a.normal[2] == b.normal[2] &&
+		a.motion[0] == b.motion[0] && a.motion[1] == b.motion[1] && a.depth == b.depth;
+}
+
+template<typename F> static void
+LayerQuadFrames(ShadowScene *s, Atomic *const *quads, const int *cull, const int *ref, int numQuads, int n, F before)
+{
+	for(int i = 0; i < n; i++)
+		CasterFrame([&](bool prepass){
+			if(prepass)
+				MoveBy(s->floor->getFrame(), 0.0f, (i & 1) ? -0.05f : 0.05f, 0.0f);
+			SetRenderState(CULLMODE, CULLNONE);
+			s->floor->render();
+			s->roof->render();
+			if(!prepass && i == n - 1)
+				before();
+			for(int q = 0; q < numQuads; q++){
+				SetRenderState(CULLMODE, cull[q]);
+				SetRenderState(ALPHATESTFUNC, ALPHAGREATEREQUAL);
+				SetRenderState(ALPHATESTREF, ref[q]);
+				quads[q]->render();
+				SetRenderState(ALPHATESTREF, 3);
+			}
+		});
+	metal::rtWaitForTest();
+}
+
+static void
+ReadMainAndLayer(int x, int y, LayerSample *base, LayerSample *layer)
+{
+	base->read = metal::readPrepassForTest(x, y, base->normal, base->motion, &base->depth) != 0;
+	layer->read = metal::readLayerForTest(x, y, layer->normal, layer->motion, &layer->depth) != 0;
+}
+
+static void
+CheckCutoutLayerCopy(void)
+{
+	const char *names[2] = {
+		"the cutout layer holds the main prepass's depth, normal and motion wherever no cutout texel reaches it, with the floor moving",
+		"a cutout texel of alpha 0.75 puts the quad's depth in the layer, nearer than the main prepass, and a clear texel, a culled face or a gap between the draws leaves it alone",
+	};
+	enum { NUMQUADS = 8 };
+	ShadowScene s;
+	MakeShadowScene(&s, 0.5f);
+	SetShadowQuality(metal::SHADOWQUALITY_HIGH);
+	const uint8 soft[4] = { 191, 191, 191, 191 }, clear[4] = { 64, 64, 64, 64 };
+	const bool skinned[NUMQUADS] = { false, true, false, false, false, false, false, false };
+	Geometry *geo[NUMQUADS] = { LayerQuadGeometry(-7.0f, -5.0f, soft, false), LayerQuadGeometry(-4.0f, -2.0f, soft, true),
+		LayerQuadGeometry(5.0f, 7.0f, soft, false), LayerQuadGeometry(7.5f, 9.0f, clear, false),
+		LayerQuadGeometry(-1.0f, 1.0f, soft, false), LayerQuadGeometry(12.0f, 10.0f, soft, false),
+		LayerQuadGeometry(-12.0f, -10.0f, soft, false), LayerQuadGeometry(14.0f, 16.0f, soft, false) };
+	Atomic *quads[NUMQUADS];
+	for(int i = 0; i < NUMQUADS; i++){
+		quads[i] = skinned[i] ? SkinAtomic(geo[i]) : MakeAtomic(geo[i]);
+		if(skinned[i])
+			PoseSkin(quads[i], 1);
+	}
+	MoveBy(quads[4]->getFrame(), 3.0f, 0.0f, 0.0f);
+	const int cull[NUMQUADS] = { CULLNONE, CULLNONE, CULLNONE, CULLNONE, CULLNONE, CULLBACK, CULLBACK, CULLNONE };
+	const int ref[NUMQUADS] = { 128, 128, 128, 128, 128, 128, 128, 200 };
+	const bool expectNear[NUMQUADS] = { true, true, true, false, true, true, false, false };
+	const int px[8] = { SX(6.0f, 20.0f), SX(-7.5f, 20.0f), SX(2.0f, 20.0f), SX(-2.0f, 20.0f), 40, 600, 320, 320 };
+	const int py[8] = { 150, 350, 150, 350, 40, 440, 100, 400 };
+	const int qx[NUMQUADS] = { SX(-6.0f, 19.0f), SX(-3.0f, 19.0f), SX(6.0f, 19.0f), SX(8.25f, 19.0f), SX(3.0f, 19.0f), SX(11.0f, 19.0f),
+		SX(-11.0f, 19.0f), SX(15.0f, 19.0f) };
+	LayerSample base[8] = {}, layer[8] = {}, qm[NUMQUADS] = {}, ql[NUMQUADS] = {};
+	metal::StateStats a0 = metal::getStateStats();
+	LayerQuadFrames(&s, quads, cull, ref, NUMQUADS, 24, [&](){
+		for(int i = 0; i < 8; i++)
+			ReadMainAndLayer(px[i], py[i], &base[i], &layer[i]);
+		for(int i = 0; i < NUMQUADS; i++)
+			ReadMainAndLayer(qx[i], 240, &qm[i], &ql[i]);
+	});
+	metal::StateStats a1 = metal::getStateStats();
+	for(int i = 0; i < NUMQUADS; i++){
+		if(skinned[i])
+			DestroySkinAtomic(quads[i]);
+		else
+			DestroyAtomic(quads[i]);
+		geo[i]->destroy();
+	}
+	FreeShadowScene(&s);
+	bool same = true;
+	for(int i = 0; i < 8; i++)
+		same = same && SameValues(base[i], layer[i]);
+	uint32 drawn = a1.prepassLayerDraws - a0.prepassLayerDraws;
+	bool moving = base[0].read && (base[0].motion[0] != 0.0f || base[0].motion[1] != 0.0f);
+	bool placed = true, read = true;
+	for(int i = 0; i < NUMQUADS; i++){
+		read = read && qm[i].read && ql[i].read;
+		bool nearer = qm[i].read && ql[i].read && ql[i].depth < qm[i].depth - 1e-4f;
+		placed = placed && nearer == expectNear[i] && (nearer || SameValues(qm[i], ql[i]));
+	}
+	bool okA = same && moving;
+	bool okB = read && placed && drawn > 0;
+	Detail("  same values at 8 pixels %d, floor motion %.5f %.5f, layer draws %u; layer depth against main: %.5f %.5f, %.5f %.5f, %.5f %.5f, %.5f %.5f, %.5f %.5f, %.5f %.5f, %.5f %.5f, %.5f %.5f\n",
+		same, base[0].motion[0], base[0].motion[1], drawn, ql[0].depth, qm[0].depth, ql[1].depth, qm[1].depth, ql[2].depth, qm[2].depth,
+		ql[3].depth, qm[3].depth, ql[4].depth, qm[4].depth, ql[5].depth, qm[5].depth, ql[6].depth, qm[6].depth, ql[7].depth, qm[7].depth);
+	Report(okA, names[0]);
+	Report(okB, names[1]);
+}
+
 static float
 LayerMegabytes(void)
 {
@@ -5351,6 +5462,7 @@ RunRaytraceChecks(Camera *camera)
 	CheckCutoutReceives();
 	CutoutIdentity("a cutout draw with shadows off draws the enhanced frame's colour, and one the prepass did not draw keeps its own depth test, at one sample");
 	CheckCutoutLayer();
+	CheckCutoutLayerCopy();
 	CheckCutoutLayerReleased();
 	CheckSkinnedCutoutLayer();
 	CheckSkinnedCutoutSolid();

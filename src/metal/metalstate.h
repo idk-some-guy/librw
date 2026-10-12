@@ -156,7 +156,8 @@ uint32 prepassEqualLastFrame(void);
 uint32 prepassCutoutLastFrame(void);
 uint32 cutoutLayerDraws(void);
 #ifdef __OBJC__
-uint32 encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion);
+uint32 encodeCutoutLayer(id<MTLCommandBuffer> cb, id<MTLTexture> srcDepth, id<MTLTexture> srcNormal, id<MTLTexture> srcMotion,
+	id<MTLTexture> depth, id<MTLTexture> normal, id<MTLTexture> motion);
 #endif
 void setAlphaPairSecond(bool second);
 void setUnjitteredProjection(float32 *mat);

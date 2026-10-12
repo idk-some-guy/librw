@@ -1991,12 +1991,7 @@ ensureLayerTargets(void)
 static void
 encodeLayer(id<MTLCommandBuffer> cb, ShadowInputs *in)
 {
-	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-	[blit copyFromTexture:in->depth toTexture:frame.layerDepth];
-	[blit copyFromTexture:in->normals toTexture:frame.layerNormal];
-	[blit copyFromTexture:in->motion toTexture:frame.layerMotion];
-	[blit endEncoding];
-	encodeCutoutLayer(cb, frame.layerDepth, frame.layerNormal, frame.layerMotion);
+	encodeCutoutLayer(cb, in->depth, in->normals, in->motion, frame.layerDepth, frame.layerNormal, frame.layerMotion);
 	in->depth = frame.layerDepth;
 	in->normals = frame.layerNormal;
 	in->motion = frame.layerMotion;
@@ -2171,10 +2166,9 @@ framePrepassPassEnded(void)
 }
 
 static bool32
-readResolvedDepth(Raster *zb, int32 x, int32 y, float32 *depth)
+readDepthTexture(id<MTLTexture> tex, int32 x, int32 y, float32 *depth)
 {
 	MetalContext *ctx = getContext();
-	id<MTLTexture> tex = zb ? getRasterTexture(zb) : nil;
 
 	if(ctx == nil || tex == nil || tex.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 || x < 0 || y < 0 ||
 	   x >= (int32)tex.width || y >= (int32)tex.height)
@@ -2195,6 +2189,12 @@ readResolvedDepth(Raster *zb, int32 x, int32 y, float32 *depth)
 	return 1;
 }
 
+static bool32
+readResolvedDepth(Raster *zb, int32 x, int32 y, float32 *depth)
+{
+	return readDepthTexture(zb ? getRasterTexture(zb) : nil, x, y, depth);
+}
+
 bool32
 readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth)
 {
@@ -2210,6 +2210,21 @@ readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float
 	motion[0] = m[0];
 	motion[1] = m[1];
 	return readResolvedDepth(frame.sceneDepth, x, y, depth);
+}
+
+bool32
+readLayerForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth)
+{
+	float32 n[4], m[4];
+	if(frame.layerNormal == nil || !readHalfPixel(frame.layerMotion, x, y, m) || !readSnormPixel(frame.layerNormal, x, y, n))
+		return 0;
+	PPVec3 d = n[0] == 0.0f && n[1] == 0.0f ? PPVec3{ 0.0f, 0.0f, 0.0f } : ppOctDecode(n[0], n[1]);
+	normal[0] = d.x;
+	normal[1] = d.y;
+	normal[2] = d.z;
+	motion[0] = m[0];
+	motion[1] = m[1];
+	return readDepthTexture(frame.layerDepth, x, y, depth);
 }
 
 bool32
