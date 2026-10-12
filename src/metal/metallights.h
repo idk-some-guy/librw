@@ -9,10 +9,14 @@
 #define LT_FLOOR floor
 #define LT_MIN fmin
 #define LT_MAX fmax
+typedef float4 LTFloat4;
+typedef uint4 LTUint4;
+typedef float4x4 LTMatrix;
 #else
 #include <math.h>
 #include <stdint.h>
 #include <algorithm>
+#include <simd/simd.h>
 #define LT_SQRT sqrtf
 #define LT_POW powf
 #define LT_LOG logf
@@ -20,6 +24,9 @@
 #define LT_FLOOR floorf
 #define LT_MIN fminf
 #define LT_MAX fmaxf
+typedef simd_float4 LTFloat4;
+typedef simd_uint4 LTUint4;
+typedef simd_float4x4 LTMatrix;
 #endif
 
 #define LT_MAX_LIGHTS 256
@@ -30,6 +37,22 @@
 #define LT_MAX_SHADOWED 8
 
 struct LTVec3 { float x, y, z; };
+
+struct LTLight
+{
+	LTFloat4 posRadius, colorGloss, dirOuter, spot;
+	LTUint4 ids;
+};
+
+struct LTFrame
+{
+	LTMatrix view, invProj;
+	LTFloat4 eye, axis, grid, params;
+};
+
+typedef char LTCheckLight[sizeof(LTLight) == 80 ? 1 : -1];
+typedef char LTCheckFrame[sizeof(LTFrame) == 192 ? 1 : -1];
+typedef char LTCheckCluster[LT_PER_CLUSTER*2 == 64 ? 1 : -1];
 
 static inline float
 ltSaturate(float v)

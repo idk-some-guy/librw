@@ -4,6 +4,11 @@
 
 static int failures = 0;
 
+static_assert(sizeof(LTLight) == 80, "the light record");
+static_assert(sizeof(LTFrame) == 192, "the frame block");
+static_assert(alignof(LTLight) == 16 && alignof(LTFrame) == 16, "the record alignment");
+static_assert(LT_PER_CLUSTER*sizeof(uint16_t) == 64, "the cluster record");
+
 #define CHECK(expr) \
 	do { if(!(expr)){ printf("FAIL line %d: %s\n", __LINE__, #expr); failures++; } } while(0)
 

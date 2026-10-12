@@ -440,6 +440,41 @@ void displayChanged(void);
 void setDebugView(int32 view);
 int32 getDebugView(void);
 
+enum { LIGHTS_OFF = 0, LIGHTS_ON, LIGHTS_SHADOWED };
+enum { LIGHT_SPOT = 1, LIGHT_PINNED = 2 };
+
+struct LightDesc
+{
+	float32 pos[3];
+	float32 radius;
+	float32 color[3];
+	float32 gloss;
+	float32 dir[3];
+	float32 cosOuter;
+	float32 cosInner;
+	float32 softness;
+	uint32 id;
+	uint32 flags;
+	uint32 owner;
+	uint32 group;
+};
+
+struct LightFrameParams
+{
+	float32 wetGloss;
+	float32 lightScale;
+};
+
+struct LightStats
+{
+	uint32 submitted, kept, dropped, clusterLoss, maxPerCluster, shadowed, lightRays;
+	float32 clusterMs, lightShadowMs;
+};
+
+void setLights(const LightDesc *lights, int32 n);
+void setLightFrameParams(const LightFrameParams *p);
+LightStats getLightStats(void);
+
 }
 }
 #endif

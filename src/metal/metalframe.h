@@ -77,6 +77,12 @@ bool frameRelitActive(void);
 id<MTLTexture> frameShadowTexture(void);
 bool frameShadowSource(void);
 bool frameShadowPassPlanned(void);
+bool frameLightsLive(void);
+bool frameLightsReady(void);
+void lightsInit(void);
+void lightsSceneBegin(Camera *cam);
+bool lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &viewProj, int32 width, int32 height);
+void lightsTerm(void);
 MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);
 
 }

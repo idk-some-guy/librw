@@ -140,6 +140,7 @@ struct FrameState
 	id<MTLTexture> layerDepth = nil, layerNormal = nil, layerMotion = nil;
 	bool prepassOpen = false, prepassDone = false, prepassFail = false, prepassReported = false;
 	bool rayWorkDone = false;
+	bool lightWorkDone = false, lightsReady = false;
 	bool normalsUnwrittenTest = false;
 	uint32 prepassPasses = 0;
 	PassTarget prepassReturn = { nil, nil };
@@ -520,6 +521,7 @@ frameInit(void)
 			frame.classicEdr = framePipeline(@"frameClassicEdrFS", MTLPixelFormatRGBA16Float);
 		}else
 			fprintf(stderr, "rw::metal: frame shaders failed to compile: %s\n", err ? err.UTF8String : "");
+		lightsInit();
 		frame.grade = buildGrade(defaultHostGrade, &err);
 		frame.gradeSource = defaultHostGrade;
 		frame.gradeResult = frame.grade != nil;
@@ -1291,6 +1293,9 @@ beginScene(Camera *cam)
 		frame.prepassOpen = false;
 		frame.prepassDone = false;
 		frame.rayWorkDone = false;
+		frame.lightWorkDone = false;
+		frame.lightsReady = false;
+		lightsSceneBegin(cam);
 		frame.shadow = nil;
 		noteShadowTraced();
 		frame.prepassPasses = 0;
@@ -2117,6 +2122,30 @@ frameRayWork(void)
 	noteShadowTraced();
 }
 
+static void
+frameLightWork(void)
+{
+	MetalContext *ctx = getContext();
+	if(frame.lightWorkDone || frame.dropping || ctx == nil || ctx->encoder != nil || !frame.prepassDone)
+		return;
+	frame.lightWorkDone = true;
+	const PrepassMatrices &m = prepassMatrices();
+	frame.lightsReady = lightsEncode(frameCommandBuffer(), m.view, m.uploadedViewProj, frame.internalWidth, frame.internalHeight);
+}
+
+bool
+frameLightsLive(void)
+{
+	return frame.activeTier == TIER_MODERN && frame.settings.lights != LIGHTS_OFF && !frame.lightWorkDone &&
+		(frame.phase == PHASE_SCENE || frame.phase == PHASE_PREPASS);
+}
+
+bool
+frameLightsReady(void)
+{
+	return frame.lightsReady;
+}
+
 void
 endPrepass(void)
 {
@@ -2130,6 +2159,7 @@ endPrepass(void)
 		rtEndCasters();
 		resumePassTarget(frame.prepassReturn);
 		frameRayWork();
+		frameLightWork();
 	}
 }
 
@@ -2163,8 +2193,10 @@ framePrepassPassEnded(void)
 		frame.prepassValid = true;
 		frame.prepassValidShow = frame.shows;
 	}
-	if(!frame.prepassOpen && frame.prepassDone)
+	if(!frame.prepassOpen && frame.prepassDone){
 		frameRayWork();
+		frameLightWork();
+	}
 }
 
 static bool32
@@ -2256,6 +2288,8 @@ void
 frameTerm(void)
 {
 	dropSceneTargets();
+	lightsTerm();
+	frame.lightsReady = false;
 	frame.unendedReported = false;
 	frame.targetsReported = false;
 	frame.scalerReported = false;
