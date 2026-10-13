@@ -51,7 +51,13 @@ struct LTFrame
 	LTFloat4 eye, axis, grid, params;
 };
 
+struct LTDraw
+{
+	LTFloat4 emissive;
+};
+
 typedef char LTCheckLight[sizeof(LTLight) == 80 ? 1 : -1];
+typedef char LTCheckDraw[sizeof(LTDraw) == 16 ? 1 : -1];
 typedef char LTCheckFrame[sizeof(LTFrame) == 192 ? 1 : -1];
 typedef char LTCheckCluster[LT_PER_CLUSTER*2 == 64 ? 1 : -1];
 
@@ -59,6 +65,19 @@ static inline float
 ltSaturate(float v)
 {
 	return LT_MIN(LT_MAX(v, 0.0f), 1.0f);
+}
+
+static inline float
+ltEmissiveLuma(float luma, float scale)
+{
+	float t = ltSaturate((luma - 0.6f)/0.3f);
+	return 1.0f + (scale - 1.0f)*t*t*(3.0f - 2.0f*t);
+}
+
+static inline float
+ltEmissiveGate(float r, float g, float b, float scale)
+{
+	return ltEmissiveLuma(LT_MAX(LT_MAX(r, g), b), scale);
 }
 
 static inline float

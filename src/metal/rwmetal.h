@@ -473,6 +473,7 @@ struct LightStats
 
 void setLights(const LightDesc *lights, int32 n);
 void setLightFrameParams(const LightFrameParams *p);
+void setDrawEmissiveLuma(float32 scale);
 LightStats getLightStats(void);
 
 }

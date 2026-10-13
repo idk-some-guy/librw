@@ -112,19 +112,24 @@ matfxEnvFS(EnvFragmentIn in [[stage_in]],
            texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]],
            constant LTFrame &lightFrame [[buffer(BUFFER_LIGHTFRAME), function_constant(lights)]],
            const device LTLight *lightList [[buffer(BUFFER_LIGHTLIST), function_constant(lights)]],
-           const device ushort *lightClusters [[buffer(BUFFER_LIGHTCLUSTERS), function_constant(lights)]])
+           const device ushort *lightClusters [[buffer(BUFFER_LIGHTCLUSTERS), function_constant(lights)]],
+           constant LTDraw &lightDraw [[buffer(BUFFER_LIGHTDRAW), function_constant(lights)]])
 {
 	float3 n = float3(0.0, 0.0, 1.0);
 	float4 base = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
 		face, relitBlock, material, in.position, shadowTex, n) :
 		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
 		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;
+	float3 lightAdd = float3(0.0);
 	if(lights){
 		LightSurface s = relitPrelit ? LightsSurface(in.relitPos, n, lightFrame, material) :
 			lightsLit ? LightsSurface(in.lightPos, in.lightNormal, material) : LightsSurface(in.plainPos, lightFrame, material);
-		base.rgb += LightsSum(s.rel, s.N, s.albedo, s.gloss, in.position, lightFrame, lightList, lightClusters);
+		lightAdd = LightsSum(s.rel, s.N, s.albedo, s.gloss, in.position, lightFrame, lightList, lightClusters);
 	}
-	float4 pass1 = base*tex0.sample(tex0Sampler, in.tex0);
+	float4 t0 = tex0.sample(tex0Sampler, in.tex0);
+	float4 pass1 = base*t0;
+	if(lights)
+		pass1.rgb = LightsEmissive(pass1.rgb, lightAdd*t0.rgb, lightDraw);
 	float4 pass2 = in.envColor*matfx.fxParams.x*tex1.sample(tex1Sampler, in.tex1);
 	pass1.rgb = mix(state.fogColor.rgb, pass1.rgb, in.fog);
 	pass2.rgb = mix(float3(0.0), pass2.rgb, in.fog);

@@ -155,6 +155,25 @@ TestBudget(void)
 	CHECK(ltBudget(0, 3) == 0);
 }
 
+static void
+TestEmissiveLuma(void)
+{
+	CHECK(ltEmissiveLuma(0.5f, 4.0f) == 1.0f);
+	CHECK(ltEmissiveLuma(0.95f, 4.0f) == 4.0f);
+	CHECK(ltEmissiveLuma(0.0f, 4.0f) == 1.0f);
+	CHECK(ltEmissiveLuma(0.1f, 1.0f) == 1.0f);
+	CHECK(ltEmissiveLuma(0.95f, 1.0f) == 1.0f);
+	CHECK(Near(ltEmissiveLuma(0.75f, 4.0f), 2.5f, 1e-5f));
+	CHECK(ltEmissiveLuma(0.6f, 4.0f) == 1.0f);
+	CHECK(ltEmissiveGate(1.0f, 0.0f, 0.0f, 4.0f) == 4.0f);
+	CHECK(ltEmissiveGate(0.0f, 0.0f, 1.0f, 4.0f) == 4.0f);
+	CHECK(ltEmissiveGate(1.0f, 0.2f, 0.6f, 4.0f) == 4.0f);
+	CHECK(ltEmissiveGate(0.2f, 0.1f, 0.1f, 4.0f) == 1.0f);
+	CHECK(ltEmissiveGate(0.5f, 0.5f, 0.5f, 4.0f) == 1.0f);
+	CHECK(ltEmissiveGate(1.0f, 0.0f, 0.0f, 1.0f) == 1.0f);
+	CHECK(sizeof(LTDraw) == 16);
+}
+
 int
 main(void)
 {
@@ -168,6 +187,7 @@ main(void)
 	TestConeSphere();
 	TestScore();
 	TestBudget();
+	TestEmissiveLuma();
 	if(failures == 0)
 		printf("all lights tests passed\n");
 	return failures != 0;

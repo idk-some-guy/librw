@@ -16,6 +16,7 @@
 #include "metalrelit.h"
 #include "metalraytrace.h"
 #include "metalshadow.h"
+#include "metallights.h"
 
 #define PLUGIN_ID 0
 
@@ -299,6 +300,7 @@ struct PipelineEntry
 	bool fixedBlend;
 	bool shaderBlend;
 	bool emissive;
+	bool lightDraw;
 	bool shadowTexture;
 };
 static std::unordered_map<uint64_t, PipelineEntry> pipelineCache;
@@ -312,6 +314,7 @@ static bool prewarming;
 static bool hostPrewarming;
 static uint32 warmedFormats;
 static float32 drawEmissive = 1.0f;
+static float32 drawLuma = 1.0f;
 
 struct HostPrewarmRecord
 {
@@ -599,6 +602,7 @@ struct EncoderState
 	id<MTLBuffer> vertexData;
 	uint32 vertexDataOffset;
 	float32 emissive;
+	float32 lightDraw;
 	id<MTLTexture> shadow;
 };
 static EncoderState enc;
@@ -753,6 +757,7 @@ invalidateEncoderState(void)
 	}
 	enc.vertexData = nil;
 	enc.emissive = -1.0f;
+	enc.lightDraw = -1.0f;
 	enc.shadow = nil;
 	prepassFrameBound = false;
 	lightsBound = false;
@@ -1129,6 +1134,8 @@ reflectBlocks(MTLRenderPipelineReflection *refl, PipelineEntry *e)
 				continue;
 			if(s == 1 && b.index == BUFFER_EMISSIVE)
 				e->emissive = true;
+			if(s == 1 && b.index == BUFFER_LIGHTDRAW)
+				e->lightDraw = true;
 			for(i = 0; i < NUMBLOCKS; i++){
 				if(blockInfo[i].index != b.index)
 					continue;
@@ -1230,6 +1237,12 @@ void
 setDrawEmissiveScale(float32 s)
 {
 	drawEmissive = s;
+}
+
+void
+setDrawEmissiveLuma(float32 scale)
+{
+	drawLuma = scale;
 }
 
 void
@@ -2248,9 +2261,15 @@ encodeDraw(MetalContext *ctx, id<MTLRenderCommandEncoder> e, PipelineEntry *pipe
 		[e setVertexBytes:&defaultAttribs length:sizeof(defaultAttribs) atIndex:BUFFER_DEFAULTATTRIBS];
 		enc.defaultAttribs = true;
 	}
-	if(pipe->emissive && enc.emissive != drawEmissive){
-		[e setFragmentBytes:&drawEmissive length:sizeof(drawEmissive) atIndex:BUFFER_EMISSIVE];
-		enc.emissive = drawEmissive;
+	float32 sceneEmissive = pipe->lightDraw && drawLuma > 1.0f ? std::max(drawEmissive, drawLuma) : drawEmissive;
+	if(pipe->emissive && enc.emissive != sceneEmissive){
+		[e setFragmentBytes:&sceneEmissive length:sizeof(sceneEmissive) atIndex:BUFFER_EMISSIVE];
+		enc.emissive = sceneEmissive;
+	}
+	if(pipe->lightDraw && enc.lightDraw != drawLuma){
+		LTDraw ld = { { drawLuma, 1.0f, 1.0f, 1.0f } };
+		[e setFragmentBytes:&ld length:sizeof(ld) atIndex:BUFFER_LIGHTDRAW];
+		enc.lightDraw = drawLuma;
 	}
 	if(pipe->shadowTexture){
 		id<MTLTexture> sh = frameShadowTexture();
@@ -3596,6 +3615,7 @@ termState(void)
 	samplerCache.clear();
 	warmedFormats = 0;
 	drawEmissive = 1.0f;
+	drawLuma = 1.0f;
 	relitHostDraw = true;
 	shadowCasterHost = true;
 	relitHostTwoSided = false;

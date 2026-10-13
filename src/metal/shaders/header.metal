@@ -27,6 +27,7 @@ using namespace metal;
 #define BUFFER_LIGHTFRAME 18
 #define BUFFER_LIGHTLIST 19
 #define BUFFER_LIGHTCLUSTERS 20
+#define BUFFER_LIGHTDRAW 21
 #define TEXTURE_SHADOW 8
 
 constant bool alphaTest [[function_constant(0)]];
@@ -395,6 +396,12 @@ LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, con
 		sum += l.colorGloss.rgb*(a*nl)*(albedo + ltSpecular(dot(N, normalize(L + V)), gloss));
 	}
 	return sum*lf.params.y;
+}
+
+static float3
+LightsEmissive(float3 unlit, float3 lit, constant LTDraw &ld)
+{
+	return unlit*ltEmissiveGate(unlit.r, unlit.g, unlit.b, ld.emissive.x) + lit;
 }
 
 static float

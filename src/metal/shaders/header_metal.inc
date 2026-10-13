@@ -264,7 +264,13 @@ const char *header_metal_src =
 "	LTFloat4 eye, axis, grid, params;\n"
 "};\n"
 
+"struct LTDraw\n"
+"{\n"
+"	LTFloat4 emissive;\n"
+"};\n"
+
 "typedef char LTCheckLight[sizeof(LTLight) == 80 ? 1 : -1];\n"
+"typedef char LTCheckDraw[sizeof(LTDraw) == 16 ? 1 : -1];\n"
 "typedef char LTCheckFrame[sizeof(LTFrame) == 192 ? 1 : -1];\n"
 "typedef char LTCheckCluster[LT_PER_CLUSTER*2 == 64 ? 1 : -1];\n"
 
@@ -272,6 +278,19 @@ const char *header_metal_src =
 "ltSaturate(float v)\n"
 "{\n"
 "	return LT_MIN(LT_MAX(v, 0.0f), 1.0f);\n"
+"}\n"
+
+"static inline float\n"
+"ltEmissiveLuma(float luma, float scale)\n"
+"{\n"
+"	float t = ltSaturate((luma - 0.6f)/0.3f);\n"
+"	return 1.0f + (scale - 1.0f)*t*t*(3.0f - 2.0f*t);\n"
+"}\n"
+
+"static inline float\n"
+"ltEmissiveGate(float r, float g, float b, float scale)\n"
+"{\n"
+"	return ltEmissiveLuma(LT_MAX(LT_MAX(r, g), b), scale);\n"
 "}\n"
 
 "static inline float\n"
@@ -404,6 +423,7 @@ const char *header_metal_src =
 "#define BUFFER_LIGHTFRAME 18\n"
 "#define BUFFER_LIGHTLIST 19\n"
 "#define BUFFER_LIGHTCLUSTERS 20\n"
+"#define BUFFER_LIGHTDRAW 21\n"
 "#define TEXTURE_SHADOW 8\n"
 
 "constant bool alphaTest [[function_constant(0)]];\n"
@@ -772,6 +792,12 @@ const char *header_metal_src =
 "		sum += l.colorGloss.rgb*(a*nl)*(albedo + ltSpecular(dot(N, normalize(L + V)), gloss));\n"
 "	}\n"
 "	return sum*lf.params.y;\n"
+"}\n"
+
+"static float3\n"
+"LightsEmissive(float3 unlit, float3 lit, constant LTDraw &ld)\n"
+"{\n"
+"	return unlit*ltEmissiveGate(unlit.r, unlit.g, unlit.b, ld.emissive.x) + lit;\n"
 "}\n"
 
 "static float\n"

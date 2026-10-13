@@ -1041,6 +1041,92 @@ CheckLightColourGloss(void)
 	return Report(ok, name);
 }
 
+static void
+GlowFrame(Atomic **atoms, const float *scales, int n, const metal::LightDesc *light)
+{
+	RGBA sky = { 64, 64, 64, 255 };
+	metal::beginScene(lightCamera);
+	WorldBegin(sky);
+	SetRenderState(VERTEXALPHA, 0);
+	SetRenderState(CULLMODE, CULLNONE);
+	metal::setLights(light, 1);
+	if(metal::beginPrepass()){
+		for(int i = 0; i < n; i++)
+			atoms[i]->render();
+		metal::endPrepass();
+	}
+	SetRenderState(CULLMODE, CULLNONE);
+	for(int i = 0; i < n; i++){
+		metal::setDrawEmissiveLuma(scales[i]);
+		atoms[i]->render();
+		metal::setDrawEmissiveLuma(1.0f);
+	}
+	metal::endScene(nil);
+	WorldEnd();
+}
+
+static bool
+CheckLightEmissive(void)
+{
+	const char *name = "a bright texel goes above white at the emissive scale and a dark texel lit past the gate keeps its colour";
+	RGBA white = { 255, 255, 255, 255 }, dark = { 51, 51, 51, 255 }, ones[4] = { white, white, white, white };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	Texture *tex[2] = { OneTexel(white), OneTexel(dark) };
+	Material *mat[2];
+	Geometry *geo[3];
+	Atomic *atoms[3];
+	const int which[3] = { 0, 1, 0 };
+	const float xs[3] = { -4.0f, 0.0f, 4.0f };
+	for(int i = 0; i < 2; i++){
+		mat[i] = LitMaterial();
+		mat[i]->setTexture(tex[i]);
+	}
+	for(int i = 0; i < 3; i++){
+		geo[i] = QuadGeometry(Geometry::POSITIONS | Geometry::NORMALS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED, 1.5f, 1.5f, -1.5f, -1.5f,
+			0.0f, ones, uv, mat[which[i]]);
+		atoms[i] = MakeAtomic(geo[i]);
+		Place(atoms[i], xs[i], 0.0f, 20.0f);
+	}
+	CameraOffset(true);
+	metal::LightDesc l = SceneLight(111, 0.0f, 0.0f, 17.0f, 12.0f, 34.0f);
+	const float plain[3] = { 1.0f, 1.0f, 1.0f }, glow[3] = { 4.0f, 4.0f, 1.0f };
+	float base[3][3], lit[3][3];
+	int y = PY(0.0f, 20.0f), px[3];
+	for(int i = 0; i < 3; i++)
+		px[i] = PX(xs[i], 20.0f);
+	for(int f = 0; f < 3; f++)
+		GlowFrame(atoms, plain, 3, &l);
+	for(int i = 0; i < 3; i++)
+		ReadAt(px[i], y, base[i]);
+	metal::StateStats a0 = metal::getStateStats();
+	GlowFrame(atoms, glow, 3, &l);
+	metal::StateStats a1 = metal::getStateStats();
+	for(int i = 0; i < 3; i++)
+		ReadAt(px[i], y, lit[i]);
+	CameraOffset(false);
+	for(int i = 0; i < 3; i++){
+		DestroyAtomic(atoms[i]);
+		geo[i]->destroy();
+	}
+	for(int i = 0; i < 2; i++){
+		mat[i]->destroy();
+		tex[i]->destroy();
+	}
+	bool bright = true, keeps = true, unmarked = true;
+	for(int c = 0; c < 3; c++){
+		bright = bright && lit[0][c] >= 3.5f*base[0][c] && lit[0][c] > 1.5f;
+		keeps = keeps && fabsf(lit[1][c] - base[1][c]) <= 2.0f/255.0f;
+		unmarked = unmarked && fabsf(lit[2][c] - base[2][c]) <= 2.0f/255.0f;
+	}
+	bool strong = base[1][0] > 0.9f && base[1][0] < 1.0f;
+	bool ok = bright && keeps && unmarked && strong && a1.lightDraws > a0.lightDraws;
+	if(!ok)
+		Detail("  bright texel %.3f %.3f %.3f (was %.3f %.3f %.3f, want 4x and above 1.5); dark texel %.3f %.3f %.3f (was %.3f %.3f %.3f, want the same); unmarked bright %.3f %.3f %.3f (was %.3f %.3f %.3f, want the same); light draws %u\n",
+			lit[0][0], lit[0][1], lit[0][2], base[0][0], base[0][1], base[0][2], lit[1][0], lit[1][1], lit[1][2],
+			base[1][0], base[1][1], base[1][2], lit[2][0], lit[2][1], lit[2][2], base[2][0], base[2][1], base[2][2], a1.lightDraws - a0.lightDraws);
+	return Report(ok, name);
+}
+
 static bool
 CheckLightPlainTwinFailure(void)
 {
@@ -1295,6 +1381,7 @@ RunLightChecks(Camera *camera)
 	CheckLightVertexLit();
 	CheckLightSpotCutoff();
 	CheckLightColourGloss();
+	CheckLightEmissive();
 	CheckLightOptIn();
 	CheckLightViewChange();
 	CheckLightShadowedPlain();
