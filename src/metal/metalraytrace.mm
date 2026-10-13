@@ -211,7 +211,8 @@ struct ShadowAccumParamsHost
 	simd_float4 eye, prevEye;
 	simd_uint2 size, rawSize;
 	uint32 halfRes, valid;
-	float32 maxHistory, pad;
+	float32 maxHistory;
+	uint32 phase;
 };
 
 struct ShadowAlphaEntryHost
@@ -232,8 +233,15 @@ static struct
 	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear, ownerReset, ownerFix;
 	id<MTLBuffer> ownerList, ownerTaken;
 	std::atomic<uint32> listed, overflow;
-	id<MTLComputePipelineState> lightRays, lightRaysAlpha, lightFix;
-	id<MTLTexture> lightRaw;
+	id<MTLComputePipelineState> lightRays, lightRaysAlpha, lightFix, lightAccumulate, lightUpsample;
+	id<MTLTexture> lightRaw, lightShadow;
+	id<MTLTexture> lightRawView[LT_MAX_SHADOWED], lightOutView[LT_MAX_SHADOWED], lightHist[LT_MAX_SHADOWED][2];
+	uint32 lightPrevId[LT_MAX_SHADOWED], lightPrevCount, lightIndex, lightSamples;
+	int32 lightQuality;
+	uint64 lightLastFrame;
+	bool lightHave;
+	simd_float4x4 lightPrevInvViewProj;
+	simd_float3 lightPrevEye;
 	id<MTLBuffer> lightList, lightCounts[MAXFRAMESINFLIGHT];
 	std::atomic<uint32> lightRayCount[LT_MAX_SHADOWED];
 	uint32 lightListCap, lightFrame, lightCountSlot;
@@ -342,6 +350,8 @@ initShadows(id<MTLDevice> dev)
 			alphaErr ? alphaErr.localizedDescription.UTF8String : "argument buffers tier 2 missing");
 	sh.lightRays = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowRays"] error:&err] : nil;
 	sh.lightFix = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowOwnerFix"] error:&err] : nil;
+	sh.lightAccumulate = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowAccumulate"] error:&err] : nil;
+	sh.lightUpsample = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowUpsample"] error:&err] : nil;
 	id<MTLFunction> lightAlpha = lib ? [lib newFunctionWithName:@"lightShadowRaysAlpha"] : nil;
 	sh.lightRaysAlpha = nil;
 	if(sh.rays && lightAlpha && sh.alphaHit){
@@ -352,7 +362,7 @@ initShadows(id<MTLDevice> dev)
 		pd.linkedFunctions = linked;
 		sh.lightRaysAlpha = [dev newComputePipelineStateWithDescriptor:pd options:MTLPipelineOptionNone reflection:nil error:&alphaErr];
 	}
-	if(sh.rays && (sh.lightRays == nil || sh.lightFix == nil))
+	if(sh.rays && (sh.lightRays == nil || sh.lightFix == nil || sh.lightAccumulate == nil || sh.lightUpsample == nil))
 		fprintf(stderr, "rw::metal: the light ray kernels failed to build; shadowed lights are unshadowed: %s\n",
 			err ? err.localizedDescription.UTF8String : "");
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
@@ -454,7 +464,7 @@ rtTerm(void)
 	rtDropShadowTargets();
 	rtDropLightTargets();
 	sh.rays = sh.raysAlpha = sh.clear = sh.ownerReset = sh.ownerFix = nil;
-	sh.lightRays = sh.lightRaysAlpha = sh.lightFix = nil;
+	sh.lightRays = sh.lightRaysAlpha = sh.lightFix = sh.lightAccumulate = sh.lightUpsample = nil;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
 		sh.lightCounts[i] = nil;
 	sh.ownerTaken = nil;
@@ -1763,7 +1773,7 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, q.raysPerPixel, q.halfRes, rt.stats.alphaEntries,
 		sh.terminatorOff ? 1u : 0u, owners ? 0u : 1u, listCap };
 	ShadowAccumParamsHost ap = { inv, sh.prevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.prevEye, 1.0f),
-		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0.0f };
+		simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), q.halfRes, valid ? 1u : 0u, q.maxHistory, 0u };
 	id<MTLTexture> prev = sh.history[sh.index], next = sh.history[sh.index ^ 1];
 	id<MTLComputeCommandEncoder> e = shadowEncoder(cb);
 	if(sh.fresh){
@@ -1837,17 +1847,23 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 void
 rtDropLightTargets(void)
 {
-	sh.lightRaw = nil;
+	sh.lightRaw = sh.lightShadow = nil;
+	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++){
+		sh.lightRawView[i] = sh.lightOutView[i] = nil;
+		sh.lightHist[i][0] = sh.lightHist[i][1] = nil;
+	}
 	sh.lightList = nil;
 	sh.lightListCap = 0;
 	sh.lightBytes = 0;
+	sh.lightHave = false;
 }
 
 static bool
 ensureLightTargets(const ShadowInputs &in, const SHQuality &q, uint32 slices)
 {
 	uint32 rw = q.halfRes ? (in.width + 1)/2 : in.width, rh = q.halfRes ? (in.height + 1)/2 : in.height;
-	if(sh.lightRaw && sh.lightRaw.width == rw && sh.lightRaw.height == rh && sh.lightRaw.arrayLength == slices)
+	if(sh.lightRaw && sh.lightRaw.width == rw && sh.lightRaw.height == rh && sh.lightRaw.arrayLength == slices &&
+	   sh.lightShadow.width == in.width && sh.lightShadow.height == in.height)
 		return true;
 	rtDropLightTargets();
 	id<MTLDevice> dev = getContext()->device;
@@ -1860,9 +1876,27 @@ ensureLightTargets(const ShadowInputs &in, const SHQuality &q, uint32 slices)
 	d.storageMode = MTLStorageModePrivate;
 	d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
 	sh.lightRaw = [dev newTextureWithDescriptor:d];
+	d.pixelFormat = MTLPixelFormatR8Unorm;
+	d.width = in.width;
+	d.height = in.height;
+	sh.lightShadow = [dev newTextureWithDescriptor:d];
+	bool built = sh.lightRaw && sh.lightShadow;
+	MTLTextureDescriptor *hd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float width:rw height:rh
+		mipmapped:NO];
+	hd.storageMode = MTLStorageModePrivate;
+	hd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	for(uint32 i = 0; built && i < slices; i++){
+		sh.lightRawView[i] = [sh.lightRaw newTextureViewWithPixelFormat:MTLPixelFormatR16Float textureType:MTLTextureType2D
+			levels:NSMakeRange(0, 1) slices:NSMakeRange(i, 1)];
+		sh.lightOutView[i] = [sh.lightShadow newTextureViewWithPixelFormat:MTLPixelFormatR8Unorm textureType:MTLTextureType2D
+			levels:NSMakeRange(0, 1) slices:NSMakeRange(i, 1)];
+		sh.lightHist[i][0] = [dev newTextureWithDescriptor:hd];
+		sh.lightHist[i][1] = [dev newTextureWithDescriptor:hd];
+		built = sh.lightRawView[i] && sh.lightOutView[i] && sh.lightHist[i][0] && sh.lightHist[i][1];
+	}
 	uint32 capacity = shOwnerListCapacity(rw, rh);
 	sh.lightList = [dev newBufferWithLength:16 + (NSUInteger)capacity*8 options:MTLResourceStorageModePrivate];
-	if(sh.lightRaw == nil || sh.lightList == nil){
+	if(!built || sh.lightList == nil){
 		rtDropLightTargets();
 		if(!sh.lightReported){
 			sh.lightReported = true;
@@ -1871,7 +1905,7 @@ ensureLightTargets(const ShadowInputs &in, const SHQuality &q, uint32 slices)
 		return false;
 	}
 	sh.lightListCap = capacity;
-	sh.lightBytes = (uint64)rw*rh*2*slices + 16 + (uint64)capacity*8;
+	sh.lightBytes = (uint64)rw*rh*(2 + 8)*slices + (uint64)in.width*in.height*slices + 16 + (uint64)capacity*8;
 	return true;
 }
 
@@ -1879,6 +1913,12 @@ id<MTLTexture>
 rtLightRawTexture(void)
 {
 	return sh.lightRaw;
+}
+
+id<MTLTexture>
+rtLightShadowTexture(void)
+{
+	return sh.lightShadow;
 }
 
 void
@@ -1893,9 +1933,15 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 		sh.lightRayCount[i].store(0);
 	}
 	count = std::min(count, std::min(budget, (uint32)LT_MAX_SHADOWED));
-	if(count == 0 || tlas == nil || !rtShadowsSupported() || sh.lightRays == nil || sh.lightFix == nil || q.raysPerPixel == 0 || in.depth == nil ||
-	   in.normals == nil || !ensureLightTargets(in, q, std::min(budget, (uint32)LT_MAX_SHADOWED)))
+	bool had = sh.lightHave && sh.lightLastFrame + 1 == rt.frame && !rt.cutFrame && in.history && in.motion && in.samples == sh.lightSamples &&
+		in.quality == sh.lightQuality;
+	id<MTLTexture> before = sh.lightRaw;
+	sh.lightHave = false;
+	if(count == 0 || tlas == nil || !rtShadowsSupported() || sh.lightRays == nil || sh.lightFix == nil || sh.lightAccumulate == nil ||
+	   sh.lightUpsample == nil || q.raysPerPixel == 0 || in.depth == nil || in.normals == nil ||
+	   !ensureLightTargets(in, q, std::min(budget, (uint32)LT_MAX_SHADOWED)))
 		return;
+	had = had && sh.lightRaw == before;
 	bool alpha = sh.lightRaysAlpha != nil && useAlphaKernel(rf.currentAlpha, rf.currentTable);
 	std::vector<__unsafe_unretained id<MTLResource>> textures;
 	if(alpha && !alphaTextureList(&textures))
@@ -1937,7 +1983,45 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 		[e setBuffer:alpha ? rf.currentAlpha : sh.lightList offset:0 atIndex:5];
 		[e dispatchThreads:MTLSizeMake(SH_OWNER_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 	}
+	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+	uint32 idx = sh.lightIndex;
+	[e setComputePipelineState:sh.lightAccumulate];
+	for(uint32 i = 0; i < count; i++){
+		bool reset = ltSlotReset(i < sh.lightPrevCount, sh.lightPrevId[i], slots[i].ids.x);
+		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
+			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, had && !reset ? 1u : 0u, q.maxHistory, frameNo };
+		[e setTexture:sh.lightRawView[i] atIndex:0];
+		[e setTexture:sh.lightHist[i][idx] atIndex:1];
+		[e setTexture:in.motion atIndex:2];
+		[e setTexture:in.normals atIndex:3];
+		[e setTexture:in.depth atIndex:4];
+		[e setTexture:sh.lightHist[i][idx ^ 1] atIndex:5];
+		[e setBytes:&ap length:sizeof(ap) atIndex:0];
+		[e dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	}
+	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
+	[e setComputePipelineState:sh.lightUpsample];
+	for(uint32 i = 0; i < count; i++){
+		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
+			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo };
+		[e setTexture:sh.lightHist[i][idx ^ 1] atIndex:0];
+		[e setTexture:in.normals atIndex:1];
+		[e setTexture:in.depth atIndex:2];
+		[e setTexture:sh.lightOutView[i] atIndex:3];
+		[e setBytes:&ap length:sizeof(ap) atIndex:0];
+		[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	}
 	[e endEncoding];
+	for(uint32 i = 0; i < count; i++)
+		sh.lightPrevId[i] = slots[i].ids.x;
+	sh.lightPrevCount = count;
+	sh.lightIndex ^= 1;
+	sh.lightHave = true;
+	sh.lightLastFrame = rt.frame;
+	sh.lightSamples = in.samples;
+	sh.lightQuality = in.quality;
+	sh.lightPrevInvViewProj = inv;
+	sh.lightPrevEye = eye;
 	[cb addCompletedHandler:^(id<MTLCommandBuffer>){
 		const uint32 *c = (const uint32*)counts.contents;
 		for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)

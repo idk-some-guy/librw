@@ -1536,6 +1536,63 @@ CheckLightRaysOwner(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckLightShadowBox(void)
+{
+	const char *name = "a shadowed light over a box leaves the box's shadow on the floor and a budget of 0 removes it";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	metal::LightDesc two[2] = { PointLight(81, 0.0f, 0.0f, 86.0f, 40.0f), PointLight(82, 90.0f, 0.0f, 86.0f, 150.0f) };
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 W = info.internalWidth, H = info.internalHeight, CX = W/2, CY = H/2;
+	const float perPixel = 180.0f/(float)W, shadowWidth = 16.0f/perPixel;
+	bool began = true;
+	for(int f = 0; f < 16; f++)
+		began = NightFrame(two, 2, box) && began;
+	metal::rtWaitForTest();
+	metal::RayStats st = metal::getRayStats();
+	float centre = -1.0f, lit = -1.0f, v = 0.0f, dark = 0.0f;
+	bool read = metal::readLightShadowForTest(0, CX, CY, &centre) != 0;
+	read = metal::readLightShadowForTest(0, CX + (int32)(20.0f/perPixel), CY, &lit) != 0 && read;
+	const int32 reach = (int32)(shadowWidth*0.5f) + 12;
+	for(int32 x = CX - reach; x <= CX + reach; x++){
+		read = metal::readLightShadowForTest(0, x, CY, &v) != 0 && read;
+		dark += 1.0f - v;
+	}
+	high.shadowedLights = 0;
+	metal::setRenderSettings(&high);
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(two, 2, box) && began;
+	float gone = -1.0f;
+	bool readGone = metal::readLightShadowForTest(0, CX, CY, &gone) != 0;
+	uint8 *budgetZero = CompositeFrame();
+	SetMode(metal::LIGHTS_ON);
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(two, 2, box) && began;
+	uint8 *unshadowed = CompositeFrame();
+	int largest = 0, n = lightCamera->frameBuffer->width*lightCamera->frameBuffer->height*4;
+	for(int i = 0; i < n; i++)
+		if(i % 4 != 3)
+			largest = std::max(largest, abs(budgetZero[i] - unshadowed[i]));
+	delete[] budgetZero;
+	delete[] unshadowed;
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && read && st.lightSlots == 2 && st.lightSlotId[0] == 81 && lit > 0.8f && centre < 0.2f*lit && fabsf(dark - shadowWidth) <= 2.0f && !readGone && largest <= 2;
+	if(!ok)
+		Detail("  prepass %d read %d slots %u; shadow at centre %.2f (want below %.2f), lit %.2f; dark width %.1f pixels (want %.1f); budget 0 reads %d (want 0), frame differs by %d (want 2 at most)\n",
+			began, read, st.lightSlots, centre, 0.2f*lit, lit, dark, shadowWidth, readGone, largest);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1623,6 +1680,7 @@ RunLightChecks(Camera *camera)
 	CheckLightInstancesAtNight();
 	CheckLightRaysInCone();
 	CheckLightRaysOwner();
+	CheckLightShadowBox();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

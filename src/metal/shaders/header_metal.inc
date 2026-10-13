@@ -482,6 +482,12 @@ const char *header_metal_src =
 "		return holdFrames > 0 ? holdFrames : 0;\n"
 "	return held > 0 ? held - 1 : 0;\n"
 "}\n"
+
+"static inline bool\n"
+"ltSlotReset(bool hadPrev, unsigned int prevId, unsigned int id)\n"
+"{\n"
+"	return !hadPrev || prevId != id;\n"
+"}\n"
 "#endif\n"
 
 "static inline bool\n"

@@ -341,6 +341,16 @@ TestInView(void)
 	CHECK(ltInView(m, LTVec3{0.0f, 0.0f, -0.5f}, 1.0f));
 }
 
+static void
+TestSlotReset(void)
+{
+	CHECK(!ltSlotReset(true, 7u, 7u));
+	CHECK(ltSlotReset(true, 7u, 8u));
+	CHECK(ltSlotReset(false, 7u, 7u));
+	CHECK(!ltSlotReset(true, 0u, 0u));
+	CHECK(ltSlotReset(false, 0u, 0u));
+}
+
 int
 main(void)
 {
@@ -362,6 +372,7 @@ main(void)
 	TestDisc();
 	TestHoldFrames();
 	TestInView();
+	TestSlotReset();
 	if(failures == 0)
 		printf("all lights tests passed\n");
 	return failures != 0;

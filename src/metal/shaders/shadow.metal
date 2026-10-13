@@ -27,7 +27,7 @@ struct ShadowAccumParams
 	uint halfRes;
 	uint valid;
 	float maxHistory;
-	float pad;
+	uint phase;
 };
 
 constant uint shadowPhase [[function_constant(0)]];
@@ -530,11 +530,10 @@ shadowUpsample(texture2d<float, access::read> raw, depth2d<float, access::read> 
 // Every normal is read: a read behind a range test serialises the loop.
 static float2
 shadowClampBox(texture2d<float, access::read> raw, texture2d<float, access::read> normals, constant ShadowAccumParams &p, int2 rp, uint2 off,
-               float4 own, float cur)
+               float4 own, float cur, int b)
 {
 	int2 rmax = int2(p.rawSize) - 1;
 	float lo = cur, hi = cur;
-	int b = shClampBoxStart(p.halfRes);
 	for(int y = b; y <= 1; y++)
 		for(int x = b; x <= 1; x++){
 			int2 h = clamp(rp + int2(x, y), int2(0), rmax);
@@ -582,7 +581,7 @@ shadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
 			float3 Q = shadowHistoryPoint(p, hp, h.b);
 			float3 N = normalize((p.viewToWorld * float4(on.xyz, 0.0)).xyz);
 			if(shHistoryMatches(SHVec3{ Q.x, Q.y, Q.z }, SHVec3{ P.x, P.y, P.z }, SHVec3{ N.x, N.y, N.z }, h.b, dist)){
-				float2 box = shClampBoxNeeded(h.r, cur) ? shadowClampBox(raw, normals, p, rp, off, on, cur) : float2(cur);
+				float2 box = shClampBoxNeeded(h.r, cur) ? shadowClampBox(raw, normals, p, rp, off, on, cur, shClampBoxStart(p.halfRes)) : float2(cur);
 				a = shAccumulateClamped(h.r, h.g, cur, box.x, box.y, p.maxHistory);
 			}
 		}
@@ -596,4 +595,62 @@ shadowClear(texture2d<float, access::write> t [[texture(0)]],
 {
 	if(gid.x < t.get_width() && gid.y < t.get_height())
 		t.write(float4(1.0, 0.0, 0.0, 1.0), gid);
+}
+
+kernel void
+lightShadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
+                      texture2d<float, access::read> hist [[texture(1)]],
+                      texture2d<float, access::read> motion [[texture(2)]],
+                      texture2d<float, access::read> normals [[texture(3)]],
+                      depth2d<float, access::read> depth [[texture(4)]],
+                      texture2d<float, access::write> out [[texture(5)]],
+                      constant ShadowAccumParams &p [[buffer(0)]],
+                      uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= p.rawSize.x || gid.y >= p.rawSize.y)
+		return;
+	uint2 off = uint2(shPhaseX(p.phase), shPhaseY(p.phase));
+	uint2 src = shadowRawSource(p, int2(gid), off);
+	float d = depth.read(src);
+	if(d >= 1.0){
+		out.write(float4(1.0, 0.0, 0.0, 1.0), gid);
+		return;
+	}
+	float cur = raw.read(gid).r;
+	SHAccum a = { cur, 1.0 };
+	float2 huv = (float2(src) + 0.5)/float2(p.size) + motion.read(src).xy;
+	if(p.valid != 0 && all(huv >= 0.0) && all(huv < 1.0)){
+		uint2 hp = min(min(uint2(huv*float2(p.size)), p.size - 1)/2, p.rawSize - 1);
+		float2 h = hist.read(hp).rg;
+		if(h.g > 0.0){
+			float4 on = shadowStoredNormal(normals, src);
+			float2 box = shClampBoxNeeded(h.r, cur) ? shadowClampBox(raw, normals, p, int2(gid), off, on, cur, shClampBoxStart(0u)) : float2(cur);
+			a = shAccumulateClamped(h.r, h.g, cur, box.x, box.y, p.maxHistory);
+		}
+	}
+	out.write(float4(a.value, a.length, 0.0, 1.0), gid);
+}
+
+kernel void
+lightShadowUpsample(texture2d<float, access::read> hist [[texture(0)]],
+                    texture2d<float, access::read> normals [[texture(1)]],
+                    depth2d<float, access::read> depth [[texture(2)]],
+                    texture2d<float, access::write> out [[texture(3)]],
+                    constant ShadowAccumParams &p [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= p.size.x || gid.y >= p.size.y)
+		return;
+	float d = depth.read(gid);
+	if(d >= 1.0){
+		out.write(float4(1.0), gid);
+		return;
+	}
+	float dist = length(shadowWorld(p.invViewProj, gid, p.size, d) - p.eye.xyz);
+	uint2 off = uint2(shPhaseX(p.phase), shPhaseY(p.phase));
+	SHTap tx = shUpsampleTap(gid.x, off.x, 0), ty = shUpsampleTap(gid.y, off.y, 0);
+	bool own = tx.weight*ty.weight == 1.0;
+	float v = own ? hist.read(min(uint2(tx.index, ty.index), p.rawSize - 1)).r :
+		shadowUpsample(hist, depth, normals, p, gid, dist, shadowStoredNormal(normals, gid), off);
+	out.write(float4(v), gid);
 }

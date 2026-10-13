@@ -269,6 +269,12 @@ ltHoldNext(int held, bool picked, int holdFrames)
 		return holdFrames > 0 ? holdFrames : 0;
 	return held > 0 ? held - 1 : 0;
 }
+
+static inline bool
+ltSlotReset(bool hadPrev, unsigned int prevId, unsigned int id)
+{
+	return !hadPrev || prevId != id;
+}
 #endif
 
 static inline bool

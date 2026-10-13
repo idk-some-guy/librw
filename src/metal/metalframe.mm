@@ -2371,6 +2371,31 @@ readLightRawForTest(int32 slot, int32 x, int32 y, float32 *value)
 	return 1;
 }
 
+bool32
+readLightShadowForTest(int32 slot, int32 x, int32 y, float32 *value)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = rtLightShadowTexture();
+
+	if(ctx == nil || tex == nil || slot < 0 || x < 0 || y < 0 || slot >= (int32)tex.arrayLength || x >= (int32)tex.width ||
+	   y >= (int32)tex.height)
+		return 0;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:8 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:slot sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:1 destinationBytesPerImage:1];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		*value = (float32)*(const uint8*)buf.contents/255.0f;
+	}
+	return 1;
+}
+
 void
 frameForget(Raster *raster)
 {
