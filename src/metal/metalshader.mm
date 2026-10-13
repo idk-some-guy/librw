@@ -25,7 +25,7 @@ sceneFnKey(uint32 shaderId, uint32 variant, bool32 blended, uint32 srcFactor, ui
 {
 	if(!blended)
 		srcFactor = destFactor = 0;
-	return shaderId<<16 | (blended ? 1u : 0u)<<15 | variant<<8 | (srcFactor & 15)<<4 | (destFactor & 15);
+	return shaderId<<17 | (blended ? 1u : 0u)<<16 | variant<<8 | (srcFactor & 15)<<4 | (destFactor & 15);
 }
 
 static uint32
@@ -67,6 +67,8 @@ specialise(id<MTLLibrary> lib, const char *name, uint32 variant, const uint32 *s
 	[values setConstantValue:&v type:MTLDataTypeBool atIndex:7];
 	v = (variant >> 6) & 1;
 	[values setConstantValue:&v type:MTLDataTypeBool atIndex:8];
+	v = (variant >> 7) & 1;
+	[values setConstantValue:&v type:MTLDataTypeBool atIndex:9];
 	if(sceneFactors){
 		[values setConstantValue:&sceneFactors[0] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENESRCBLEND];
 		[values setConstantValue:&sceneFactors[1] type:MTLDataTypeUInt atIndex:SHADERCONST_SCENEDESTBLEND];
@@ -230,7 +232,7 @@ Shader::destroy(void)
 		rwFree(this->sceneSource);
 	sceneReported.erase(this->shaderId);
 	for(auto it = sceneFns.begin(); it != sceneFns.end();)
-		if(it->first>>16 == this->shaderId)
+		if(it->first>>17 == this->shaderId)
 			it = sceneFns.erase(it);
 		else
 			++it;

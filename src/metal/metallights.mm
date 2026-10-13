@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <vector>
 #include "metalobjc.h"
+#include "rwmetalshader.h"
 #include "metalstate.h"
 #include "metalframe.h"
 #include "metallights.h"
@@ -16,6 +17,7 @@ namespace rw {
 namespace metal {
 
 static_assert(sizeof(LightDesc) == 72, "LightDesc is 18 plain words");
+static_assert(LT_SPOT == LIGHT_SPOT, "the spot flag on the GPU");
 
 enum { CLUSTERS = LT_CLUSTER_X*LT_CLUSTER_Y*LT_CLUSTER_Z };
 
@@ -42,7 +44,9 @@ static struct LightState
 	LightFrameParams params = { 0.0f, 1.0f };
 	id<MTLComputePipelineState> pipe = nil;
 	bool pipeTried = false;
-	id<MTLBuffer> indices[MAXFRAMESINFLIGHT], counts[MAXFRAMESINFLIGHT];
+	id<MTLBuffer> clusters[MAXFRAMESINFLIGHT];
+	id<MTLBuffer> frameBuffer = nil, listBuffer = nil;
+	uint32 frameOffset = 0, listOffset = 0;
 	id<MTLCounterSampleBuffer> timing[MAXFRAMESINFLIGHT];
 	int32 sceneSlot = -1, scenePass = 0;
 	uint32 lastIds[LT_MAX_LIGHTS];
@@ -81,7 +85,7 @@ lightsInit(void)
 static bool
 ensureBuffers(MetalContext *ctx)
 {
-	if(lt.indices[0])
+	if(lt.clusters[0])
 		return true;
 	id<MTLCounterSet> timestamps = nil;
 	if([ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
@@ -89,8 +93,7 @@ ensureBuffers(MetalContext *ctx)
 			if([s.name isEqualToString:MTLCommonCounterSetTimestamp])
 				timestamps = s;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
-		lt.indices[i] = [ctx->device newBufferWithLength:CLUSTERS*LT_PER_CLUSTER*2 options:MTLResourceStorageModeShared];
-		lt.counts[i] = [ctx->device newBufferWithLength:CLUSTERS*4 options:MTLResourceStorageModeShared];
+		lt.clusters[i] = [ctx->device newBufferWithLength:CLUSTERS*(LT_PER_CLUSTER*2 + 4) options:MTLResourceStorageModeShared];
 		if(timestamps){
 			MTLCounterSampleBufferDescriptor *sd = [MTLCounterSampleBufferDescriptor new];
 			sd.counterSet = timestamps;
@@ -98,9 +101,9 @@ ensureBuffers(MetalContext *ctx)
 			sd.sampleCount = 2;
 			lt.timing[i] = [ctx->device newCounterSampleBufferWithDescriptor:sd error:nil];
 		}
-		if(lt.indices[i] == nil || lt.counts[i] == nil){
+		if(lt.clusters[i] == nil){
 			for(uint32 k = 0; k < MAXFRAMESINFLIGHT; k++){
-				lt.indices[k] = lt.counts[k] = nil;
+				lt.clusters[k] = nil;
 				lt.timing[k] = nil;
 			}
 			return false;
@@ -234,8 +237,8 @@ lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &vi
 	[e setComputePipelineState:lt.pipe];
 	[e setBuffer:(__bridge id<MTLBuffer>)blockSpace.buffer offset:blockSpace.offset atIndex:0];
 	[e setBuffer:(__bridge id<MTLBuffer>)listSpace.buffer offset:listSpace.offset atIndex:1];
-	[e setBuffer:lt.indices[slot] offset:0 atIndex:2];
-	[e setBuffer:lt.counts[slot] offset:0 atIndex:3];
+	[e setBuffer:lt.clusters[slot] offset:0 atIndex:2];
+	[e setBuffer:lt.clusters[slot] offset:CLUSTERS*LT_PER_CLUSTER*2 atIndex:3];
 	[e setBuffer:(__bridge id<MTLBuffer>)statsSpace.buffer offset:statsSpace.offset atIndex:4];
 	[e dispatchThreads:MTLSizeMake(LT_CLUSTER_X, LT_CLUSTER_Y, LT_CLUSTER_Z) threadsPerThreadgroup:MTLSizeMake(LT_CLUSTER_X, LT_CLUSTER_Y, 1)];
 	[e endEncoding];
@@ -256,7 +259,21 @@ lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &vi
 	}];
 	lt.sceneSlot = (int32)slot;
 	lt.scenePass = pass;
+	lt.frameBuffer = (__bridge id<MTLBuffer>)blockSpace.buffer;
+	lt.frameOffset = blockSpace.offset;
+	lt.listBuffer = (__bridge id<MTLBuffer>)listSpace.buffer;
+	lt.listOffset = listSpace.offset;
 	return true;
+}
+
+void
+lightsBind(id<MTLRenderCommandEncoder> e)
+{
+	if(lt.sceneSlot < 0 || lt.frameBuffer == nil)
+		return;
+	[e setFragmentBuffer:lt.frameBuffer offset:lt.frameOffset atIndex:BUFFER_LIGHTFRAME];
+	[e setFragmentBuffer:lt.listBuffer offset:lt.listOffset atIndex:BUFFER_LIGHTLIST];
+	[e setFragmentBuffer:lt.clusters[lt.sceneSlot] offset:0 atIndex:BUFFER_LIGHTCLUSTERS];
 }
 
 LightStats
@@ -322,8 +339,9 @@ readClusterForTest(int32 cx, int32 cy, int32 cz, uint32 *ids, int32 max, int32 *
 		usleep(1000);
 	}
 	uint32 cluster = (uint32)(cx + LT_CLUSTER_X*(cy + LT_CLUSTER_Y*cz));
-	uint32 listed = ((const uint32*)lt.counts[lt.sceneSlot].contents)[cluster];
-	const uint16 *idx = (const uint16*)lt.indices[lt.sceneSlot].contents + cluster*LT_PER_CLUSTER;
+	const uint16 *idx = (const uint16*)lt.clusters[lt.sceneSlot].contents;
+	uint32 listed = ((const uint32*)(idx + CLUSTERS*LT_PER_CLUSTER))[cluster];
+	idx += cluster*LT_PER_CLUSTER;
 	*count = (int32)listed;
 	for(uint32 i = 0; i < listed && (int32)i < max; i++)
 		ids[i] = idx[i] < lt.lastIdCount ? lt.lastIds[idx[i]] : ~0u;
@@ -338,9 +356,10 @@ lightsTerm(void)
 	lt.pipe = nil;
 	lt.pipeTried = false;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
-		lt.indices[i] = lt.counts[i] = nil;
+		lt.clusters[i] = nil;
 		lt.timing[i] = nil;
 	}
+	lt.frameBuffer = lt.listBuffer = nil;
 	lt.sceneSlot = -1;
 	lt.scenePass = 0;
 	lt.lastIdCount = 0;

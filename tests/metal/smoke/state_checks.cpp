@@ -104,9 +104,9 @@ bool
 CheckPrewarmedPipelines(void)
 {
 	metal::StateStats s = metal::getStateStats();
-	bool depthOnlyIm2d = metal::pipelineCached(0x000047c420020401ull);
+	bool depthOnlyIm2d = metal::pipelineCached(0x00008f8840040401ull);
 	if(!depthOnlyIm2d)
-		Detail("  depth-only im2d pipeline 000047c420020401 is not cached\n");
+		Detail("  depth-only im2d pipeline 00008f8840040401 is not cached\n");
 	bool ok = s.pipelinesAtInit == 51 && s.pipelineFailures == 0 && s.blockSizeMismatches == 0 && depthOnlyIm2d;
 	if(!ok)
 		Detail("  pipelines at init %u, after init %u, failures %u, uniform block size mismatches %u\n",
@@ -976,10 +976,10 @@ static const char *secondPassSrc =
 "}\n";
 
 metal::Shader*
-CreateHostDefaultShader(void)
+CreateHostDefaultShader(uint32 mask)
 {
 	const char *src[] = { metal::header_metal_src, metal::default_metal_src, metal::simple_metal_src, nil };
-	return metal::Shader::create(src, "defaultVS", "simpleFS", metal::VARIANT_ALL);
+	return metal::Shader::create(src, "defaultVS", "simpleFS", mask);
 }
 
 metal::Shader*

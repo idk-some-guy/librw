@@ -14,6 +14,7 @@
 #include "world_checks.h"
 #include "modern_checks.h"
 #include "raytrace_checks.h"
+#include "light_checks.h"
 #include "late_pipelines.h"
 
 using namespace rw;
@@ -5860,6 +5861,7 @@ RunRestartModernChecks(bool (*restart)(uint32 samples), Camera *(*camera)(void))
 	CheckRelitCreaseTaa();
 	CheckRelitCost("the GPU time of a modern frame of relit layers is measured with the face fetch on and off at four samples", 4);
 	failures += RunRaytraceSampleChecks(cam);
+	failures += RunLightSampleChecks(cam);
 	metal::FrameInfo exitFrame;
 	int32 exitTier = ExitStatsFrame(&exitFrame);
 	WorldClose();

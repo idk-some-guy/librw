@@ -36,6 +36,7 @@ const char *lightsh_metal_src =
 "#define LT_CLUSTER_Z 24\n"
 "#define LT_PER_CLUSTER 32\n"
 "#define LT_MAX_SHADOWED 8\n"
+"#define LT_SPOT 1u\n"
 
 "struct LTVec3 { float x, y, z; };\n"
 

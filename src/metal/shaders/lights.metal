@@ -1,5 +1,3 @@
-constant uint LIGHT_IS_SPOT = 1;
-
 static float3
 clusterRay(constant LTFrame &f, float nx, float ny)
 {
@@ -42,7 +40,7 @@ lightCluster(constant LTFrame &f [[buffer(0)]],
 		float3 p = rot*l.posRadius.xyz;
 		LTVec3 pos = { p.x, p.y, p.z };
 		bool hit;
-		if((l.ids.y & LIGHT_IS_SPOT) != 0){
+		if((l.ids.y & LT_SPOT) != 0){
 			float3 d = normalize(rot*l.dirOuter.xyz);
 			LTVec3 dir = { d.x, d.y, d.z };
 			LTVec3 mid = { centre.x, centre.y, centre.z };

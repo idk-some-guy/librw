@@ -43,6 +43,12 @@ skinVS(SkinIn in [[stage_in]],
 	out.color *= material.matColor;
 	if(relit)
 		out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
+	if(plainPosition)
+		out.plainPos = RelitPlainPos(V.xyz, scene.view);
+	if(lightsLit){
+		out.lightPos = RelitPlainPos(V.xyz, scene.view);
+		out.lightNormal = N;
+	}
 	out.fog = DoFog(out.position.z, state);
 	out.pointSize = 1.0;
 	out.position = MetalDepth(out.position);

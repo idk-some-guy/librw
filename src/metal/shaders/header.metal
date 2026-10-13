@@ -24,6 +24,9 @@ using namespace metal;
 #define BUFFER_FACEVERTICES 15
 #define BUFFER_FACELAYOUT 16
 #define BUFFER_RELIT 17
+#define BUFFER_LIGHTFRAME 18
+#define BUFFER_LIGHTLIST 19
+#define BUFFER_LIGHTCLUSTERS 20
 #define TEXTURE_SHADOW 8
 
 constant bool alphaTest [[function_constant(0)]];
@@ -36,6 +39,11 @@ constant bool relitShadow [[function_constant(8)]];
 constant bool relitTexture = relit || relitShadow;
 constant bool relitFragmentBlock = relitPrelit || relitShadow;
 constant bool relitPlain = relitShadow && !relit && !relitPrelit;
+constant bool lights [[function_constant(9)]];
+constant bool lightsLit = lights && relit && !relitPrelit;
+constant bool lightsPlain = lights && !relit && !relitPrelit;
+constant bool plainPosition = relitPlain || lightsPlain;
+constant bool lightsMaterial = relitPrelit || lights;
 
 struct State
 {
@@ -118,7 +126,9 @@ struct VertexOut
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
-	float3 plainPos [[function_constant(relitPlain)]];
+	float3 plainPos [[function_constant(plainPosition)]];
+	float3 lightPos [[function_constant(lightsLit)]];
+	float3 lightNormal [[function_constant(lightsLit)]];
 	float pointSize [[point_size]];
 };
 
@@ -132,7 +142,9 @@ struct FragmentIn
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
-	float3 plainPos [[function_constant(relitPlain)]];
+	float3 plainPos [[function_constant(plainPosition)]];
+	float3 lightPos [[function_constant(lightsLit)]];
+	float3 lightNormal [[function_constant(lightsLit)]];
 };
 
 static float3
@@ -274,10 +286,10 @@ RelitPlainShadow(float4 color, float4 position, float3 pos, texture2d<float> sha
 static float4
 RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, const device ushort *idx,
               const device uchar *verts, constant FaceFetch &face, constant Relit &r, constant Material &material,
-              float4 position, texture2d<float> shadowTex)
+              float4 position, texture2d<float> shadowTex, thread float3 &n)
 {
 	float3 toEye = r.eye.xyz - pos;
-	float3 g, n;
+	float3 g;
 	float v = 1.0;
 	bool known = false;
 	if(face.skipFull != 0 && face.numVertices != 0 && nrm.w >= 1.0 && dot(nrm.xyz, nrm.xyz) > 1e-30){
@@ -318,6 +330,71 @@ RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, c
 	if(v >= 1.0)
 		return float4(lit, color.a);
 	return float4(c1 + (lit - c1)*v, color.a);
+}
+
+static float4
+RelitFragment(float4 color, float4 classic1, float4 nrm, float3 pos, uint pid, const device ushort *idx,
+              const device uchar *verts, constant FaceFetch &face, constant Relit &r, constant Material &material,
+              float4 position, texture2d<float> shadowTex)
+{
+	float3 n;
+	return RelitFragment(color, classic1, nrm, pos, pid, idx, verts, face, r, material, position, shadowTex, n);
+}
+
+struct LightSurface
+{
+	float3 rel;
+	float3 N;
+	float3 albedo;
+	float gloss;
+};
+
+static LightSurface
+LightsSurface(float3 pos, float3 n, constant LTFrame &lf, constant Material &material)
+{
+	LightSurface s = { pos - lf.eye.xyz, n, material.matColor.rgb*surfDiffuse, lf.params.x*saturate(n.z) };
+	return s;
+}
+
+static LightSurface
+LightsSurface(float3 pos, float3 n, constant Material &material)
+{
+	float3 N = dot(n, n) > 1e-30 ? normalize(n) : float3(0.0, 0.0, 1.0);
+	LightSurface s = { pos, N, material.matColor.rgb*surfDiffuse, surfSpecular };
+	return s;
+}
+
+static LightSurface
+LightsSurface(float3 pos, constant LTFrame &lf, constant Material &material)
+{
+	float3 toEye = -pos, g = cross(dfdx(pos), dfdy(pos));
+	float3 n = RelitSurfaceNormal(g, 0.0, g, toEye, normalize(toEye));
+	LightSurface s = { pos, n, material.matColor.rgb*surfDiffuse, lf.params.x*saturate(n.z) };
+	return s;
+}
+
+static float3
+LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
+          const device LTLight *list, const device ushort *clusters)
+{
+	uint cluster = ltCluster(position.x, position.y, dot(rel, lf.axis.xyz), lf.grid.x, lf.grid.y, lf.axis.w, lf.grid.z);
+	const device uint *counts = (const device uint*)(clusters + LT_CLUSTER_X*LT_CLUSTER_Y*LT_CLUSTER_Z*LT_PER_CLUSTER);
+	uint count = min(counts[cluster], (uint)LT_PER_CLUSTER);
+	float3 V = normalize(-rel), sum = float3(0.0);
+	for(uint k = 0; k < count; k++){
+		LTLight l = list[clusters[cluster*LT_PER_CLUSTER + k]];
+		float3 d = l.posRadius.xyz - rel;
+		float d2 = dot(d, d);
+		float a = ltFalloff(d2, l.posRadius.w);
+		if(a <= 0.0)
+			continue;
+		float3 L = d*rsqrt(max(d2, 1e-12));
+		if((l.ids.y & LT_SPOT) != 0)
+			a *= ltSpot(dot(-L, normalize(l.dirOuter.xyz)), l.dirOuter.w, l.spot.x);
+		float nl = max(dot(N, L), 0.0);
+		sum += l.colorGloss.rgb*(a*nl)*(albedo + ltSpecular(dot(N, normalize(L + V)), gloss));
+	}
+	return sum*lf.params.y;
 }
 
 static float

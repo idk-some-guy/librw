@@ -245,6 +245,13 @@ TestPipelineKey(void)
 	CHECK(pipelineKey(a) == pipelineKey(b));
 
 	CHECK(pipelineKey(BasePipe()) == pipelineKey(BasePipe()));
+
+	a = BasePipe();
+	b = BasePipe();
+	a.variant = 255;
+	b.variant = 127;
+	CHECK(pipelineKey(a) != pipelineKey(b) && (pipelineKey(a) >> PIPEKEY_SHADERBITS & 255) == 255 &&
+	      PIPEKEY_SHADERBITS + PIPEKEY_VARIANTBITS + PIPEKEY_LAYOUTBITS + 23 <= 64);
 }
 
 static DepthStencilDesc
@@ -474,7 +481,7 @@ TestLateDepthOnlyIm2dKey(void)
 	d.colorFormat = COLORFMT_RGBA8;
 	d.depthFormat = DEPTHFMT_D32S8;
 	d.sampleCount = 1;
-	CHECK(pipelineKey(d) == 0x000047c420020401ull);
+	CHECK(pipelineKey(d) == 0x00008f8840040401ull);
 }
 
 static void

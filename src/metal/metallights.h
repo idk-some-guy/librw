@@ -35,6 +35,7 @@ typedef simd_float4x4 LTMatrix;
 #define LT_CLUSTER_Z 24
 #define LT_PER_CLUSTER 32
 #define LT_MAX_SHADOWED 8
+#define LT_SPOT 1u
 
 struct LTVec3 { float x, y, z; };
 

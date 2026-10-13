@@ -16,7 +16,7 @@ rw::metal::Shader *CreateDefaultAttribShader(void);
 rw::metal::Shader *CreateCustomConstantShader(void);
 rw::metal::Shader *CreateUV2CoordShader(void);
 rw::metal::Shader *CreateUV2TextureShader(void);
-rw::metal::Shader *CreateHostDefaultShader(void);
+rw::metal::Shader *CreateHostDefaultShader(rw::uint32 mask = rw::metal::VARIANT_ALL);
 rw::metal::Shader *CreateHostSkinShader(void);
 rw::metal::Shader *CreateTwoUVShader(void);
 rw::metal::Shader *CreateSecondPassShader(void);

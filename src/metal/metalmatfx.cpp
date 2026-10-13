@@ -32,7 +32,7 @@ openMatFX(void)
 {
 #include "shaders/matfx_env_metal.inc"
 	const char *src[] = { header_metal_src, matfx_env_metal_src, nil };
-	matfxEnvShader = Shader::create(src, "matfxEnvVS", "matfxEnvFS", VARIANT_ALL | VARIANT_RELITALL);
+	matfxEnvShader = Shader::create(src, "matfxEnvVS", "matfxEnvFS", VARIANT_ALL | VARIANT_RELITALL | VARIANT_LIGHTS);
 	return matfxEnvShader != nil;
 }
 

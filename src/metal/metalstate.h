@@ -107,6 +107,7 @@ struct StateStats
 	uint32 relitFaceDraws;
 	uint32 relitShadowDraws;
 	uint32 plainShadowDraws;
+	uint32 lightDraws;
 };
 StateStats getStateStats(void);
 const char *getPrewarmLine(void);
@@ -126,6 +127,7 @@ void setDrawRelitGeometry(bool32 lit);
 void relitSceneBegin(void);
 void setRelitShadowTraced(bool32 traced);
 void prewarmShadowTwins(void);
+void prewarmLightVariants(void);
 void setDrawInstance(const void *inst);
 void setDrawHeader(InstanceDataHeader *header);
 void noteNormalStream(uint32 bytes);

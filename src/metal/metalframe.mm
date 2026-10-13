@@ -240,7 +240,7 @@ applySettings(const RenderSettings *s)
 {
 	RenderSettings n = clampSettings(s);
 	int32 reason, active;
-	bool sourceBefore = frameShadowSource(), realBefore = realShadowSource();
+	bool sourceBefore = frameShadowSource(), realBefore = realShadowSource(), lightsBefore = frameLightsSource();
 
 	active = resolveTier(s->tier, getSupportedTier(), &reason);
 	if(reason != TIERREASON_NONE && (n.tier != frame.settings.tier || reason != frame.tierReason))
@@ -263,6 +263,8 @@ applySettings(const RenderSettings *s)
 		frameTierChanged();
 	if(!sourceBefore && frameShadowSource())
 		prewarmShadowTwins();
+	if(!lightsBefore && frameLightsSource())
+		prewarmLightVariants();
 	if(realBefore && !realShadowSource()){
 		rtDropShadowTargets();
 		rtReleaseLevels();
@@ -709,6 +711,7 @@ reactivePipeline(id<MTLLibrary> lib, NSString *vs, uint32 layout)
 	[off setConstantValue:&no type:MTLDataTypeBool atIndex:6];
 	[off setConstantValue:&no type:MTLDataTypeBool atIndex:7];
 	[off setConstantValue:&no type:MTLDataTypeBool atIndex:8];
+	[off setConstantValue:&no type:MTLDataTypeBool atIndex:9];
 	d.vertexFunction = [lib newFunctionWithName:vs constantValues:off error:&err];
 	d.fragmentFunction = [lib newFunctionWithName:@"reactiveFS" constantValues:off error:&err];
 	d.vertexDescriptor = vd;
@@ -2144,6 +2147,12 @@ bool
 frameLightsReady(void)
 {
 	return frame.lightsReady;
+}
+
+bool
+frameLightsSource(void)
+{
+	return frame.activeTier == TIER_MODERN && frame.settings.lights != LIGHTS_OFF;
 }
 
 void

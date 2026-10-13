@@ -1,6 +1,4 @@
 const char *lights_metal_src =
-"constant uint LIGHT_IS_SPOT = 1;\n"
-
 "static float3\n"
 "clusterRay(constant LTFrame &f, float nx, float ny)\n"
 "{\n"
@@ -43,7 +41,7 @@ const char *lights_metal_src =
 "		float3 p = rot*l.posRadius.xyz;\n"
 "		LTVec3 pos = { p.x, p.y, p.z };\n"
 "		bool hit;\n"
-"		if((l.ids.y & LIGHT_IS_SPOT) != 0){\n"
+"		if((l.ids.y & LT_SPOT) != 0){\n"
 "			float3 d = normalize(rot*l.dirOuter.xyz);\n"
 "			LTVec3 dir = { d.x, d.y, d.z };\n"
 "			LTVec3 mid = { centre.x, centre.y, centre.z };\n"

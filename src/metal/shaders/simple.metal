@@ -8,13 +8,22 @@ simpleFS(FragmentIn in [[stage_in]],
          const device uchar *faceVerts [[buffer(BUFFER_FACEVERTICES), function_constant(relitPrelit)]],
          constant FaceFetch &face [[buffer(BUFFER_FACELAYOUT), function_constant(relitPrelit)]],
          constant Relit &relitBlock [[buffer(BUFFER_RELIT), function_constant(relitFragmentBlock)]],
-         constant Material &material [[buffer(BUFFER_MATERIAL), function_constant(relitPrelit)]],
-         texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]])
+         constant Material &material [[buffer(BUFFER_MATERIAL), function_constant(lightsMaterial)]],
+         texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]],
+         constant LTFrame &lightFrame [[buffer(BUFFER_LIGHTFRAME), function_constant(lights)]],
+         const device LTLight *lightList [[buffer(BUFFER_LIGHTLIST), function_constant(lights)]],
+         const device ushort *lightClusters [[buffer(BUFFER_LIGHTCLUSTERS), function_constant(lights)]])
 {
+	float3 n = float3(0.0, 0.0, 1.0);
 	float4 c = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
-		face, relitBlock, material, in.position, shadowTex) :
+		face, relitBlock, material, in.position, shadowTex, n) :
 		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
 		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;
+	if(lights){
+		LightSurface s = relitPrelit ? LightsSurface(in.relitPos, n, lightFrame, material) :
+			lightsLit ? LightsSurface(in.lightPos, in.lightNormal, material) : LightsSurface(in.plainPos, lightFrame, material);
+		c.rgb += LightsSum(s.rel, s.N, s.albedo, s.gloss, in.position, lightFrame, lightList, lightClusters);
+	}
 	float4 color = c*tex0.sample(tex0Sampler, in.tex0);
 	color.rgb = mix(state.fogColor.rgb, color.rgb, in.fog);
 	DoAlphaTest(color.a, state);

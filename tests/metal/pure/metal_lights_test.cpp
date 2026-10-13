@@ -51,6 +51,15 @@ TestSpot(void)
 }
 
 static void
+TestSpotFlag(void)
+{
+	CHECK(LT_SPOT == 1u);
+	LTLight l = {};
+	l.ids.y = LT_SPOT;
+	CHECK((l.ids.y & LT_SPOT) != 0);
+}
+
+static void
 TestSpecular(void)
 {
 	CHECK(ltSpecular(1.0f, 0.0f) == 0.0f);
@@ -151,6 +160,7 @@ main(void)
 {
 	TestFalloff();
 	TestSpot();
+	TestSpotFlag();
 	TestSpecular();
 	TestSlice();
 	TestCluster();

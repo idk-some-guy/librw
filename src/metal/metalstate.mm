@@ -178,7 +178,8 @@ static UniformRelit uniformRelit = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0.5f, 0.5
 	{ 0, 0, 0, 1 }, { 1.0f, 0.5f, 0.35f, 1.0f } };
 static RelitParams relitParams = { 1.0f, { 0, 0, 1 }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, 0.5f, 0.35f, 1.0f, 0.02f, 0.0f };
 static const Light *relitSun;
-static std::unordered_set<uint32> relitFailed, plainTwinFailed;
+static std::unordered_set<uint32> relitFailed, plainTwinFailed, lightsFailed;
+static bool lightsBound;
 static bool plainTwinFailTest;
 static bool relitFetch = true;
 static bool relitAtFullWeight;
@@ -754,6 +755,7 @@ invalidateEncoderState(void)
 	enc.emissive = -1.0f;
 	enc.shadow = nil;
 	prepassFrameBound = false;
+	lightsBound = false;
 }
 
 static void
@@ -1237,6 +1239,7 @@ forgetShaderPipelines(uint32 shaderId)
 		[shaderId](const HostPrewarmRecord &r){ return r.shader->shaderId == shaderId; }), hostRecords.end());
 	relitFailed.erase(shaderId);
 	plainTwinFailed.erase(shaderId);
+	lightsFailed.erase(shaderId);
 	lastPipeKey = 0;
 	lastPipe = nil;
 	lastDepthKey = 0;
@@ -2711,6 +2714,9 @@ flushCache(void)
 			variant = currentVariant | VARIANT_RELITSHADOW;
 			plainShadow = true;
 		}
+		if(lit && (rv & VARIANT_RELIT) && (currentShader->variantMask & VARIANT_LIGHTS) && frameLightsReady() && prepassViewSame &&
+		   lightsFailed.count(currentShader->shaderId) == 0)
+			variant |= VARIANT_LIGHTS;
 	}
 	pd.shader = currentShader->shaderId;
 	pd.variant = variant;
@@ -2732,17 +2738,38 @@ flushCache(void)
 	}
 	if(plainShadow && plainTwinFailTest)
 		pipe = nil;
+	auto dropLights = [&](){
+		if(pipe != nil || (variant & VARIANT_LIGHTS) == 0)
+			return;
+		PipelineDesc bare = pd;
+		bare.variant = variant & ~(uint32)VARIANT_LIGHTS;
+		uint64 bareKey = pipelineKey(bare);
+		PipelineEntry *barepipe = plainShadow && plainTwinFailTest ? nil : getPipeline(currentShader, bare, bareKey);
+		if(barepipe == nil)
+			return;
+		lightsFailed.insert(currentShader->shaderId);
+		fprintf(stderr, "rw::metal: shader %s/%s has no light variant; it draws without the lights\n",
+			currentShader->vertexName, currentShader->fragmentName);
+		variant = bare.variant;
+		pd = bare;
+		key = bareKey;
+		pipe = barepipe;
+		lastPipeKey = key;
+		lastPipe = pipe;
+	};
+	dropLights();
 	if(pipe == nil && plainShadow){
 		plainTwinFailed.insert(currentShader->shaderId);
 		fprintf(stderr, "rw::metal: shader %s/%s has no plain shadow twin; it draws without the shadow\n",
 			currentShader->vertexName, currentShader->fragmentName);
-		variant = currentVariant;
+		variant = currentVariant | (variant & VARIANT_LIGHTS);
 		pd.variant = variant;
 		plainShadow = false;
 		key = pipelineKey(pd);
 		pipe = getPipeline(currentShader, pd, key);
 		lastPipeKey = key;
 		lastPipe = pipe;
+		dropLights();
 	}
 	if(pipe == nil && (variant & (VARIANT_RELIT | VARIANT_RELITSHADOW))){
 		relitFailed.insert(currentShader->shaderId);
@@ -2774,8 +2801,14 @@ flushCache(void)
 		faced = bindFaceFetch(e, (const float32*)&uniformObject.world, relitFetch, relitHostTwoSided);
 	if(stream)
 		[e setVertexBuffer:stream offset:0 atIndex:BUFFER_NORMALSTREAM];
+	if((variant & VARIANT_LIGHTS) && !lightsBound){
+		lightsBind(e);
+		lightsBound = true;
+	}
 	if(!encodeDraw(ctx, e, pipe, depthEqual))
 		return 0;
+	if(variant & VARIANT_LIGHTS)
+		stats.lightDraws++;
 	if(variant & VARIANT_RELIT){
 		stats.relitDraws++;
 		if(faced)
@@ -3076,13 +3109,18 @@ prewarmRelit(Shader *shader, uint32 layout, uint32 variant, int32 blend, uint32 
 	if((v & VARIANT_RELIT) == 0)
 		return;
 	uint32 derived = (v & VARIANT_RELITPRELIT) ? derivedNormalLayout(layout) : 0;
-	if((v & VARIANT_RELITPRELIT) && frameShadowSource())
-		prewarm(shader, layout, variant | VARIANT_RELITSHADOW, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
-	for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
-		uint32 sv = shadow ? v | VARIANT_RELITSHADOW : v;
-		prewarm(shader, layout, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
-		if(derived)
-			prewarm(shader, derived, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+	for(int32 light = 0; light < (frameLightsSource() && (shader->variantMask & VARIANT_LIGHTS) ? 2 : 1); light++){
+		uint32 lv = light ? VARIANT_LIGHTS : 0;
+		if((v & VARIANT_RELITPRELIT) && light)
+			prewarm(shader, layout, variant | lv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+		if((v & VARIANT_RELITPRELIT) && frameShadowSource())
+			prewarm(shader, layout, variant | VARIANT_RELITSHADOW | lv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+		for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
+			uint32 sv = (shadow ? v | VARIANT_RELITSHADOW : v) | lv;
+			prewarm(shader, layout, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+			if(derived)
+				prewarm(shader, derived, sv, blend, DEPTHFMT_D32S8, samples, COLORFMT_SCENE);
+		}
 	}
 }
 
@@ -3140,8 +3178,11 @@ hostPrewarmRelit(const HostPrewarmRecord &r)
 	d.writeMask = MTLColorWriteMaskAll;
 	d.colorFormat = COLORFMT_SCENE;
 	d.depthFormat = r.depth ? DEPTHFMT_D32S8 : DEPTHFMT_NONE;
+	int32 lightPasses = frameLightsSource() && (r.shader->variantMask & VARIANT_LIGHTS) ? 2 : 1;
+	for(int32 light = 0; light < lightPasses; light++)
 	for(int32 shadow = 0; shadow < (frameShadowSource() ? 2 : 1); shadow++){
-		d.variant = shadow ? v | VARIANT_RELITSHADOW : v;
+		uint32 lv = light ? VARIANT_LIGHTS : 0;
+		d.variant = (shadow ? v | VARIANT_RELITSHADOW : v) | lv;
 		for(i = 0; i < n; i++){
 			d.sampleCount = counts[i];
 			d.vertexLayout = r.layout;
@@ -3152,9 +3193,9 @@ hostPrewarmRelit(const HostPrewarmRecord &r)
 				if(getPipeline(r.shader, d, pipelineKey(d)) == nil)
 					ok = 0;
 			}
-			if(shadow && (v & VARIANT_RELITPRELIT)){
+			if((v & VARIANT_RELITPRELIT) && (shadow || light)){
 				PipelineDesc t = d;
-				t.variant = (r.variant & r.shader->variantMask) | VARIANT_RELITSHADOW;
+				t.variant = (r.variant & r.shader->variantMask) | (shadow ? VARIANT_RELITSHADOW : 0) | lv;
 				t.vertexLayout = r.layout;
 				if(getPipeline(r.shader, t, pipelineKey(t)) == nil)
 					ok = 0;
@@ -3162,6 +3203,12 @@ hostPrewarmRelit(const HostPrewarmRecord &r)
 		}
 	}
 	return ok;
+}
+
+void
+prewarmLightVariants(void)
+{
+	prewarmShadowTwins();
 }
 
 void
@@ -3471,12 +3518,13 @@ initState(void)
 	dropsReported.clear();
 	relitFailed.clear();
 	plainTwinFailed.clear();
+	lightsFailed.clear();
 	resetStatsLog();
 	@autoreleasepool {
 		im2dShader = Shader::create(im2dSrc, "im2dVS", "simpleFS", VARIANT_ALPHATEST);
 		if(im2dShader == nil)
 			return 0;
-		defaultShader = Shader::create(defaultSrc, "defaultVS", "simpleFS", VARIANT_ALL | VARIANT_RELITALL);
+		defaultShader = Shader::create(defaultSrc, "defaultVS", "simpleFS", VARIANT_ALL | VARIANT_RELITALL | VARIANT_LIGHTS);
 		if(defaultShader == nil)
 			return 0;
 		defaultShader_noAT = defaultShader;

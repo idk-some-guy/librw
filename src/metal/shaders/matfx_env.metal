@@ -26,7 +26,9 @@ struct EnvVertexOut
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
-	float3 plainPos [[function_constant(relitPlain)]];
+	float3 plainPos [[function_constant(plainPosition)]];
+	float3 lightPos [[function_constant(lightsLit)]];
+	float3 lightNormal [[function_constant(lightsLit)]];
 	float pointSize [[point_size]];
 };
 
@@ -42,7 +44,9 @@ struct EnvFragmentIn
 	float4 classic1 [[function_constant(relitPrelit)]];
 	float4 relitNormal [[function_constant(relitPrelit)]];
 	float3 relitPos [[function_constant(relitPrelit)]];
-	float3 plainPos [[function_constant(relitPlain)]];
+	float3 plainPos [[function_constant(plainPosition)]];
+	float3 lightPos [[function_constant(lightsLit)]];
+	float3 lightNormal [[function_constant(lightsLit)]];
 };
 
 vertex EnvVertexOut
@@ -78,8 +82,12 @@ matfxEnvVS(EnvIn in [[stage_in]],
 		out.color *= material.matColor;
 		if(relit)
 			out.sun = RelitSunPart(out.color, in.color, V.xyz, N, surfDiffuse, lights, material);
-		if(relitPlain)
+		if(plainPosition)
 			out.plainPos = RelitPlainPos(V.xyz, scene.view);
+		if(lightsLit){
+			out.lightPos = RelitPlainPos(V.xyz, scene.view);
+			out.lightNormal = N;
+		}
 	}
 	out.fog = DoFog(out.position.w, state);
 	out.pointSize = 1.0;
@@ -100,13 +108,22 @@ matfxEnvFS(EnvFragmentIn in [[stage_in]],
            const device uchar *faceVerts [[buffer(BUFFER_FACEVERTICES), function_constant(relitPrelit)]],
            constant FaceFetch &face [[buffer(BUFFER_FACELAYOUT), function_constant(relitPrelit)]],
            constant Relit &relitBlock [[buffer(BUFFER_RELIT), function_constant(relitFragmentBlock)]],
-           constant Material &material [[buffer(BUFFER_MATERIAL), function_constant(relitPrelit)]],
-           texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]])
+           constant Material &material [[buffer(BUFFER_MATERIAL), function_constant(lightsMaterial)]],
+           texture2d<float> shadowTex [[texture(TEXTURE_SHADOW), function_constant(relitTexture)]],
+           constant LTFrame &lightFrame [[buffer(BUFFER_LIGHTFRAME), function_constant(lights)]],
+           const device LTLight *lightList [[buffer(BUFFER_LIGHTLIST), function_constant(lights)]],
+           const device ushort *lightClusters [[buffer(BUFFER_LIGHTCLUSTERS), function_constant(lights)]])
 {
+	float3 n = float3(0.0, 0.0, 1.0);
 	float4 base = relitPrelit ? RelitFragment(in.color, in.classic1, in.relitNormal, in.relitPos, relitPid, faceIdx, faceVerts,
-		face, relitBlock, material, in.position, shadowTex) :
+		face, relitBlock, material, in.position, shadowTex, n) :
 		relit ? RelitShadowSun(in.color, in.sun, in.position, shadowTex) :
 		relitShadow ? RelitPlainShadow(in.color, in.position, in.plainPos, shadowTex, relitBlock) : in.color;
+	if(lights){
+		LightSurface s = relitPrelit ? LightsSurface(in.relitPos, n, lightFrame, material) :
+			lightsLit ? LightsSurface(in.lightPos, in.lightNormal, material) : LightsSurface(in.plainPos, lightFrame, material);
+		base.rgb += LightsSum(s.rel, s.N, s.albedo, s.gloss, in.position, lightFrame, lightList, lightClusters);
+	}
 	float4 pass1 = base*tex0.sample(tex0Sampler, in.tex0);
 	float4 pass2 = in.envColor*matfx.fxParams.x*tex1.sample(tex1Sampler, in.tex1);
 	pass1.rgb = mix(state.fogColor.rgb, pass1.rgb, in.fog);
