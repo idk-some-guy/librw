@@ -1108,6 +1108,46 @@ RunLightSampleChecks(Camera *camera)
 	return failures;
 }
 
+static bool
+CheckLightCountView(void)
+{
+	const char *name = "the light-count view shows a cluster's light count and leaves a frame without lights graded";
+	const int hx = 330, hy = 250, cx0 = 20, cy0 = 20;
+	metal::LightDesc l[4] = { PointLight(1, 0.0f, 0.0f, 90.0f, 20.0f), PointLight(2, 2.0f, 0.0f, 90.0f, 20.0f),
+		PointLight(3, -2.0f, 0.0f, 90.0f, 20.0f), PointLight(4, PixelX(cx0, 90.0f), PixelY(cy0, 90.0f), 90.0f, 20.0f) };
+	metal::setDebugView(metal::DEBUGVIEW_LIGHTS);
+	bool began = LightFrame(l, 4);
+	float heat[4] = {}, cold[4] = {};
+	bool read = metal::readFrameOutput(hx, hy, heat) && metal::readFrameOutput(cx0, cy0, cold);
+	int32 gx, gy, gz;
+	ClusterOf(PixelX(hx, 90.0f), PixelY(hy, 90.0f), 90.0f, &gx, &gy, &gz);
+	uint32 ids[LT_PER_CLUSTER];
+	int32 listed = Listed(gx, gy, gz, ids, LT_PER_CLUSTER);
+	int32 sx, sy, sz;
+	ClusterOf(PixelX(cx0, 90.0f), PixelY(cy0, 90.0f), 90.0f, &sx, &sy, &sz);
+	int32 skyListed = Listed(sx, sy, sz, ids, LT_PER_CLUSTER);
+	const float want[3] = { 0.0f, 2.0f/7.0f, 5.0f/7.0f };
+	bool ok = began && read && listed == 3 && skyListed > 0;
+	for(int c = 0; c < 3; c++)
+		ok = ok && fabsf(heat[c] - want[c]) <= 0.01f && fabsf(cold[c]) <= 0.01f;
+	if(!ok)
+		Detail("  prepass %d; cluster %d %d %d lists %d; sky cluster lists %d; pixel %d,%d reads %.3f %.3f %.3f, want %.3f %.3f %.3f; uncovered pixel %d,%d reads %.3f %.3f %.3f, want black (sky)\n",
+			began, gx, gy, gz, listed, skyListed, hx, hy, heat[0], heat[1], heat[2], want[0], want[1], want[2], cx0, cy0, cold[0], cold[1], cold[2]);
+	lightCamera->showRaster(0);
+	LightFrame(nil, 0);
+	uint8 *viewed = CompositeFrame();
+	metal::setDebugView(metal::DEBUGVIEW_NONE);
+	LightFrame(nil, 0);
+	uint8 *graded = CompositeFrame();
+	Raster *fb = lightCamera->frameBuffer;
+	bool same = memcmp(graded, viewed, fb->width*fb->height*4) == 0;
+	if(!same)
+		Detail("  a frame without lights under the light-count view is not the graded frame\n");
+	delete[] viewed;
+	delete[] graded;
+	return Report(ok && same, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1188,6 +1228,7 @@ RunLightChecks(Camera *camera)
 	CheckLightShadowedRelit();
 	CheckLightPlainTwinFailure();
 	CheckLightsOffIdenticalOneSample();
+	CheckLightCountView();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

@@ -83,6 +83,7 @@ bool frameLightsSource(void);
 void lightsInit(void);
 void lightsSceneBegin(Camera *cam);
 bool lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &viewProj, int32 width, int32 height);
+bool lightsViewEncode(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> output);
 void lightsBind(id<MTLRenderCommandEncoder> e);
 void lightsTerm(void);
 MTLVertexDescriptor *layoutVertexDescriptor(uint32 layout);

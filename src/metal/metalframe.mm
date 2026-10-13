@@ -1210,7 +1210,14 @@ encodeTaa(void)
 static void
 encodeDebugView(void)
 {
-	if(frame.debugView == DEBUGVIEW_NONE || frame.activeTier != TIER_MODERN || frame.debugViewPipe == nil)
+	if(frame.debugView == DEBUGVIEW_NONE || frame.activeTier != TIER_MODERN)
+		return;
+	if(frame.debugView == DEBUGVIEW_LIGHTS){
+		if(frame.sceneDepth)
+			lightsViewEncode(frameCommandBuffer(), getRasterTexture(frame.sceneDepth), frame.output);
+		return;
+	}
+	if(frame.debugViewPipe == nil)
 		return;
 	id<MTLTexture> src = frame.debugView == DEBUGVIEW_SHADOW ? frameShadowTexture() :
 		frame.debugView == DEBUGVIEW_NORMALS ? (frame.prepassValid ? frame.prepassNormal : nil) :

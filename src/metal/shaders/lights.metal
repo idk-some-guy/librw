@@ -75,3 +75,31 @@ lightCluster(constant LTFrame &f [[buffer(0)]],
 		atomic_fetch_add_explicit(&stats[0], hits - kept, memory_order_relaxed);
 	atomic_fetch_max_explicit(&stats[1], hits, memory_order_relaxed);
 }
+
+kernel void
+lightCountView(constant LTFrame &f [[buffer(0)]],
+	const device uint *counts [[buffer(1)]],
+	constant uint2 &outSize [[buffer(2)]],
+	depth2d<float, access::read> depth [[texture(0)]],
+	texture2d<float, access::write> out [[texture(1)]],
+	uint2 gid [[thread_position_in_grid]])
+{
+	if(gid.x >= outSize.x || gid.y >= outSize.y)
+		return;
+	float2 uv = (float2(gid) + 0.5f)/float2(outSize);
+	float2 px = uv*f.grid.xy;
+	uint2 dp = min(uint2(px), uint2(depth.get_width() - 1, depth.get_height() - 1));
+	float d = depth.read(dp);
+	if(d >= 1.0f){
+		out.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);
+		return;
+	}
+	float4 p = f.invProj*float4(uv.x*2.0f - 1.0f, 1.0f - uv.y*2.0f, d*2.0f - 1.0f, 1.0f);
+	uint n = counts[ltCluster(px.x, px.y, p.z/p.w, f.grid.x, f.grid.y, f.axis.w, f.grid.z)];
+	float3 c = float3(0.0f);
+	if(n > 0 && n <= 8)
+		c = mix(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), (float)(n - 1)/7.0f);
+	else if(n > 8)
+		c = mix(float3(1.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (float)(min(n, 32u) - 9)/23.0f);
+	out.write(float4(c, 1.0f), gid);
+}

@@ -42,7 +42,7 @@ static struct LightState
 	Camera *cam = nil;
 	float32 zNear = 0.1f, zFar = 1000.0f;
 	LightFrameParams params = { 0.0f, 1.0f };
-	id<MTLComputePipelineState> pipe = nil;
+	id<MTLComputePipelineState> pipe = nil, viewPipe = nil;
 	bool pipeTried = false;
 	id<MTLBuffer> clusters[MAXFRAMESINFLIGHT];
 	id<MTLBuffer> frameBuffer = nil, listBuffer = nil;
@@ -79,6 +79,11 @@ lightsInit(void)
 	lt.pipe = fn ? [ctx->device newComputePipelineStateWithFunction:fn error:&err] : nil;
 	if(lt.pipe == nil)
 		fprintf(stderr, "rw::metal: the light cluster kernel failed to build; lights are off: %s\n",
+			err ? err.localizedDescription.UTF8String : "");
+	id<MTLFunction> viewFn = lib ? [lib newFunctionWithName:@"lightCountView"] : nil;
+	lt.viewPipe = viewFn ? [ctx->device newComputePipelineStateWithFunction:viewFn error:&err] : nil;
+	if(lt.pipe && lt.viewPipe == nil)
+		fprintf(stderr, "rw::metal: the light-count view kernel failed to build: %s\n",
 			err ? err.localizedDescription.UTF8String : "");
 }
 
@@ -266,6 +271,24 @@ lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &vi
 	return true;
 }
 
+bool
+lightsViewEncode(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> output)
+{
+	if(lt.viewPipe == nil || lt.scenePass == 0 || lt.frameBuffer == nil || depth == nil || output == nil)
+		return false;
+	uint32 size[2] = { (uint32)output.width, (uint32)output.height };
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:lt.viewPipe];
+	[e setBuffer:lt.frameBuffer offset:lt.frameOffset atIndex:0];
+	[e setBuffer:lt.clusters[lt.sceneSlot] offset:CLUSTERS*LT_PER_CLUSTER*2 atIndex:1];
+	[e setBytes:size length:sizeof(size) atIndex:2];
+	[e setTexture:depth atIndex:0];
+	[e setTexture:output atIndex:1];
+	[e dispatchThreads:MTLSizeMake(size[0], size[1], 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e endEncoding];
+	return true;
+}
+
 void
 lightsBind(id<MTLRenderCommandEncoder> e)
 {
@@ -353,7 +376,7 @@ lightsTerm(void)
 {
 	clearSubmission();
 	lt.cam = nil;
-	lt.pipe = nil;
+	lt.pipe = lt.viewPipe = nil;
 	lt.pipeTried = false;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
 		lt.clusters[i] = nil;
