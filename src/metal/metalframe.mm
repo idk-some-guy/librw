@@ -11,6 +11,7 @@
 #include "metalprepass.h"
 #include "metaltemporal.h"
 #include "metalshadow.h"
+#include "metallights.h"
 #include "metalraytrace.h"
 #include <algorithm>
 #include <string>
@@ -1478,6 +1479,25 @@ frameShadowPassPlanned(void)
 		sun.scale, sun.present);
 }
 
+bool
+frameLightShadowsPlanned(void)
+{
+	return shLightShadowsPlanned(frame.settings.lights == LIGHTS_SHADOWED, ltBudget(frame.settings.shadowedLights, frame.settings.shadowQuality),
+		(int)lightsCandidates(), rtShadowsSupported(), frame.activeTier == TIER_MODERN);
+}
+
+bool32
+lightShadowsPlanned(void)
+{
+	return frameLightShadowsPlanned();
+}
+
+bool
+frameCasterPassPlanned(void)
+{
+	return shCastersRun(frameShadowPassPlanned(), frameLightShadowsPlanned());
+}
+
 void
 setShadowFactorForTest(float32 v)
 {
@@ -2126,7 +2146,7 @@ frameRayWork(void)
 	ShadowSunInputs sun = shadowSunInputs();
 	int32 q = frame.settings.shadowQuality;
 	bool casters = frameShadowPassPlanned();
-	rtEncodeFrame(frameCommandBuffer(), casters);
+	rtEncodeFrame(frameCommandBuffer(), frameCasterPassPlanned());
 	if(!casters || !frame.prepassValid)
 		return;
 	const PrepassMatrices &m = prepassMatrices();

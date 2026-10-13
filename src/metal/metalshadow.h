@@ -164,6 +164,18 @@ shPassRuns(int quality, bool rtSupported, bool modern, bool prepassRan, float to
 	return shSourceOn(quality, rtSupported, modern) && prepassRan && shSunUp(towardSunZ) && sunScale > 0.0f && lightPresent > 0.0f;
 }
 
+static inline bool
+shLightShadowsPlanned(bool lightsShadowed, int budget, int candidates, bool rtSupported, bool modern)
+{
+	return lightsShadowed && budget > 0 && candidates > 0 && rtSupported && modern;
+}
+
+static inline bool
+shCastersRun(bool sunPass, bool lightShadows)
+{
+	return sunPass || lightShadows;
+}
+
 static inline SHAccum
 shAccumulate(float prev, float length, float raw, float maxHistory)
 {

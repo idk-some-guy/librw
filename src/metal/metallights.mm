@@ -51,6 +51,8 @@ static struct LightState
 	int32 sceneSlot = -1, scenePass = 0;
 	uint32 lastIds[LT_MAX_LIGHTS];
 	uint32 lastIdCount = 0;
+	uint64 candFrame = 0;
+	uint32 candCur = 0, candPrev = 0;
 	int32 passes = 0, waited = 0;
 	std::mutex lock;
 	ClusterResult result = { 0, 0, 0, 0 };
@@ -127,9 +129,28 @@ clearSubmission(void)
 	lt.submitted = lt.dropped = 0;
 }
 
+static void
+rollCandidates(void)
+{
+	uint64 f = getFrameId();
+	if(f == lt.candFrame)
+		return;
+	lt.candPrev = f == lt.candFrame + 1 ? lt.candCur : 0;
+	lt.candCur = 0;
+	lt.candFrame = f;
+}
+
+uint32
+lightsCandidates(void)
+{
+	rollCandidates();
+	return lt.candPrev;
+}
+
 void
 lightsSceneBegin(Camera *cam)
 {
+	rollCandidates();
 	clearSubmission();
 	lt.cam = cam;
 	lt.scenePass = 0;
@@ -152,7 +173,11 @@ void
 setLights(const LightDesc *lights, int32 n)
 {
 	clearSubmission();
-	if(lights == nil || n <= 0 || !frameLightsLive())
+	if(!frameLightsLive())
+		return;
+	rollCandidates();
+	lt.candCur = 0;
+	if(lights == nil || n <= 0)
 		return;
 	float32 eye[3];
 	cameraEye(eye);
@@ -178,6 +203,8 @@ setLights(const LightDesc *lights, int32 n)
 		if(!(len2 > 0.0f) || !std::isfinite(len2))
 			d.flags &= ~(uint32)LIGHT_SPOT;
 		lt.kept.push_back(d);
+		if(d.radius > 0.0f)
+			lt.candCur++;
 	}
 }
 

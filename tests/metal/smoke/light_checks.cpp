@@ -1305,6 +1305,64 @@ CheckLightCountView(void)
 	return Report(ok && same, name);
 }
 
+static bool
+CheckLightInstancesAtNight(void)
+{
+	const char *name = "with the sun below the horizon and a shadowed light, the instance level is built and the sun pass is not";
+	metal::RenderSettings saved = metal::getRenderSettings(), s = saved;
+	s.shadowQuality = metal::SHADOWQUALITY_MEDIUM;
+	s.shadowedLights = 1;
+	s.lights = metal::LIGHTS_SHADOWED;
+	metal::setRenderSettings(&s);
+	metal::RelitParams relitSaved = metal::getRelitParams(), rp = relitSaved;
+	rp.sunScale = 1.0f;
+	metal::setRelitParams(&rp);
+	Light *sun = Light::create(Light::DIRECTIONAL);
+	Frame *sunFrame = Frame::create();
+	sunFrame->updateObjects();
+	sun->setFrame(sunFrame);
+	metal::setSunLight(sun);
+	metal::LightDesc l = PointLight(61, 0.0f, 0.0f, 20.0f, 30.0f);
+	RGBA sky = { 64, 64, 64, 255 };
+	auto frame = [&](const metal::LightDesc *lights, int32 n){
+		metal::beginScene(lightCamera);
+		WorldBegin(sky);
+		SetRenderState(VERTEXALPHA, 0);
+		metal::setLights(lights, n);
+		bool began = metal::beginPrepass() != 0;
+		if(began){
+			metal::addShadowCaster(backdrop, metal::SHADOWCASTER_STATIC);
+			backdrop->render();
+			metal::endPrepass();
+		}
+		backdrop->render();
+		metal::endScene(nil);
+		WorldEnd();
+		return began;
+	};
+	bool began = frame(&l, 1);
+	began = frame(&l, 1) && began;
+	metal::RayStats on = metal::getRayStats();
+	SetMode(metal::LIGHTS_ON);
+	began = frame(&l, 1) && began;
+	began = frame(&l, 1) && began;
+	metal::RayStats off = metal::getRayStats();
+	SetMode(metal::LIGHTS_SHADOWED);
+	began = frame(nil, 0) && began;
+	began = frame(nil, 0) && began;
+	metal::RayStats none = metal::getRayStats();
+	metal::setSunLight(nil);
+	sun->destroy();
+	sunFrame->destroy();
+	metal::setRelitParams(&relitSaved);
+	metal::setRenderSettings(&saved);
+	bool ok = began && on.instances > 0 && on.raysPerFrame == 0 && off.instances == 0 && none.instances == 0;
+	if(!ok)
+		Detail("  prepass %d; shadowed light: instances %u rays %u (want some, 0); lights on: instances %u (want 0); no lights: instances %u (want 0)\n",
+			began, on.instances, on.raysPerFrame, off.instances, none.instances);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1389,6 +1447,7 @@ RunLightChecks(Camera *camera)
 	CheckLightPlainTwinFailure();
 	CheckLightsOffIdenticalOneSample();
 	CheckLightCountView();
+	CheckLightInstancesAtNight();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

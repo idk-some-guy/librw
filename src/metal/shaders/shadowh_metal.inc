@@ -165,6 +165,18 @@ const char *shadowh_metal_src =
 "	return shSourceOn(quality, rtSupported, modern) && prepassRan && shSunUp(towardSunZ) && sunScale > 0.0f && lightPresent > 0.0f;\n"
 "}\n"
 
+"static inline bool\n"
+"shLightShadowsPlanned(bool lightsShadowed, int budget, int candidates, bool rtSupported, bool modern)\n"
+"{\n"
+"	return lightsShadowed && budget > 0 && candidates > 0 && rtSupported && modern;\n"
+"}\n"
+
+"static inline bool\n"
+"shCastersRun(bool sunPass, bool lightShadows)\n"
+"{\n"
+"	return sunPass || lightShadows;\n"
+"}\n"
+
 "static inline SHAccum\n"
 "shAccumulate(float prev, float length, float raw, float maxHistory)\n"
 "{\n"

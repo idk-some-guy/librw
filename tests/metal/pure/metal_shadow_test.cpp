@@ -166,6 +166,22 @@ TestGates(void)
 }
 
 static void
+TestLightShadowsPlanned(void)
+{
+	using namespace rw::metal;
+	CHECK(shLightShadowsPlanned(true, 1, 1, true, true));
+	CHECK(shLightShadowsPlanned(true, 8, 5, true, true));
+	CHECK(!shLightShadowsPlanned(false, 4, 3, true, true));
+	CHECK(!shLightShadowsPlanned(true, 0, 3, true, true));
+	CHECK(!shLightShadowsPlanned(true, 4, 0, true, true));
+	CHECK(!shLightShadowsPlanned(true, 4, 3, false, true));
+	CHECK(!shLightShadowsPlanned(true, 4, 3, true, false));
+	CHECK(!shLightShadowsPlanned(true, -1, 3, true, true));
+	CHECK(shCastersRun(true, false) && shCastersRun(false, true) && shCastersRun(true, true));
+	CHECK(!shCastersRun(false, false));
+}
+
+static void
 TestOrigin(void)
 {
 	SHVec3 p = { 10.0f, 20.0f, 3.0f }, up = { 0.0f, 0.0f, 1.0f };
@@ -465,6 +481,7 @@ main(void)
 	TestClampBoxNeeded();
 	TestClampBoxStart();
 	TestGates();
+	TestLightShadowsPlanned();
 	TestOrigin();
 	TestPhase();
 	TestFacesAway();

@@ -428,6 +428,7 @@ void setShadowOwner(uint32 owner);
 void requestShadowLevel(Atomic *atomic);
 void setShadowCaster(bool32 on);
 bool32 shadowSourceOn(void);
+bool32 lightShadowsPlanned(void);
 void setShadowCasterMaxRadius(float32 metres);
 void setRelitTwoSided(bool32 on);
 void beginReactive(void);
