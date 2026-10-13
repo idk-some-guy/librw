@@ -174,6 +174,137 @@ TestEmissiveLuma(void)
 	CHECK(sizeof(LTDraw) == 16);
 }
 
+static void
+TestPickShadowed(void)
+{
+	int out[LT_MAX_SHADOWED];
+	LTCand a[4] = {};
+	a[0].score = 5.0f; a[0].id = 10;
+	a[1].score = 1.0f; a[1].id = 11; a[1].flags = LT_CAND_PINNED;
+	a[2].score = 3.0f; a[2].id = 12;
+	CHECK(ltPickShadowed(a, 3, 1, out) == 1);
+	CHECK(out[0] == 1);
+	CHECK(ltPickShadowed(a, 3, 2, out) == 2);
+	CHECK(out[0] == 1 && out[1] == 0);
+	CHECK(ltPickShadowed(a, 3, 0, out) == 0);
+	CHECK(ltPickShadowed(a, 0, 4, out) == 0);
+	CHECK(ltPickShadowed(a, 3, 9, out) == 3);
+	CHECK(out[0] == 1 && out[1] == 0 && out[2] == 2);
+
+	LTCand g[3] = {};
+	g[0].score = 4.0f; g[0].group = 7;
+	g[1].score = 4.0f; g[1].group = 7;
+	g[2].score = 2.0f;
+	CHECK(ltPickShadowed(g, 3, 2, out) == 2);
+	CHECK(out[0] == 0 && out[1] == 2);
+	CHECK(ltPickShadowed(g, 3, 8, out) == 2);
+
+	LTCand pg[3] = {};
+	pg[0].flags = LT_CAND_PINNED; pg[0].group = 3; pg[0].score = 1.0f;
+	pg[1].flags = LT_CAND_PINNED; pg[1].group = 3; pg[1].score = 1.0f;
+	pg[2].score = 9.0f; pg[2].group = 3;
+	CHECK(ltPickShadowed(pg, 3, 3, out) == 1);
+	CHECK(out[0] == 0);
+
+	LTCand t[2] = {};
+	t[0].score = 10.0f;
+	t[1].score = 6.0f; t[1].held = 3;
+	CHECK(ltPickShadowed(t, 2, 1, out) == 1);
+	CHECK(out[0] == 1);
+	t[1].score = 4.0f;
+	CHECK(ltPickShadowed(t, 2, 1, out) == 1);
+	CHECK(out[0] == 0);
+	t[1].score = 5.0f;
+	CHECK(ltPickShadowed(t, 2, 1, out) == 1);
+	CHECK(out[0] == 1);
+	t[1].held = 0;
+	t[1].score = 6.0f;
+	CHECK(ltPickShadowed(t, 2, 1, out) == 1);
+	CHECK(out[0] == 0);
+	LTCand many[12] = {};
+	int wide[LT_MAX_SHADOWED + 4];
+	for(int i = 0; i < 12; i++)
+		many[i].score = 1.0f + (float)i;
+	CHECK(ltPickShadowed(many, 12, 12, wide) == LT_MAX_SHADOWED);
+	CHECK(wide[0] == 11 && wide[LT_MAX_SHADOWED - 1] == 4);
+	LTCand z[2] = {};
+	z[0].score = 0.0f;
+	z[1].score = NAN;
+	CHECK(ltPickShadowed(z, 2, 4, out) == 0);
+}
+
+static void
+TestHoldNext(void)
+{
+	CHECK(ltHoldNext(0, true, 30) == 30);
+	CHECK(ltHoldNext(12, true, 30) == 30);
+	CHECK(ltHoldNext(30, false, 30) == 29);
+	CHECK(ltHoldNext(1, false, 30) == 0);
+	CHECK(ltHoldNext(0, false, 30) == 0);
+	CHECK(ltHoldNext(5, true, 0) == 0);
+}
+
+static void
+TestRayWanted(void)
+{
+	LTVec3 light = {0.0f, 0.0f, 10.0f}, down = {0.0f, 0.0f, -1.0f};
+	LTVec3 under = {0.0f, 0.0f, 0.0f}, side = {10.0f, 0.0f, 0.0f};
+	LTVec3 far = {0.0f, 0.0f, -5.0f}, wide = {40.0f, 0.0f, 0.0f};
+	float cosOuter = cosf(0.5f);
+	CHECK(ltRayWanted(under, light, 20.0f, down, cosOuter, true));
+	CHECK(!ltRayWanted(far, light, 14.0f, down, cosOuter, true));
+	CHECK(ltRayWanted(far, light, 15.5f, down, cosOuter, true));
+	CHECK(!ltRayWanted(side, light, 20.0f, down, cosOuter, true));
+	CHECK(ltRayWanted(side, light, 20.0f, down, cosOuter, false));
+	CHECK(!ltRayWanted(wide, light, 20.0f, down, -2.0f, false));
+	CHECK(!ltRayWanted(under, light, 0.0f, down, -2.0f, false));
+	CHECK(!ltRayWanted(under, light, NAN, down, -2.0f, false));
+	CHECK(ltRayWanted(light, light, 5.0f, down, cosOuter, true));
+	LTVec3 up = {0.0f, 0.0f, 1.0f};
+	CHECK(!ltRayWanted(under, light, 20.0f, up, cosOuter, true));
+	LTVec3 edgeIn = {10.0f*tanf(0.45f), 0.0f, 0.0f}, edgeOut = {10.0f*tanf(0.55f), 0.0f, 0.0f};
+	CHECK(ltRayWanted(edgeIn, light, 30.0f, down, cosOuter, true));
+	CHECK(!ltRayWanted(edgeOut, light, 30.0f, down, cosOuter, true));
+}
+
+static void
+TestRayLength(void)
+{
+	CHECK(Near(ltRayLength(10.0f, 0.1f), 9.9f, 1e-6f));
+	CHECK(ltRayLength(0.05f, 0.1f) == 0.0f);
+	CHECK(ltRayLength(0.0f, 0.1f) == 0.0f);
+	CHECK(Near(ltRayLength(10.0f, 0.0f), 10.0f, 1e-6f));
+}
+
+static void
+TestDisc(void)
+{
+	LTVec3 d = {0.0f, 0.6f, 0.8f};
+	LTVec3 r = ltDiscToward(d, 0.0f, 10.0f, 0.7f, 0.3f);
+	CHECK(r.x == d.x && r.y == d.y && r.z == d.z);
+	r = ltDiscToward(d, 0.5f, 0.0f, 0.7f, 0.3f);
+	CHECK(r.x == d.x && r.y == d.y && r.z == d.z);
+	r = ltDiscToward(d, 0.5f, 10.0f, 0.0f, 0.3f);
+	CHECK(Near(r.x, d.x, 1e-6f) && Near(r.y, d.y, 1e-6f) && Near(r.z, d.z, 1e-6f));
+	float maxAngle = atanf(0.5f/10.0f);
+	for(int i = 0; i < 16; i++){
+		float u1 = (float)i/15.0f, u2 = (float)((i*7)%16)/15.0f;
+		r = ltDiscToward(d, 0.5f, 10.0f, u1, u2);
+		float len = sqrtf(r.x*r.x + r.y*r.y + r.z*r.z);
+		CHECK(Near(len, 1.0f, 1e-5f));
+		float c = r.x*d.x + r.y*d.y + r.z*d.z;
+		CHECK(acosf(fminf(c, 1.0f)) <= maxAngle + 1e-4f);
+	}
+	r = ltDiscToward(d, 0.5f, 10.0f, 1.0f, 0.3f);
+	float c = r.x*d.x + r.y*d.y + r.z*d.z;
+	CHECK(Near(acosf(fminf(c, 1.0f)), maxAngle, 1e-3f));
+	LTVec3 a = ltDiscToward(d, 0.5f, 10.0f, 1.0f, 0.0f), b = ltDiscToward(d, 0.5f, 10.0f, 1.0f, 0.5f);
+	CHECK(!Near(a.x, b.x, 1e-3f) || !Near(a.y, b.y, 1e-3f));
+	LTVec3 ax = {1.0f, 0.0f, 0.0f};
+	r = ltDiscToward(ax, 0.5f, 10.0f, 1.0f, 0.25f);
+	CHECK(Near(sqrtf(r.x*r.x + r.y*r.y + r.z*r.z), 1.0f, 1e-5f));
+}
+
 int
 main(void)
 {
@@ -188,6 +319,11 @@ main(void)
 	TestScore();
 	TestBudget();
 	TestEmissiveLuma();
+	TestPickShadowed();
+	TestHoldNext();
+	TestRayWanted();
+	TestRayLength();
+	TestDisc();
 	if(failures == 0)
 		printf("all lights tests passed\n");
 	return failures != 0;

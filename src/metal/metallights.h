@@ -6,6 +6,8 @@
 #define LT_POW pow
 #define LT_LOG log
 #define LT_EXP exp
+#define LT_COS cos
+#define LT_SIN sin
 #define LT_FLOOR floor
 #define LT_MIN fmin
 #define LT_MAX fmax
@@ -21,6 +23,8 @@ typedef float4x4 LTMatrix;
 #define LT_POW powf
 #define LT_LOG logf
 #define LT_EXP expf
+#define LT_COS cosf
+#define LT_SIN sinf
 #define LT_FLOOR floorf
 #define LT_MIN fminf
 #define LT_MAX fmaxf
@@ -180,6 +184,113 @@ ltBudget(int setting, int shadowQuality)
 		return 0;
 	}
 	return setting > LT_MAX_SHADOWED ? LT_MAX_SHADOWED : setting;
+}
+
+#ifndef __METAL_VERSION__
+#define LT_CAND_PINNED 1u
+
+struct LTCand { float score; unsigned id; unsigned flags; unsigned group; int held; };
+
+static inline int
+ltPickShadowed(const LTCand *c, int n, int budget, int out[LT_MAX_SHADOWED])
+{
+	if(budget > LT_MAX_SHADOWED)
+		budget = LT_MAX_SHADOWED;
+	if(n > LT_MAX_LIGHTS)
+		n = LT_MAX_LIGHTS;
+	if(budget <= 0 || n <= 0)
+		return 0;
+	bool taken[LT_MAX_LIGHTS] = {};
+	unsigned groups[LT_MAX_SHADOWED];
+	int count = 0, ngroups = 0;
+	for(int i = 0; i < n && count < budget; i++){
+		if(!(c[i].flags & LT_CAND_PINNED))
+			continue;
+		bool dup = false;
+		for(int g = 0; c[i].group && g < ngroups; g++)
+			dup = dup || groups[g] == c[i].group;
+		if(dup)
+			continue;
+		taken[i] = true;
+		if(c[i].group)
+			groups[ngroups++] = c[i].group;
+		out[count++] = i;
+	}
+	float bestUnheld = 0.0f;
+	for(int i = 0; i < n; i++)
+		if(!taken[i] && c[i].held <= 0 && c[i].score > bestUnheld)
+			bestUnheld = c[i].score;
+	for(int pass = 0; pass < 2; pass++){
+		while(count < budget){
+			int best = -1;
+			for(int i = 0; i < n; i++){
+				if(taken[i] || !(c[i].score > 0.0f))
+					continue;
+				if(pass == 0 && !(c[i].held > 0 && c[i].score >= 0.5f*bestUnheld))
+					continue;
+				bool dup = false;
+				for(int g = 0; c[i].group && g < ngroups; g++)
+					dup = dup || groups[g] == c[i].group;
+				if(dup)
+					continue;
+				if(best < 0 || c[i].score > c[best].score)
+					best = i;
+			}
+			if(best < 0)
+				break;
+			taken[best] = true;
+			if(c[best].group)
+				groups[ngroups++] = c[best].group;
+			out[count++] = best;
+		}
+	}
+	return count;
+}
+
+static inline int
+ltHoldNext(int held, bool picked, int holdFrames)
+{
+	if(picked)
+		return holdFrames > 0 ? holdFrames : 0;
+	return held > 0 ? held - 1 : 0;
+}
+#endif
+
+static inline bool
+ltRayWanted(LTVec3 p, LTVec3 lightPos, float radius, LTVec3 dir, float cosOuter, bool spot)
+{
+	if(!(radius > 0.0f))
+		return false;
+	float vx = p.x - lightPos.x, vy = p.y - lightPos.y, vz = p.z - lightPos.z;
+	float d2 = vx*vx + vy*vy + vz*vz;
+	if(!(d2 <= radius*radius))
+		return false;
+	if(!spot || d2 == 0.0f)
+		return true;
+	return (vx*dir.x + vy*dir.y + vz*dir.z) >= cosOuter*LT_SQRT(d2);
+}
+
+static inline float
+ltRayLength(float dist, float backoff)
+{
+	return LT_MAX(dist - backoff, 0.0f);
+}
+
+static inline LTVec3
+ltDiscToward(LTVec3 toLight, float softness, float dist, float u1, float u2)
+{
+	if(!(softness > 0.0f) || !(dist > 0.0f))
+		return toLight;
+	LTVec3 a = toLight.x*toLight.x < 0.25f ? LTVec3{1.0f, 0.0f, 0.0f} : LTVec3{0.0f, 1.0f, 0.0f};
+	LTVec3 t1 = {toLight.y*a.z - toLight.z*a.y, toLight.z*a.x - toLight.x*a.z, toLight.x*a.y - toLight.y*a.x};
+	float inv1 = 1.0f/LT_SQRT(t1.x*t1.x + t1.y*t1.y + t1.z*t1.z);
+	t1.x *= inv1; t1.y *= inv1; t1.z *= inv1;
+	LTVec3 t2 = {toLight.y*t1.z - toLight.z*t1.y, toLight.z*t1.x - toLight.x*t1.z, toLight.x*t1.y - toLight.y*t1.x};
+	float r = softness*LT_SQRT(u1), phi = 6.2831853f*u2;
+	float s = r*LT_COS(phi), t = r*LT_SIN(phi);
+	LTVec3 v = {toLight.x*dist + t1.x*s + t2.x*t, toLight.y*dist + t1.y*s + t2.y*t, toLight.z*dist + t1.z*s + t2.z*t};
+	float inv = 1.0f/LT_SQRT(v.x*v.x + v.y*v.y + v.z*v.z);
+	return LTVec3{v.x*inv, v.y*inv, v.z*inv};
 }
 
 #endif
