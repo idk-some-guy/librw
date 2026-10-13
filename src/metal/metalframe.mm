@@ -180,6 +180,7 @@ struct FrameState
 	bool shadowShownReal = false;
 	char tail[1024] = "";
 	char lastTail[1024] = "";
+	char exitTail[1280] = "";
 };
 
 static FrameState frame;
@@ -360,8 +361,20 @@ getFrameInfo(void)
 	return f;
 }
 
-const char*
-frameStatsTail(void)
+static void
+appendLightsTail(char *buf, size_t size)
+{
+	LightStats l = getLightStats();
+	char ms[32] = "-";
+	if(l.clusterMs >= 0.0f)
+		snprintf(ms, sizeof(ms), "%.2fms", l.clusterMs);
+	size_t n = strlen(buf);
+	snprintf(buf + n, size - n, " lights %u dropped %u clusterloss %u percluster %u cluster %s",
+		l.submitted, l.dropped, l.clusterLoss, l.maxPerCluster, ms);
+}
+
+static const char*
+frameBaseTail(void)
 {
 	FrameInfo f = getFrameInfo();
 	RayStats r = getRayStats();
@@ -387,9 +400,21 @@ frameStatsTail(void)
 }
 
 const char*
+frameStatsTail(void)
+{
+	frameBaseTail();
+	appendLightsTail(frame.tail, sizeof(frame.tail));
+	return frame.tail;
+}
+
+const char*
 frameLastStatsTail(void)
 {
-	return frame.lastTail[0] ? frame.lastTail : " tier none";
+	if(!frame.lastTail[0])
+		return " tier none";
+	snprintf(frame.exitTail, sizeof(frame.exitTail), "%s", frame.lastTail);
+	appendLightsTail(frame.exitTail, sizeof(frame.exitTail));
+	return frame.exitTail;
 }
 
 uint32
@@ -1341,7 +1366,7 @@ endScene(const GradeParams *params)
 		frame.shadowShownReal = frame.testShadow == nil && frame.shadow != nil;
 		encodeGrade(params);
 		if(frame.internalWidth > 0)
-			snprintf(frame.lastTail, sizeof(frame.lastTail), "%s", frameStatsTail());
+			snprintf(frame.lastTail, sizeof(frame.lastTail), "%s", frameBaseTail());
 		frame.phase = phaseOnEndScene(frame.phase);
 		PassTarget t = { frame.mainColor, frame.mainDepth };
 		PassClear c = PassClear();

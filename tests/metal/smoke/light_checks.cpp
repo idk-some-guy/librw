@@ -347,6 +347,77 @@ CheckLightStatsScene(void)
 }
 
 static bool
+CheckLightClusterLoss(void)
+{
+	const char *name = "a cluster past 32 lights keeps its 32 brightest and counts the loss";
+	enum { N = 40 };
+	metal::LightDesc lights[N];
+	for(int i = 0; i < N; i++){
+		lights[i] = PointLight((uint32)i, 3.0f, 4.0f, 20.0f, 0.05f);
+		lights[i].color[0] = lights[i].color[1] = lights[i].color[2] = 0.5f + 0.05f*(float)i;
+	}
+	bool began = LightFrame(lights, N);
+	int32 cx, cy, cz;
+	ClusterOf(3.0f, 4.0f, 20.0f, &cx, &cy, &cz);
+	uint32 ids[LT_PER_CLUSTER];
+	int32 listed = Listed(cx, cy, cz, ids, LT_PER_CLUSTER);
+	metal::LightStats st = metal::getLightStats();
+	bool present[N];
+	memset(present, 0, sizeof(present));
+	for(int32 i = 0; i < listed && i < LT_PER_CLUSTER; i++)
+		if(ids[i] < N)
+			present[ids[i]] = true;
+	bool dimGone = true, brightKept = true;
+	for(int i = 0; i < N; i++){
+		if(i < N - LT_PER_CLUSTER && present[i])
+			dimGone = false;
+		if(i >= N - LT_PER_CLUSTER && !present[i])
+			brightKept = false;
+	}
+	bool ok = began && listed == LT_PER_CLUSTER && dimGone && brightKept && st.clusterLoss == N - LT_PER_CLUSTER &&
+		st.maxPerCluster == N;
+	if(!ok)
+		Detail("  prepass %d; cluster %d %d %d lists %d (want %d); the %d dimmest all absent %d, the %d brightest all present %d; lost %u (want %d), worst %u (want %d)\n",
+			began, cx, cy, cz, listed, LT_PER_CLUSTER, N - LT_PER_CLUSTER, dimGone, LT_PER_CLUSTER, brightKept,
+			st.clusterLoss, N - LT_PER_CLUSTER, st.maxPerCluster, N);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightStatsLine(void)
+{
+	const char *name = "the stats line counts dropped lights and cluster loss";
+	enum { STACKED = 40, FILLER = 260, N = STACKED + FILLER };
+	std::vector<metal::LightDesc> lights;
+	for(int i = 0; i < STACKED; i++){
+		metal::LightDesc d = PointLight((uint32)i, 3.0f, 4.0f, 20.0f, 0.05f);
+		d.color[0] = d.color[1] = d.color[2] = 0.5f + 0.05f*(float)i;
+		lights.push_back(d);
+	}
+	for(int j = 0; j < FILLER; j++)
+		lights.push_back(PointLight((uint32)(100 + j), -35.0f + 0.27f*(float)j, 3.0f*(float)(j % 9 - 4), 40.0f + 0.001f*(float)j, 0.05f));
+	bool began = LightFrame(lights.data(), N);
+	int32 cx, cy, cz;
+	ClusterOf(3.0f, 4.0f, 20.0f, &cx, &cy, &cz);
+	uint32 ids[LT_PER_CLUSTER];
+	Listed(cx, cy, cz, ids, LT_PER_CLUSTER);
+	metal::LightStats st = metal::getLightStats();
+	metal::logStats();
+	unsigned submitted = 0, dropped = 0, loss = 0, worst = 0;
+	char ms[32] = "";
+	const char *tail = strstr(metal::getStatsLine(), " lights ");
+	bool parsed = tail && sscanf(tail, " lights %u dropped %u clusterloss %u percluster %u cluster %31s",
+		&submitted, &dropped, &loss, &worst, ms) == 5;
+	bool ok = began && parsed && submitted == N && dropped == FILLER + STACKED - 256 && loss == STACKED - LT_PER_CLUSTER &&
+		worst == STACKED && strcmp(ms, "-") != 0 && st.dropped == dropped && st.clusterLoss == loss;
+	if(!ok)
+		Detail("  prepass %d; line \"%s\"; lights %u dropped %u clusterloss %u percluster %u cluster %s (want %d, %d, %d, %d, a time); hook: dropped %u lost %u\n",
+			began, metal::getStatsLine(), submitted, dropped, loss, worst, ms, N, N - 256, STACKED - LT_PER_CLUSTER, STACKED,
+			st.dropped, st.clusterLoss);
+	return Report(ok, name);
+}
+
+static bool
 CheckLightSceneCamera(void)
 {
 	const char *name = "lights submitted before the camera's update bin with the scene's camera";
@@ -1214,6 +1285,8 @@ RunLightChecks(Camera *camera)
 	CheckLightNoPass();
 	CheckLightSlotPerFrame();
 	CheckLightStatsScene();
+	CheckLightClusterLoss();
+	CheckLightStatsLine();
 	CheckLightSceneCamera();
 	CheckLightLate();
 	CheckLightDegenerate();
