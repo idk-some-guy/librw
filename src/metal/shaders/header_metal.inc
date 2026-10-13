@@ -281,7 +281,7 @@ const char *header_metal_src =
 "}\n"
 
 "static inline float\n"
-"ltEmissiveLuma(float luma, float scale)\n"
+"ltEmissivePeak(float luma, float scale)\n"
 "{\n"
 "	float t = ltSaturate((luma - 0.6f)/0.3f);\n"
 "	return 1.0f + (scale - 1.0f)*t*t*(3.0f - 2.0f*t);\n"
@@ -290,7 +290,7 @@ const char *header_metal_src =
 "static inline float\n"
 "ltEmissiveGate(float r, float g, float b, float scale)\n"
 "{\n"
-"	return ltEmissiveLuma(LT_MAX(LT_MAX(r, g), b), scale);\n"
+"	return ltEmissivePeak(LT_MAX(LT_MAX(r, g), b), scale);\n"
 "}\n"
 
 "static inline float\n"

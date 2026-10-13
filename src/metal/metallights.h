@@ -68,7 +68,7 @@ ltSaturate(float v)
 }
 
 static inline float
-ltEmissiveLuma(float luma, float scale)
+ltEmissivePeak(float luma, float scale)
 {
 	float t = ltSaturate((luma - 0.6f)/0.3f);
 	return 1.0f + (scale - 1.0f)*t*t*(3.0f - 2.0f*t);
@@ -77,7 +77,7 @@ ltEmissiveLuma(float luma, float scale)
 static inline float
 ltEmissiveGate(float r, float g, float b, float scale)
 {
-	return ltEmissiveLuma(LT_MAX(LT_MAX(r, g), b), scale);
+	return ltEmissivePeak(LT_MAX(LT_MAX(r, g), b), scale);
 }
 
 static inline float
