@@ -10,6 +10,7 @@
 #include "metalstate.h"
 #include "metalframe.h"
 #include "metallights.h"
+#include "metalraytrace.h"
 #include "shaders/lightsh_metal.inc"
 #include "shaders/lights_metal.inc"
 
@@ -53,6 +54,9 @@ static struct LightState
 	uint32 lastIdCount = 0;
 	uint64 candFrame = 0;
 	uint32 candCur = 0, candPrev = 0;
+	std::vector<LTCand> cands;
+	std::vector<std::pair<uint32, int32>> held;
+	uint32 slots = 0;
 	int32 passes = 0, waited = 0;
 	std::mutex lock;
 	ClusterResult result = { 0, 0, 0, 0 };
@@ -127,6 +131,7 @@ clearSubmission(void)
 {
 	lt.kept.clear();
 	lt.submitted = lt.dropped = 0;
+	lt.slots = 0;
 }
 
 static void
@@ -206,6 +211,64 @@ setLights(const LightDesc *lights, int32 n)
 		if(d.radius > 0.0f)
 			lt.candCur++;
 	}
+}
+
+uint32
+lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out)
+{
+	uint32 n = (uint32)lt.kept.size();
+	if(budget <= 0 || n == 0){
+		lt.held.clear();
+		lt.slots = 0;
+		return 0;
+	}
+	const float32 *m = (const float32*)&view, *vp = (const float32*)&viewProj;
+	float32 eye[3];
+	for(int i = 0; i < 3; i++)
+		eye[i] = -(m[i*4]*m[12] + m[i*4 + 1]*m[13] + m[i*4 + 2]*m[14]);
+	lt.cands.resize(n);
+	for(uint32 i = 0; i < n; i++){
+		const LightDesc &d = lt.kept[i];
+		float32 dx = d.pos[0] - eye[0], dy = d.pos[1] - eye[1], dz = d.pos[2] - eye[2];
+		bool seen = d.radius > 0.0f && ltInView(vp, LTVec3{ d.pos[0], d.pos[1], d.pos[2] }, d.radius);
+		float32 intensity = 0.2126f*d.color[0] + 0.7152f*d.color[1] + 0.0722f*d.color[2];
+		int32 held = 0;
+		for(const auto &h : lt.held)
+			if(h.first == d.id)
+				held = h.second;
+		lt.cands[i] = { seen ? ltScore(intensity, dx*dx + dy*dy + dz*dz) : 0.0f, d.id, (d.flags & LIGHT_PINNED) ? LT_CAND_PINNED : 0u, d.group, held };
+	}
+	int picked[LT_MAX_SHADOWED];
+	int count = ltPickShadowed(lt.cands.data(), (int)n, budget, picked);
+	std::vector<std::pair<uint32, int32>> next;
+	for(uint32 i = 0; i < n; i++){
+		bool was = false;
+		for(int k = 0; k < count; k++)
+			was = was || picked[k] == (int)i;
+		int32 h = ltHoldNext(lt.cands[i].held, was, LT_HOLD_FRAMES);
+		if(h > 0)
+			next.push_back({ lt.cands[i].id, h });
+	}
+	lt.held.swap(next);
+	for(int k = 0; k < count; k++){
+		const LightDesc &d = lt.kept[picked[k]];
+		float32 sum[3] = { 0.0f, 0.0f, 0.0f };
+		int32 members = 0;
+		for(const LightDesc &g : lt.kept)
+			if(&g == &d || (d.group != 0 && g.group == d.group && g.radius > 0.0f)){
+				sum[0] += g.pos[0];
+				sum[1] += g.pos[1];
+				sum[2] += g.pos[2];
+				members++;
+			}
+		float32 inv = 1.0f/(float32)members;
+		out[k].posRadius = simd_make_float4(sum[0]*inv, sum[1]*inv, sum[2]*inv, d.radius);
+		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
+		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
+		out[k].ids = simd_make_uint4(d.id, d.owner, d.group, 0u);
+	}
+	lt.slots = (uint32)count;
+	return (uint32)count;
 }
 
 void
@@ -334,6 +397,7 @@ getLightStats(void)
 	s.submitted = lt.submitted;
 	s.kept = (uint32)lt.kept.size();
 	s.dropped = lt.dropped;
+	s.shadowed = lt.slots;
 	s.clusterMs = -1.0f;
 	ClusterResult r;
 	{

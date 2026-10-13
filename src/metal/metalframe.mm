@@ -267,6 +267,8 @@ applySettings(const RenderSettings *s)
 		prewarmShadowTwins();
 	if(!lightsBefore && frameLightsSource())
 		prewarmLightVariants();
+	if(n.lights != LIGHTS_SHADOWED || ltBudget(n.shadowedLights, n.shadowQuality) == 0)
+		rtDropLightTargets();
 	if(realBefore && !realShadowSource()){
 		rtDropShadowTargets();
 		rtReleaseLevels();
@@ -2145,9 +2147,9 @@ frameRayWork(void)
 	frame.rayWorkDone = true;
 	ShadowSunInputs sun = shadowSunInputs();
 	int32 q = frame.settings.shadowQuality;
-	bool casters = frameShadowPassPlanned();
+	bool casters = frameShadowPassPlanned(), lightRays = frameLightShadowsPlanned();
 	rtEncodeFrame(frameCommandBuffer(), frameCasterPassPlanned());
-	if(!casters || !frame.prepassValid)
+	if((!casters && !lightRays) || !frame.prepassValid)
 		return;
 	const PrepassMatrices &m = prepassMatrices();
 	ShadowInputs in;
@@ -2171,10 +2173,18 @@ frameRayWork(void)
 		d.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 		[[frameCommandBuffer() renderCommandEncoderWithDescriptor:d] endEncoding];
 	}
-	if(ppLayerRuns(casters, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
-		encodeLayer(frameCommandBuffer(), &in);
-	frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
-	noteShadowTraced();
+	if(casters){
+		if(ppLayerRuns(casters, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
+			encodeLayer(frameCommandBuffer(), &in);
+		frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
+		noteShadowTraced();
+	}
+	if(lightRays){
+		int32 budget = ltBudget(frame.settings.shadowedLights, q);
+		LightRaySlotHost slots[LT_MAX_SHADOWED];
+		uint32 count = lightsAssignSlots(budget, m.view, m.uploadedViewProj, slots);
+		rtEncodeLightRays(frameCommandBuffer(), in, slots, count, (uint32)budget);
+	}
 }
 
 static void
@@ -2333,6 +2343,31 @@ readShadowForTest(int32 x, int32 y, float32 *value, float32 *length)
 		return 0;
 	*value = px[0];
 	*length = frame.shadowShownReal ? px[1] : 0.0f;
+	return 1;
+}
+
+bool32
+readLightRawForTest(int32 slot, int32 x, int32 y, float32 *value)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = rtLightRawTexture();
+
+	if(ctx == nil || tex == nil || slot < 0 || x < 0 || y < 0 || slot >= (int32)tex.arrayLength || x >= (int32)tex.width ||
+	   y >= (int32)tex.height)
+		return 0;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:8 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:slot sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:2 destinationBytesPerImage:2];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		*value = (float32)*(const __fp16*)buf.contents;
+	}
 	return 1;
 }
 

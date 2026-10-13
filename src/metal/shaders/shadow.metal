@@ -332,6 +332,146 @@ shadowOwnerFix(instance_acceleration_structure tlas [[buffer(0)]],
 	}
 }
 
+struct LightRaySlot
+{
+	float4 posRadius;
+	float4 dirOuter;
+	float4 misc;
+	uint4 ids;
+};
+
+static bool
+lightRayWanted(constant LightRaySlot &L, float3 o)
+{
+	float3 toLight = L.posRadius.xyz - o;
+	return dot(toLight, toLight) > 1e-8 &&
+	       ltRayWanted(LTVec3{ o.x, o.y, o.z }, LTVec3{ L.posRadius.x, L.posRadius.y, L.posRadius.z }, L.posRadius.w,
+	                   LTVec3{ L.dirOuter.x, L.dirOuter.y, L.dirOuter.z }, L.dirOuter.w, L.misc.y != 0.0);
+}
+
+static ray
+lightRayToward(constant ShadowRayParams &p, constant LightRaySlot &L, uint3 gid, float3 o)
+{
+	float3 toLight = L.posRadius.xyz - o;
+	float dist = length(toLight);
+	float3 u = toLight/dist;
+	LTVec3 d = ltDiscToward(LTVec3{ u.x, u.y, u.z }, L.misc.x, dist, shHash(gid.x, gid.y, p.frame, 2*gid.z), shHash(gid.x, gid.y, p.frame, 2*gid.z + 1));
+	return ray(o, float3(d.x, d.y, d.z), 0.0, ltRayLength(dist, 0.1));
+}
+
+kernel void
+lightShadowRays(instance_acceleration_structure tlas [[buffer(0)]],
+                constant ShadowRayParams &p [[buffer(1)]],
+                device atomic_uint *listed [[buffer(3)]],
+                device uint2 *list [[buffer(4)]],
+                constant LightRaySlot *slots [[buffer(7)]],
+                device atomic_uint *counts [[buffer(8)]],
+                depth2d<float, access::read> depth [[texture(0)]],
+                texture2d_array<float, access::write> raw [[texture(1)]],
+                texture2d<float, access::read> normals [[texture(2)]],
+                uint3 gid [[thread_position_in_grid]])
+{
+	constant LightRaySlot &L = slots[gid.z];
+	float3 o;
+	float4 f, back;
+	bool cull, dark;
+	bool wanted = shadowRayStart(p, depth, normals, gid.xy, o, f, cull, dark, back) && lightRayWanted(L, o);
+	uint n = simd_sum(wanted ? 1u : 0u);
+	if(simd_is_first() && n > 0u)
+		atomic_fetch_add_explicit(&counts[gid.z], n, memory_order_relaxed);
+	if(!wanted){
+		raw.write(float4(1.0), gid.xy, gid.z);
+		return;
+	}
+	intersector<triangle_data, instancing> isect;
+	isect.accept_any_intersection(true);
+	isect.assume_geometry_type(geometry_type::triangle);
+	isect.set_triangle_front_facing_winding(winding::clockwise);
+	isect.force_opacity(forced_opacity::opaque);
+	auto h = isect.intersect(lightRayToward(p, L, gid, o), tlas, 0xFF);
+	bool hit = h.type != intersection_type::none;
+	if(hit && p.ownerOff == 0u && L.ids.y != 0u && shOwnerOf(h.user_instance_id) == L.ids.y)
+		shadowListAppend(listed, list, p.listCap, gid.xy, L.ids.y | gid.z << 8);
+	raw.write(float4(hit ? 0.0 : 1.0), gid.xy, gid.z);
+}
+
+kernel void
+lightShadowRaysAlpha(instance_acceleration_structure tlas [[buffer(0)]],
+                     constant ShadowRayParams &p [[buffer(1)]],
+                     intersection_function_table<triangle_data, instancing> ft [[buffer(2)]],
+                     device atomic_uint *listed [[buffer(3)]],
+                     device uint2 *list [[buffer(4)]],
+                     constant LightRaySlot *slots [[buffer(7)]],
+                     device atomic_uint *counts [[buffer(8)]],
+                     depth2d<float, access::read> depth [[texture(0)]],
+                     texture2d_array<float, access::write> raw [[texture(1)]],
+                     texture2d<float, access::read> normals [[texture(2)]],
+                     uint3 gid [[thread_position_in_grid]])
+{
+	constant LightRaySlot &L = slots[gid.z];
+	float3 o;
+	float4 f, back;
+	bool cull, dark;
+	bool wanted = shadowRayStart(p, depth, normals, gid.xy, o, f, cull, dark, back) && lightRayWanted(L, o);
+	uint n = simd_sum(wanted ? 1u : 0u);
+	if(simd_is_first() && n > 0u)
+		atomic_fetch_add_explicit(&counts[gid.z], n, memory_order_relaxed);
+	if(!wanted){
+		raw.write(float4(1.0), gid.xy, gid.z);
+		return;
+	}
+	intersector<triangle_data, instancing> isect;
+	isect.accept_any_intersection(true);
+	isect.assume_geometry_type(geometry_type::triangle);
+	isect.set_triangle_front_facing_winding(winding::clockwise);
+	auto h = isect.intersect(lightRayToward(p, L, gid, o), tlas, 0xFF, ft);
+	bool hit = h.type != intersection_type::none;
+	if(hit && p.ownerOff == 0u && L.ids.y != 0u && shOwnerOf(h.user_instance_id) == L.ids.y)
+		shadowListAppend(listed, list, p.listCap, gid.xy, L.ids.y | gid.z << 8);
+	raw.write(float4(hit ? 0.0 : 1.0), gid.xy, gid.z);
+}
+
+kernel void
+lightShadowOwnerFix(instance_acceleration_structure tlas [[buffer(0)]],
+                    constant ShadowRayParams &p [[buffer(1)]],
+                    device const uint *listed [[buffer(3)]],
+                    device const uint2 *list [[buffer(4)]],
+                    device const ShadowAlphaEntry *alpha [[buffer(5)]],
+                    constant LightRaySlot *slots [[buffer(7)]],
+                    depth2d<float, access::read> depth [[texture(0)]],
+                    texture2d_array<float, access::write> raw [[texture(1)]],
+                    texture2d<float, access::read> normals [[texture(2)]],
+                    uint tid [[thread_position_in_grid]])
+{
+	uint n = min(listed[0], p.listCap);
+	for(uint i = tid; i < n; i += SH_OWNER_THREADS){
+		uint2 e = list[i];
+		uint3 gid = uint3(shListX(e.x), shListY(e.x), e.y >> 8);
+		uint own = e.y & 0xFFu;
+		float3 o;
+		float4 f, back;
+		bool cull, dark;
+		if(!shadowRayStart(p, depth, normals, gid.xy, o, f, cull, dark, back))
+			continue;
+		intersection_params ip;
+		ip.assume_geometry_type(geometry_type::triangle);
+		ip.set_triangle_front_facing_winding(winding::clockwise);
+		ip.force_opacity(forced_opacity::non_opaque);
+		ip.accept_any_intersection(true);
+		intersection_query<triangle_data, instancing> iq(lightRayToward(p, slots[gid.z], gid, o), tlas, 0xFF, ip);
+		while(iq.next()){
+			uint user = iq.get_candidate_user_instance_id();
+			if(shOwnerSkips(own, shOwnerOf(user)))
+				continue;
+			if(!shadowCandidateBlocks(alpha, p.alphaEntries, user, iq.get_candidate_geometry_id(), iq.get_candidate_primitive_data(),
+			                          iq.get_candidate_triangle_barycentric_coord()))
+				continue;
+			iq.commit_triangle_intersection();
+		}
+		raw.write(float4(iq.get_committed_intersection_type() == intersection_type::none ? 1.0 : 0.0), gid.xy, gid.z);
+	}
+}
+
 static float3
 shadowHistoryPoint(constant ShadowAccumParams &p, uint2 hp, float distance)
 {

@@ -40,6 +40,7 @@ typedef simd_float4x4 LTMatrix;
 #define LT_PER_CLUSTER 32
 #define LT_MAX_SHADOWED 8
 #define LT_SPOT 1u
+#define LT_HOLD_FRAMES 6
 
 struct LTVec3 { float x, y, z; };
 
@@ -245,6 +246,20 @@ ltPickShadowed(const LTCand *c, int n, int budget, int out[LT_MAX_SHADOWED])
 		}
 	}
 	return count;
+}
+
+static inline bool
+ltInView(const float *m, LTVec3 c, float radius)
+{
+	for(int k = 0; k < 6; k++){
+		int i = k >> 1;
+		float s = (k & 1) ? -1.0f : 1.0f;
+		float a = m[3] + s*m[i], b = m[7] + s*m[4 + i], cc = m[11] + s*m[8 + i], d = m[15] + s*m[12 + i];
+		float len = LT_SQRT(a*a + b*b + cc*cc);
+		if(!(a*c.x + b*c.y + cc*c.z + d >= -radius*len))
+			return false;
+	}
+	return true;
 }
 
 static inline int

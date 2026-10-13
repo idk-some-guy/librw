@@ -12,10 +12,13 @@
 #include "metalprepass.h"
 #include "metalframe.h"
 #include "metalshadow.h"
+#include "metallights.h"
 #include "metalraytrace.h"
 #include "shaders/raytrace_metal.inc"
 #include "shaders/shadowh_metal.inc"
 #include "shaders/shadow_metal.inc"
+
+extern const char *lightsh_metal_src;
 
 namespace rw {
 namespace metal {
@@ -221,12 +224,21 @@ struct ShadowAlphaEntryHost
 static_assert(sizeof(ShadowAlphaEntryHost) == 16, "shadow alpha entry");
 static_assert(sizeof(ShadowRayParamsHost) == 208, "shadow ray params");
 static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
+static_assert(sizeof(LightRaySlotHost) == 64, "light ray slot");
+static_assert(LT_MAX_SHADOWED == 8, "RayStats carries eight light slots");
 
 static struct
 {
 	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear, ownerReset, ownerFix;
 	id<MTLBuffer> ownerList, ownerTaken;
 	std::atomic<uint32> listed, overflow;
+	id<MTLComputePipelineState> lightRays, lightRaysAlpha, lightFix;
+	id<MTLTexture> lightRaw;
+	id<MTLBuffer> lightList, lightCounts[MAXFRAMESINFLIGHT];
+	std::atomic<uint32> lightRayCount[LT_MAX_SHADOWED];
+	uint32 lightListCap, lightFrame, lightCountSlot;
+	uint64 lightBytes;
+	bool lightReported;
 	id<MTLFunction> alphaHit;
 	bool forceAlpha, terminatorOff, ownerOff;
 	uint32 listCapacity, listCapTest = ~0u;
@@ -280,7 +292,7 @@ static void
 initShadows(id<MTLDevice> dev)
 {
 	NSMutableString *src = [NSMutableString string];
-	const char *parts[] = { raytraceHead, prepassh_metal_src, shadowh_metal_src, shadow_metal_src };
+	const char *parts[] = { raytraceHead, prepassh_metal_src, shadowh_metal_src, lightsh_metal_src, shadow_metal_src };
 	for(const char *p : parts)
 		[src appendString:[NSString stringWithUTF8String:p]];
 	MTLCompileOptions *o = [MTLCompileOptions new];
@@ -328,6 +340,23 @@ initShadows(id<MTLDevice> dev)
 	if(sh.rays && (sh.raysAlpha == nil || dev.argumentBuffersSupport != MTLArgumentBuffersTier2))
 		fprintf(stderr, "rw::metal: the alpha-tested shadow kernel is unavailable; meshes with texture alpha cast no shadow: %s\n",
 			alphaErr ? alphaErr.localizedDescription.UTF8String : "argument buffers tier 2 missing");
+	sh.lightRays = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowRays"] error:&err] : nil;
+	sh.lightFix = lib ? [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"lightShadowOwnerFix"] error:&err] : nil;
+	id<MTLFunction> lightAlpha = lib ? [lib newFunctionWithName:@"lightShadowRaysAlpha"] : nil;
+	sh.lightRaysAlpha = nil;
+	if(sh.rays && lightAlpha && sh.alphaHit){
+		MTLComputePipelineDescriptor *pd = [MTLComputePipelineDescriptor new];
+		pd.computeFunction = lightAlpha;
+		MTLLinkedFunctions *linked = [MTLLinkedFunctions linkedFunctions];
+		linked.functions = @[ sh.alphaHit ];
+		pd.linkedFunctions = linked;
+		sh.lightRaysAlpha = [dev newComputePipelineStateWithDescriptor:pd options:MTLPipelineOptionNone reflection:nil error:&alphaErr];
+	}
+	if(sh.rays && (sh.lightRays == nil || sh.lightFix == nil))
+		fprintf(stderr, "rw::metal: the light ray kernels failed to build; shadowed lights are unshadowed: %s\n",
+			err ? err.localizedDescription.UTF8String : "");
+	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
+		sh.lightCounts[i] = [dev newBufferWithLength:LT_MAX_SHADOWED*sizeof(uint32) options:MTLResourceStorageModeShared];
 	id<MTLCounterSet> timestamps = timestampCounters(dev);
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
 		sh.timing[i] = twoSampleBuffer(dev, timestamps);
@@ -423,7 +452,11 @@ rtTerm(void)
 	rf.deferred.clear();
 	rt.stats.instances = rt.stats.skinnedLevels = 0;
 	rtDropShadowTargets();
+	rtDropLightTargets();
 	sh.rays = sh.raysAlpha = sh.clear = sh.ownerReset = sh.ownerFix = nil;
+	sh.lightRays = sh.lightRaysAlpha = sh.lightFix = nil;
+	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
+		sh.lightCounts[i] = nil;
 	sh.ownerTaken = nil;
 	sh.listed.store(0);
 	sh.overflow.store(0);
@@ -435,6 +468,7 @@ rtTerm(void)
 	sh.ticks.store(0);
 	sh.valid = sh.ran = false;
 	sh.frame = 0;
+	sh.lightFrame = 0;
 }
 
 bool
@@ -1800,6 +1834,121 @@ rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in)
 	return next;
 }
 
+void
+rtDropLightTargets(void)
+{
+	sh.lightRaw = nil;
+	sh.lightList = nil;
+	sh.lightListCap = 0;
+	sh.lightBytes = 0;
+}
+
+static bool
+ensureLightTargets(const ShadowInputs &in, const SHQuality &q, uint32 slices)
+{
+	uint32 rw = q.halfRes ? (in.width + 1)/2 : in.width, rh = q.halfRes ? (in.height + 1)/2 : in.height;
+	if(sh.lightRaw && sh.lightRaw.width == rw && sh.lightRaw.height == rh && sh.lightRaw.arrayLength == slices)
+		return true;
+	rtDropLightTargets();
+	id<MTLDevice> dev = getContext()->device;
+	MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+	d.textureType = MTLTextureType2DArray;
+	d.pixelFormat = MTLPixelFormatR16Float;
+	d.width = rw;
+	d.height = rh;
+	d.arrayLength = slices;
+	d.storageMode = MTLStorageModePrivate;
+	d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+	sh.lightRaw = [dev newTextureWithDescriptor:d];
+	uint32 capacity = shOwnerListCapacity(rw, rh);
+	sh.lightList = [dev newBufferWithLength:16 + (NSUInteger)capacity*8 options:MTLResourceStorageModePrivate];
+	if(sh.lightRaw == nil || sh.lightList == nil){
+		rtDropLightTargets();
+		if(!sh.lightReported){
+			sh.lightReported = true;
+			fprintf(stderr, "rw::metal: light shadow targets for %ux%u could not be created; shadowed lights are unshadowed\n", in.width, in.height);
+		}
+		return false;
+	}
+	sh.lightListCap = capacity;
+	sh.lightBytes = (uint64)rw*rh*2*slices + 16 + (uint64)capacity*8;
+	return true;
+}
+
+id<MTLTexture>
+rtLightRawTexture(void)
+{
+	return sh.lightRaw;
+}
+
+void
+rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget)
+{
+	SHQuality q = shQuality(in.quality);
+	q.halfRes = 1u;
+	id<MTLAccelerationStructure> tlas = rf.current;
+	rt.stats.lightSlots = 0;
+	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++){
+		rt.stats.lightSlotId[i] = 0;
+		sh.lightRayCount[i].store(0);
+	}
+	count = std::min(count, std::min(budget, (uint32)LT_MAX_SHADOWED));
+	if(count == 0 || tlas == nil || !rtShadowsSupported() || sh.lightRays == nil || sh.lightFix == nil || q.raysPerPixel == 0 || in.depth == nil ||
+	   in.normals == nil || !ensureLightTargets(in, q, std::min(budget, (uint32)LT_MAX_SHADOWED)))
+		return;
+	bool alpha = sh.lightRaysAlpha != nil && useAlphaKernel(rf.currentAlpha, rf.currentTable);
+	std::vector<__unsafe_unretained id<MTLResource>> textures;
+	if(alpha && !alphaTextureList(&textures))
+		return;
+	simd_float4x4 inv = simd_inverse(in.viewProj), toWorld = simd_inverse(in.view);
+	simd_float3 eye = toWorld.columns[3].xyz;
+	uint32 rw = (uint32)sh.lightRaw.width, rh = (uint32)sh.lightRaw.height, frameNo = sh.lightFrame++;
+	bool owners = sh.ownerReset && !sh.ownerOff && rt.stats.ownedInstances > 0;
+	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f), simd_make_float4(eye, SH_RAY_DISTANCE),
+		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, 1u, q.halfRes, alpha ? rt.stats.alphaEntries : 0u, 1u,
+		owners ? 0u : 1u, sh.lightListCap };
+	id<MTLBuffer> counts = sh.lightCounts[sh.lightCountSlot];
+	sh.lightCountSlot = (sh.lightCountSlot + 1) % MAXFRAMESINFLIGHT;
+	memset(counts.contents, 0, LT_MAX_SHADOWED*sizeof(uint32));
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	if(alpha)
+		encodeAlphaTable(e, rf.currentTable, rf.currentAlpha, rf.currentParams, textures);
+	[e setBuffer:sh.lightList offset:0 atIndex:3];
+	[e setBuffer:sh.lightList offset:16 atIndex:4];
+	if(owners){
+		[e setComputePipelineState:sh.ownerReset];
+		[e dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+		[e memoryBarrierWithScope:MTLBarrierScopeBuffers];
+	}
+	[e setComputePipelineState:alpha ? sh.lightRaysAlpha : sh.lightRays];
+	rf.passTable = alpha ? rf.currentTable : nil;
+	rtUseHeaps(e);
+	[e setAccelerationStructure:tlas atBufferIndex:0];
+	[e setBytes:&rp length:sizeof(rp) atIndex:1];
+	[e setBytes:slots length:count*sizeof(LightRaySlotHost) atIndex:7];
+	[e setBuffer:counts offset:0 atIndex:8];
+	[e setTexture:in.depth atIndex:0];
+	[e setTexture:sh.lightRaw atIndex:1];
+	[e setTexture:in.normals atIndex:2];
+	[e dispatchThreads:MTLSizeMake(rw, rh, count) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	if(owners){
+		[e memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers];
+		[e setComputePipelineState:sh.lightFix];
+		[e setBuffer:alpha ? rf.currentAlpha : sh.lightList offset:0 atIndex:5];
+		[e dispatchThreads:MTLSizeMake(SH_OWNER_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+	}
+	[e endEncoding];
+	[cb addCompletedHandler:^(id<MTLCommandBuffer>){
+		const uint32 *c = (const uint32*)counts.contents;
+		for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
+			sh.lightRayCount[i].store(c[i]);
+	}];
+	rt.stats.lightSlots = count;
+	rt.stats.lightFrame = frameNo;
+	for(uint32 i = 0; i < count; i++)
+		rt.stats.lightSlotId[i] = slots[i].ids.x;
+}
+
 RayStats
 getRayStats(void)
 {
@@ -1812,7 +1961,9 @@ getRayStats(void)
 	s.walkMs = rf.walkMs;
 	s.ownerListed = sh.listed.load();
 	s.ownerOverflow = sh.overflow.load();
-	s.shadowMegabytes = (float32)(sh.bytes/1048576.0);
+	s.shadowMegabytes = (float32)((sh.bytes + sh.lightBytes)/1048576.0);
+	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
+		s.lightRays[i] = sh.lightRayCount[i].load();
 	s.passMs = -1.0f;
 	s.topMs = s.buildMs = -1.0f;
 	MetalContext *ctx = getContext();

@@ -385,6 +385,8 @@ struct RayStats
 	uint32 castersLarge;
 	uint32 ownedInstances;
 	uint32 ownerListed, ownerOverflow;
+	uint32 lightSlots, lightFrame;
+	uint32 lightRays[8], lightSlotId[8];
 };
 RayStats getRayStats(void);
 

@@ -253,6 +253,7 @@ const char *header_metal_src =
 "#define LT_PER_CLUSTER 32\n"
 "#define LT_MAX_SHADOWED 8\n"
 "#define LT_SPOT 1u\n"
+"#define LT_HOLD_FRAMES 6\n"
 
 "struct LTVec3 { float x, y, z; };\n"
 
@@ -458,6 +459,20 @@ const char *header_metal_src =
 "		}\n"
 "	}\n"
 "	return count;\n"
+"}\n"
+
+"static inline bool\n"
+"ltInView(const float *m, LTVec3 c, float radius)\n"
+"{\n"
+"	for(int k = 0; k < 6; k++){\n"
+"		int i = k >> 1;\n"
+"		float s = (k & 1) ? -1.0f : 1.0f;\n"
+"		float a = m[3] + s*m[i], b = m[7] + s*m[4 + i], cc = m[11] + s*m[8 + i], d = m[15] + s*m[12 + i];\n"
+"		float len = LT_SQRT(a*a + b*b + cc*cc);\n"
+"		if(!(a*c.x + b*c.y + cc*c.z + d >= -radius*len))\n"
+"			return false;\n"
+"	}\n"
+"	return true;\n"
 "}\n"
 
 "static inline int\n"

@@ -210,6 +210,7 @@ bool32 readScenePixel(int32 x, int32 y, float32 rgba[4]);
 bool32 readPrepassForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
 bool32 readLayerForTest(int32 x, int32 y, float32 normal[3], float32 motion[2], float32 *depth);
 bool32 readShadowForTest(int32 x, int32 y, float32 *value, float32 *length);
+bool32 readLightRawForTest(int32 slot, int32 x, int32 y, float32 *value);
 bool32 readClusterForTest(int32 cx, int32 cy, int32 cz, uint32 *ids, int32 max, int32 *count);
 int32 lightClusterPassesForTest(void);
 int32 lightClusterSlotForTest(void);

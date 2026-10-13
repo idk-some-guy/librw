@@ -31,6 +31,7 @@ bool rtAddHostCaster(InstanceDataHeader *h, const RawMatrix &world, const void *
 bool rtShadowsSupported(void);
 bool rtAlphaCastersSupported(void);
 void rtDropShadowTargets(void);
+void rtDropLightTargets(void);
 
 #ifdef __OBJC__
 struct ShadowInputs
@@ -45,6 +46,15 @@ struct ShadowInputs
 };
 
 id<MTLTexture> rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in);
+
+struct LightRaySlotHost
+{
+	simd_float4 posRadius, dirOuter, misc;
+	simd_uint4 ids;
+};
+
+void rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget);
+id<MTLTexture> rtLightRawTexture(void);
 void rtEncodeBuilds(id<MTLCommandBuffer> cb);
 id<MTLAccelerationStructure> rtBottomLevel(const InstanceDataHeader *h);
 void rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters);

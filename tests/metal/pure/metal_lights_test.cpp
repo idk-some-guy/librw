@@ -305,6 +305,42 @@ TestDisc(void)
 	CHECK(Near(sqrtf(r.x*r.x + r.y*r.y + r.z*r.z), 1.0f, 1e-5f));
 }
 
+static void
+TestHoldFrames(void)
+{
+	static_assert(LT_HOLD_FRAMES >= 2 && LT_HOLD_FRAMES <= 16, "a few frames");
+	int held = ltHoldNext(0, true, LT_HOLD_FRAMES), frames = 0;
+	while(held > 0){
+		held = ltHoldNext(held, false, LT_HOLD_FRAMES);
+		frames++;
+	}
+	CHECK(frames == LT_HOLD_FRAMES);
+}
+
+static void
+TestInView(void)
+{
+	float n = 1.0f, f = 101.0f, w = 1.0f, h = 0.75f, m[16] = {};
+	m[0] = n/w;
+	m[5] = n/h;
+	m[10] = -(f + n)/(f - n);
+	m[11] = -1.0f;
+	m[14] = -2.0f*f*n/(f - n);
+	LTVec3 ahead = {0.0f, 0.0f, -10.0f}, behind = {0.0f, 0.0f, 10.0f}, left = {-30.0f, 0.0f, -10.0f}, beyond = {0.0f, 0.0f, -150.0f};
+	CHECK(ltInView(m, ahead, 0.5f));
+	CHECK(!ltInView(m, behind, 0.5f));
+	CHECK(!ltInView(m, left, 5.0f));
+	CHECK(ltInView(m, left, 25.0f));
+	CHECK(!ltInView(m, beyond, 5.0f));
+	LTVec3 edge = {12.0f, 0.0f, -10.0f};
+	CHECK(!ltInView(m, edge, 0.1f));
+	CHECK(ltInView(m, edge, 2.0f));
+	LTVec3 above = {0.0f, 9.0f, -10.0f};
+	CHECK(!ltInView(m, above, 0.5f));
+	CHECK(ltInView(m, above, 3.0f));
+	CHECK(ltInView(m, LTVec3{0.0f, 0.0f, -0.5f}, 1.0f));
+}
+
 int
 main(void)
 {
@@ -324,6 +360,8 @@ main(void)
 	TestRayWanted();
 	TestRayLength();
 	TestDisc();
+	TestHoldFrames();
+	TestInView();
 	if(failures == 0)
 		printf("all lights tests passed\n");
 	return failures != 0;

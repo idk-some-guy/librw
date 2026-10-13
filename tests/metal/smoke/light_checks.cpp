@@ -9,6 +9,7 @@
 #include <src/metal/rwmetalimpl.h>
 #include <src/metal/metalstate.h>
 #include <src/metal/metallights.h>
+#include <src/metal/metalshadow.h>
 #include "world_checks.h"
 #include "state_checks.h"
 #include "light_checks.h"
@@ -1363,6 +1364,178 @@ CheckLightInstancesAtNight(void)
 	return Report(ok, name);
 }
 
+struct NightRig
+{
+	metal::RenderSettings saved;
+	metal::RelitParams relitSaved;
+	Light *sun;
+	Frame *sunFrame;
+};
+
+static void
+NightBegin(NightRig *r)
+{
+	r->saved = metal::getRenderSettings();
+	metal::RenderSettings s = r->saved;
+	s.shadowQuality = metal::SHADOWQUALITY_MEDIUM;
+	s.shadowedLights = 1;
+	s.lights = metal::LIGHTS_SHADOWED;
+	metal::setRenderSettings(&s);
+	r->relitSaved = metal::getRelitParams();
+	metal::RelitParams rp = r->relitSaved;
+	rp.sunScale = 1.0f;
+	metal::setRelitParams(&rp);
+	r->sun = Light::create(Light::DIRECTIONAL);
+	r->sunFrame = Frame::create();
+	r->sunFrame->updateObjects();
+	r->sun->setFrame(r->sunFrame);
+	metal::setSunLight(r->sun);
+}
+
+static void
+NightEnd(NightRig *r)
+{
+	metal::setSunLight(nil);
+	r->sun->destroy();
+	r->sunFrame->destroy();
+	metal::setRelitParams(&r->relitSaved);
+	metal::setRenderSettings(&r->saved);
+}
+
+static bool
+NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0)
+{
+	RGBA sky = { 64, 64, 64, 255 };
+	metal::beginScene(lightCamera);
+	WorldBegin(sky);
+	SetRenderState(VERTEXALPHA, 0);
+	metal::setLights(lights, n);
+	bool began = metal::beginPrepass() != 0;
+	if(began){
+		metal::addShadowCaster(backdrop, metal::SHADOWCASTER_STATIC);
+		if(blocker){
+			metal::setShadowOwner(blockerOwner);
+			metal::addShadowCaster(blocker, metal::SHADOWCASTER_STATIC);
+			metal::setShadowOwner(0);
+		}
+		backdrop->render();
+		metal::endPrepass();
+	}
+	backdrop->render();
+	metal::endScene(nil);
+	WorldEnd();
+	return began;
+}
+
+static metal::RayStats
+NightRays(const metal::LightDesc *lights, int32 n, bool *began, Atomic *blocker = nil, uint32 blockerOwner = 0)
+{
+	*began = true;
+	for(int f = 0; f < 3; f++)
+		*began = NightFrame(lights, n, blocker, blockerOwner) && *began;
+	metal::rtWaitForTest();
+	return metal::getRayStats();
+}
+
+static uint32
+WallRaysWanted(const metal::LightDesc &l, uint32 frameNo)
+{
+	const float wall = 90.0f;
+	metal::FrameInfo info = metal::getFrameInfo();
+	int32 W = info.internalWidth, H = info.internalHeight;
+	int32 rw = (W + 1)/2, rh = (H + 1)/2;
+	LTVec3 pos = { l.pos[0], l.pos[1], l.pos[2] }, dir = { l.dir[0], l.dir[1], l.dir[2] };
+	uint32 n = 0;
+	for(int32 hy = 0; hy < rh; hy++)
+		for(int32 hx = 0; hx < rw; hx++){
+			int32 sx = std::min(2*hx + (int32)shPhaseX(frameNo), W - 1), sy = std::min(2*hy + (int32)shPhaseY(frameNo), H - 1);
+			float x = -((sx + 0.5f)/W*2.0f - 1.0f)*wall, y = 0.75f*wall*(1.0f - 2.0f*(sy + 0.5f)/H);
+			if(fabsf(x) > 60.0f || fabsf(y) > 45.0f)
+				continue;
+			float dist = sqrtf(x*x + y*y + wall*wall);
+			LTVec3 o = { x, y, wall - shNormalOffset(dist) };
+			if(ltRayWanted(o, pos, l.radius, dir, l.cosOuter, (l.flags & metal::LIGHT_SPOT) != 0))
+				n++;
+		}
+	return n;
+}
+
+static bool
+CheckLightRaysInCone(void)
+{
+	const char *name = "a spot's rays stay inside its cone at every quality";
+	NightRig rig;
+	NightBegin(&rig);
+	const float deg = 3.14159265f/180.0f;
+	metal::LightDesc spot = PointLight(61, 0.0f, 0.0f, 60.0f, 40.0f), ball = PointLight(62, 0.0f, 0.0f, 60.0f, 31.0f);
+	spot.flags = metal::LIGHT_SPOT;
+	spot.dir[2] = 1.0f;
+	spot.cosOuter = cosf(25.0f*deg);
+	spot.cosInner = cosf(15.0f*deg);
+	metal::LightDesc sky = spot;
+	sky.id = 63;
+	sky.dir[1] = 1.0f;
+	sky.dir[2] = 0.0f;
+	bool began[3];
+	metal::RayStats a = NightRays(&spot, 1, &began[0]);
+	uint32 wantA = WallRaysWanted(spot, a.lightFrame);
+	metal::RayStats b = NightRays(&ball, 1, &began[1]);
+	uint32 wantB = WallRaysWanted(ball, b.lightFrame);
+	metal::RayStats c = NightRays(&sky, 1, &began[2]);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	metal::setRenderSettings(&high);
+	bool beganHigh;
+	metal::RayStats h = NightRays(&spot, 1, &beganHigh);
+	uint32 wantH = WallRaysWanted(spot, h.lightFrame);
+	NightEnd(&rig);
+	bool ok = beganHigh && h.lightSlots == 1 && wantH > 0 && h.lightRays[0] == wantH && began[0] && began[1] && began[2] && a.lightSlots == 1 && a.lightSlotId[0] == 61 && wantA > 0 && a.lightRays[0] == wantA &&
+		b.lightSlots == 1 && b.lightSlotId[0] == 62 && wantB > 0 && b.lightRays[0] == wantB && wantB != wantA &&
+		c.lightSlots == 1 && c.lightSlotId[0] == 63 && c.lightRays[0] == 0;
+	if(!ok)
+		Detail("  high prepass %d slots %u rays %u (want %u)\n", beganHigh, h.lightSlots, h.lightRays[0], wantH);
+	if(!ok)
+		Detail("  prepass %d %d %d; cone slots %u id %u rays %u (want %u); range slots %u id %u rays %u (want %u); sky slots %u id %u rays %u (want 0)\n",
+			began[0], began[1], began[2], a.lightSlots, a.lightSlotId[0], a.lightRays[0], wantA, b.lightSlots, b.lightSlotId[0], b.lightRays[0],
+			wantB, c.lightSlots, c.lightSlotId[0], c.lightRays[0]);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightRaysOwner(void)
+{
+	const char *name = "a light's rays skip its own owner's body";
+	NightRig rig;
+	NightBegin(&rig);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 20.0f, 20.0f, -20.0f, -20.0f, 75.0f, col, nil, backMat);
+	Atomic *blocker = MakeAtomic(geo);
+	metal::LightDesc own = PointLight(71, 0.0f, 0.0f, 60.0f, 40.0f), other = own;
+	own.owner = 1;
+	other.owner = 2;
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	float tagged = -1.0f, untagged = -1.0f, foreign = -1.0f, open = -1.0f;
+	bool began[4], read[4];
+	metal::RayStats t = NightRays(&own, 1, &began[0], blocker, 1);
+	read[0] = metal::readLightRawForTest(0, HX, HY, &tagged) != 0;
+	metal::RayStats u = NightRays(&own, 1, &began[1], blocker, 0);
+	read[1] = metal::readLightRawForTest(0, HX, HY, &untagged) != 0;
+	NightRays(&other, 1, &began[2], blocker, 1);
+	read[2] = metal::readLightRawForTest(0, HX, HY, &foreign) != 0;
+	NightRays(&own, 1, &began[3]);
+	read[3] = metal::readLightRawForTest(0, HX, HY, &open) != 0;
+	DestroyAtomic(blocker);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began[0] && began[1] && began[2] && began[3] && read[0] && read[1] && read[2] && read[3] && t.ownedInstances > 0 && u.ownedInstances == 0 &&
+		tagged == 1.0f && untagged == 0.0f && foreign == 0.0f && open == 1.0f;
+	if(!ok)
+		Detail("  prepass %d %d %d %d read %d %d %d %d; owned %u/%u; tagged %.2f (want 1) untagged %.2f (want 0) other owner %.2f (want 0) no body %.2f (want 1)\n",
+			began[0], began[1], began[2], began[3], read[0], read[1], read[2], read[3], t.ownedInstances, u.ownedInstances, tagged, untagged, foreign, open);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1448,6 +1621,8 @@ RunLightChecks(Camera *camera)
 	CheckLightsOffIdenticalOneSample();
 	CheckLightCountView();
 	CheckLightInstancesAtNight();
+	CheckLightRaysInCone();
+	CheckLightRaysOwner();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();
