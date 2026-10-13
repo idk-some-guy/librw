@@ -57,6 +57,8 @@ static struct LightState
 	std::vector<LTCand> cands;
 	std::vector<std::pair<uint32, int32>> held;
 	uint32 slots = 0;
+	std::vector<int32> slotOf;
+	id<MTLTexture> whiteShadow = nil, shadowTex = nil;
 	int32 passes = 0, waited = 0;
 	std::mutex lock;
 	ClusterResult result = { 0, 0, 0, 0 };
@@ -71,6 +73,17 @@ lightsInit(void)
 	if(ctx == nil || lt.pipe || lt.pipeTried)
 		return;
 	lt.pipeTried = true;
+	MTLTextureDescriptor *wd = [MTLTextureDescriptor new];
+	wd.textureType = MTLTextureType2DArray;
+	wd.pixelFormat = MTLPixelFormatR8Unorm;
+	wd.width = 1;
+	wd.height = 1;
+	wd.arrayLength = 1;
+	wd.storageMode = MTLStorageModeShared;
+	wd.usage = MTLTextureUsageShaderRead;
+	lt.whiteShadow = [ctx->device newTextureWithDescriptor:wd];
+	const uint8 one = 255;
+	[lt.whiteShadow replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0 withBytes:&one bytesPerRow:1 bytesPerImage:1];
 	NSMutableString *src = [NSMutableString stringWithUTF8String:"#include <metal_stdlib>\nusing namespace metal;\n"];
 	[src appendString:[NSString stringWithUTF8String:lightsh_metal_src]];
 	[src appendString:[NSString stringWithUTF8String:lights_metal_src]];
@@ -130,6 +143,7 @@ static void
 clearSubmission(void)
 {
 	lt.kept.clear();
+	lt.slotOf.clear();
 	lt.submitted = lt.dropped = 0;
 	lt.slots = 0;
 }
@@ -217,6 +231,7 @@ uint32
 lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out)
 {
 	uint32 n = (uint32)lt.kept.size();
+	lt.slotOf.assign(n, -1);
 	if(budget <= 0 || n == 0){
 		lt.held.clear();
 		lt.slots = 0;
@@ -267,6 +282,8 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
 		out[k].ids = simd_make_uint4(d.id, d.owner, d.group, 0u);
 	}
+	for(uint32 i = 0; i < n; i++)
+		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, picked, count, (int)i);
 	lt.slots = (uint32)count;
 	return (uint32)count;
 }
@@ -299,12 +316,15 @@ lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &vi
 	for(int i = 0; i < 3; i++)
 		eye[i] = -(m[i*4]*m[12] + m[i*4 + 1]*m[13] + m[i*4 + 2]*m[14]);
 	LTLight *gpu = (LTLight*)listSpace.cpu;
+	bool ran = rtLightSlotCount() > 0 && rtLightShadowTexture() != nil;
+	bool bound = ltLightTextureBound(ran, lt.slots);
 	for(uint32 i = 0; i < n; i++){
 		const LightDesc &d = lt.kept[i];
 		gpu[i].posRadius = simd_make_float4(d.pos[0] - eye[0], d.pos[1] - eye[1], d.pos[2] - eye[2], d.radius);
 		gpu[i].colorGloss = simd_make_float4(d.color[0], d.color[1], d.color[2], d.gloss);
 		gpu[i].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
-		gpu[i].spot = simd_make_float4(d.cosInner, d.softness, 0.0f, 0.0f);
+		int32 slot = i < lt.slotOf.size() ? ltEntrySlot(lt.slotOf[i], lt.slots, bound) : -1;
+		gpu[i].spot = simd_make_float4(d.cosInner, d.softness, 0.0f, (float32)slot);
 		gpu[i].ids = simd_make_uint4(d.id, d.flags, d.owner, d.group);
 		lt.lastIds[i] = d.id;
 	}
@@ -352,6 +372,7 @@ lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &vi
 		if(r.pass > lt.result.pass)
 			lt.result = r;
 	}];
+	lt.shadowTex = bound ? rtLightShadowTexture() : lt.whiteShadow;
 	lt.sceneSlot = (int32)slot;
 	lt.scenePass = pass;
 	lt.frameBuffer = (__bridge id<MTLBuffer>)blockSpace.buffer;
@@ -387,6 +408,7 @@ lightsBind(id<MTLRenderCommandEncoder> e)
 	[e setFragmentBuffer:lt.frameBuffer offset:lt.frameOffset atIndex:BUFFER_LIGHTFRAME];
 	[e setFragmentBuffer:lt.listBuffer offset:lt.listOffset atIndex:BUFFER_LIGHTLIST];
 	[e setFragmentBuffer:lt.clusters[lt.sceneSlot] offset:0 atIndex:BUFFER_LIGHTCLUSTERS];
+	[e setFragmentTexture:lt.shadowTex atIndex:TEXTURE_LIGHTSHADOW];
 }
 
 LightStats
@@ -474,6 +496,7 @@ lightsTerm(void)
 		lt.timing[i] = nil;
 	}
 	lt.frameBuffer = lt.listBuffer = nil;
+	lt.whiteShadow = lt.shadowTex = nil;
 	lt.sceneSlot = -1;
 	lt.scenePass = 0;
 	lt.lastIdCount = 0;

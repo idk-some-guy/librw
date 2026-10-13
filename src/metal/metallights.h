@@ -275,6 +275,27 @@ ltSlotReset(bool hadPrev, unsigned int prevId, unsigned int id)
 {
 	return !hadPrev || prevId != id;
 }
+
+static inline int
+ltSlotFor(const LTCand *c, int n, const int *picked, int count, int i)
+{
+	for(int k = 0; k < count; k++)
+		if(picked[k] == i || (c[i].group != 0 && picked[k] < n && c[picked[k]].group == c[i].group))
+			return k;
+	return -1;
+}
+
+static inline int
+ltEntrySlot(int slot, unsigned int slots, bool ranPass)
+{
+	return ranPass && slot >= 0 && (unsigned int)slot < slots ? slot : -1;
+}
+
+static inline bool
+ltLightTextureBound(bool ranPass, unsigned int slots)
+{
+	return ranPass && slots > 0;
+}
 #endif
 
 static inline bool

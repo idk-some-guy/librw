@@ -51,7 +51,7 @@ enum BufferIndices
 	BUFFER_DEFAULTATTRIBS = 30
 };
 
-enum { TEXTURE_SHADOW = 8 };
+enum { TEXTURE_SHADOW = 8, TEXTURE_LIGHTSHADOW = 9 };
 
 enum { MAXCUSTOMCONSTANTS = 1024 };
 

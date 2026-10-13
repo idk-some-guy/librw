@@ -1403,25 +1403,28 @@ NightEnd(NightRig *r)
 }
 
 static bool
-NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0)
+NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0, Atomic *wall = nil)
 {
 	RGBA sky = { 64, 64, 64, 255 };
+	Atomic *surface = wall ? wall : backdrop;
 	metal::beginScene(lightCamera);
 	WorldBegin(sky);
 	SetRenderState(VERTEXALPHA, 0);
+	if(wall)
+		SetRenderState(CULLMODE, CULLNONE);
 	metal::setLights(lights, n);
 	bool began = metal::beginPrepass() != 0;
 	if(began){
-		metal::addShadowCaster(backdrop, metal::SHADOWCASTER_STATIC);
+		metal::addShadowCaster(surface, metal::SHADOWCASTER_STATIC);
 		if(blocker){
 			metal::setShadowOwner(blockerOwner);
 			metal::addShadowCaster(blocker, metal::SHADOWCASTER_STATIC);
 			metal::setShadowOwner(0);
 		}
-		backdrop->render();
+		surface->render();
 		metal::endPrepass();
 	}
-	backdrop->render();
+	surface->render();
 	metal::endScene(nil);
 	WorldEnd();
 	return began;
@@ -1593,6 +1596,75 @@ CheckLightShadowBox(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckLightShadowTermOnly(void)
+{
+	const char *name = "a light's shadow factor darkens only that light's term";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 1;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 60.0f, 45.0f, -60.0f, -45.0f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	metal::LightDesc shadowed = PointLight(91, 0.0f, 0.0f, 86.0f, 40.0f), plain = PointLight(92, 12.0f, 0.0f, 86.0f, 100.0f);
+	shadowed.flags = metal::LIGHT_PINNED;
+	shadowed.color[0] = shadowed.color[1] = shadowed.color[2] = 20.0f;
+	plain.color[0] = plain.color[1] = plain.color[2] = 30.0f;
+	metal::LightDesc both[2] = { shadowed, plain };
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 W = info.internalWidth, H = info.internalHeight, CX = W/2, CY = H/2;
+	const float perPixel = 180.0f/(float)W;
+	const int32 litX = CX + (int32)(10.0f/perPixel);
+	bool began = true;
+	for(int f = 0; f < 16; f++)
+		began = NightFrame(both, 2, box, 0, wall) && began;
+	metal::rtWaitForTest();
+	metal::RayStats st = metal::getRayStats();
+	float inShadow[3], inLight[3], factorDark = -1.0f, factorLit = -1.0f;
+	ReadAt(CX, CY, inShadow);
+	ReadAt(litX, CY, inLight);
+	bool read = metal::readLightShadowForTest(0, CX, CY, &factorDark) != 0;
+	read = metal::readLightShadowForTest(0, litX, CY, &factorLit) != 0 && read;
+	SetMode(metal::LIGHTS_ON);
+	float base[2][3], onlyPlain[2][3], onlyShadowed[2][3];
+	const int32 xs[2] = { CX, litX };
+	const metal::LightDesc *sets[3] = { nil, &plain, &shadowed };
+	for(int k = 0; k < 3; k++){
+		for(int f = 0; f < 4; f++)
+			began = NightFrame(sets[k], k ? 1 : 0, box, 0, wall) && began;
+		for(int i = 0; i < 2; i++)
+			ReadAt(xs[i], CY, k == 0 ? base[i] : k == 1 ? onlyPlain[i] : onlyShadowed[i]);
+	}
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && read && st.lightSlots == 1 && st.lightSlotId[0] == 91 && factorDark < 0.05f && factorLit > 0.9f;
+	float factors[2] = { factorDark, factorLit };
+	for(int i = 0; i < 2; i++)
+		for(int c = 0; c < 3; c++){
+			float *got = i ? inLight : inShadow;
+			float term = onlyShadowed[i][c] - base[i][c], other = onlyPlain[i][c];
+			ok = ok && term > 0.02f && (i != 0 || other - base[i][c] > 0.02f) && fabsf(got[c] - (other + factors[i]*term)) <= 2.0f/255.0f;
+			if(!ok)
+				Detail("  pixel %d channel %d: reads %.4f, want %.4f (other light and base %.4f, shadowed term %.4f, factor %.3f)\n",
+					i, c, got[c], other + factors[i]*term, other, term, factors[i]);
+		}
+	if(!ok)
+		Detail("  prepass %d read %d slots %u id %u; factor in the shadow %.3f (want 0), beside it %.3f (want 1)\n",
+			began, read, st.lightSlots, st.lightSlotId[0], factorDark, factorLit);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1681,6 +1753,7 @@ RunLightChecks(Camera *camera)
 	CheckLightRaysInCone();
 	CheckLightRaysOwner();
 	CheckLightShadowBox();
+	CheckLightShadowTermOnly();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

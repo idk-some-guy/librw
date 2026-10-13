@@ -1921,6 +1921,12 @@ rtLightShadowTexture(void)
 	return sh.lightShadow;
 }
 
+uint32
+rtLightSlotCount(void)
+{
+	return rt.stats.lightSlots;
+}
+
 void
 rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget)
 {

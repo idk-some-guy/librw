@@ -351,6 +351,33 @@ TestSlotReset(void)
 	CHECK(ltSlotReset(false, 0u, 0u));
 }
 
+static void
+TestSlotLookup(void)
+{
+	LTCand c[5] = { { 1.0f, 10u, 0u, 0u, 0 }, { 1.0f, 11u, 0u, 7u, 0 }, { 1.0f, 12u, 0u, 7u, 0 }, { 1.0f, 13u, 0u, 0u, 0 }, { 1.0f, 14u, 0u, 9u, 0 } };
+	int picked[2] = { 1, 3 };
+	CHECK(ltSlotFor(c, 5, picked, 2, 1) == 0);
+	CHECK(ltSlotFor(c, 5, picked, 2, 2) == 0);
+	CHECK(ltSlotFor(c, 5, picked, 2, 3) == 1);
+	CHECK(ltSlotFor(c, 5, picked, 2, 0) == -1);
+	CHECK(ltSlotFor(c, 5, picked, 2, 4) == -1);
+	CHECK(ltSlotFor(c, 5, picked, 0, 1) == -1);
+}
+
+static void
+TestEntrySlot(void)
+{
+	CHECK(ltEntrySlot(1, 2u, true) == 1);
+	CHECK(ltEntrySlot(0, 1u, true) == 0);
+	CHECK(ltEntrySlot(-1, 2u, true) == -1);
+	CHECK(ltEntrySlot(2, 2u, true) == -1);
+	CHECK(ltEntrySlot(1, 2u, false) == -1);
+	CHECK(ltEntrySlot(0, 0u, true) == -1);
+	CHECK(ltLightTextureBound(true, 1u));
+	CHECK(!ltLightTextureBound(false, 1u));
+	CHECK(!ltLightTextureBound(true, 0u));
+}
+
 int
 main(void)
 {
@@ -373,6 +400,8 @@ main(void)
 	TestHoldFrames();
 	TestInView();
 	TestSlotReset();
+	TestSlotLookup();
+	TestEntrySlot();
 	if(failures == 0)
 		printf("all lights tests passed\n");
 	return failures != 0;

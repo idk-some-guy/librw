@@ -276,6 +276,27 @@ const char *lightsh_metal_src =
 "{\n"
 "	return !hadPrev || prevId != id;\n"
 "}\n"
+
+"static inline int\n"
+"ltSlotFor(const LTCand *c, int n, const int *picked, int count, int i)\n"
+"{\n"
+"	for(int k = 0; k < count; k++)\n"
+"		if(picked[k] == i || (c[i].group != 0 && picked[k] < n && c[picked[k]].group == c[i].group))\n"
+"			return k;\n"
+"	return -1;\n"
+"}\n"
+
+"static inline int\n"
+"ltEntrySlot(int slot, unsigned int slots, bool ranPass)\n"
+"{\n"
+"	return ranPass && slot >= 0 && (unsigned int)slot < slots ? slot : -1;\n"
+"}\n"
+
+"static inline bool\n"
+"ltLightTextureBound(bool ranPass, unsigned int slots)\n"
+"{\n"
+"	return ranPass && slots > 0;\n"
+"}\n"
 "#endif\n"
 
 "static inline bool\n"

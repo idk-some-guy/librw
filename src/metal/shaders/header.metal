@@ -29,6 +29,7 @@ using namespace metal;
 #define BUFFER_LIGHTCLUSTERS 20
 #define BUFFER_LIGHTDRAW 21
 #define TEXTURE_SHADOW 8
+#define TEXTURE_LIGHTSHADOW 9
 
 constant bool alphaTest [[function_constant(0)]];
 constant bool directionals [[function_constant(1)]];
@@ -374,9 +375,24 @@ LightsSurface(float3 pos, constant LTFrame &lf, constant Material &material)
 	return s;
 }
 
+struct LightShadowRead
+{
+	texture2d_array<float> tex;
+	float operator()(float slot, float4 position) const
+	{
+		return slot < 0.0 ? 1.0 : tex.read(uint2(position.xy), uint(slot)).r;
+	}
+};
+
+struct LightShadowNone
+{
+	float operator()(float, float4) const { return 1.0; }
+};
+
+template<typename Shadow>
 static float3
-LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
-          const device LTLight *list, const device ushort *clusters)
+LightsSumWith(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
+              const device LTLight *list, const device ushort *clusters, Shadow shadow)
 {
 	uint cluster = ltCluster(position.x, position.y, dot(rel, lf.axis.xyz), lf.grid.x, lf.grid.y, lf.axis.w, lf.grid.z);
 	const device uint *counts = (const device uint*)(clusters + LT_CLUSTER_X*LT_CLUSTER_Y*LT_CLUSTER_Z*LT_PER_CLUSTER);
@@ -392,10 +408,27 @@ LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, con
 		float3 L = d*rsqrt(max(d2, 1e-12));
 		if((l.ids.y & LT_SPOT) != 0)
 			a *= ltSpot(dot(-L, normalize(l.dirOuter.xyz)), l.dirOuter.w, l.spot.x);
+		a *= shadow(l.spot.w, position);
 		float nl = max(dot(N, L), 0.0);
 		sum += l.colorGloss.rgb*(a*nl)*(albedo + ltSpecular(dot(N, normalize(L + V)), gloss));
 	}
 	return sum*lf.params.y;
+}
+
+static float3
+LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
+          const device LTLight *list, const device ushort *clusters, texture2d_array<float> lightShadow)
+{
+	LightShadowRead read = { lightShadow };
+	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, read);
+}
+
+static float3
+LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
+          const device LTLight *list, const device ushort *clusters)
+{
+	LightShadowNone none;
+	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, none);
 }
 
 static float3
