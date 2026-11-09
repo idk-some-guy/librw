@@ -56,7 +56,9 @@ struct LightRaySlotHost
 void rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget);
 id<MTLTexture> rtLightRawTexture(void);
 id<MTLTexture> rtLightShadowTexture(void);
+id<MTLTexture> rtLightHistoryTexture(uint32 slot);
 uint32 rtLightSlotCount(void);
+uint32 rtLightHeldSlots(uint32 *ids, uint32 *holes);
 void rtEncodeBuilds(id<MTLCommandBuffer> cb);
 id<MTLAccelerationStructure> rtBottomLevel(const InstanceDataHeader *h);
 void rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters);

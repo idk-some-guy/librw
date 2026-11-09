@@ -189,6 +189,7 @@ ltBudget(int setting, int shadowQuality)
 
 #ifndef __METAL_VERSION__
 #define LT_CAND_PINNED 1u
+#define LT_NO_ID 0xFFFFFFFFu
 
 struct LTCand { float score; unsigned id; unsigned flags; unsigned group; int held; };
 
@@ -276,11 +277,67 @@ ltSlotReset(bool hadPrev, unsigned int prevId, unsigned int id)
 	return !hadPrev || prevId != id;
 }
 
+static inline unsigned int
+ltGroupIdentity(const LTCand *c, int n, int i)
+{
+	unsigned int id = c[i].id;
+	if(c[i].group == 0)
+		return id;
+	for(int j = 0; j < n; j++)
+		if(c[j].group == c[i].group && c[j].id < id)
+			id = c[j].id;
+	return id;
+}
+
+static inline unsigned int
+ltGroupSignature(const LTCand *c, int n, int i)
+{
+	if(c[i].group == 0)
+		return 0u;
+	unsigned int sig = 0u;
+	for(int j = 0; j < n; j++)
+		if(c[j].group == c[i].group)
+			sig += c[j].id*2654435761u + 1u;
+	return sig;
+}
+
+static inline int
+ltOrderSlots(int *slots, int budget, const int *picked, int count, const LTCand *c, const unsigned int *prevIds, int prevCount, unsigned int prevHoles)
+{
+	if(budget > LT_MAX_SHADOWED)
+		budget = LT_MAX_SHADOWED;
+	if(count > budget)
+		count = budget;
+	bool used[LT_MAX_SHADOWED] = {};
+	for(int k = 0; k < budget; k++)
+		slots[k] = -1;
+	for(int j = 0; j < count; j++)
+		for(int k = 0; k < budget && k < prevCount; k++)
+			if(slots[k] < 0 && !((prevHoles >> k) & 1u) && prevIds[k] == c[picked[j]].id){
+				slots[k] = picked[j];
+				used[j] = true;
+				break;
+			}
+	int next = 0;
+	for(int j = 0; j < count; j++){
+		if(used[j])
+			continue;
+		while(slots[next] >= 0)
+			next++;
+		slots[next] = picked[j];
+	}
+	int span = 0;
+	for(int k = 0; k < budget; k++)
+		if(slots[k] >= 0)
+			span = k + 1;
+	return span;
+}
+
 static inline int
 ltSlotFor(const LTCand *c, int n, const int *picked, int count, int i)
 {
 	for(int k = 0; k < count; k++)
-		if(picked[k] == i || (c[i].group != 0 && picked[k] < n && c[picked[k]].group == c[i].group))
+		if(picked[k] >= 0 && (picked[k] == i || (c[i].group != 0 && picked[k] < n && c[picked[k]].group == c[i].group)))
 			return k;
 	return -1;
 }

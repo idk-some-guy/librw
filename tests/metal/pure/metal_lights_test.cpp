@@ -362,6 +362,30 @@ TestSlotLookup(void)
 	CHECK(ltSlotFor(c, 5, picked, 2, 0) == -1);
 	CHECK(ltSlotFor(c, 5, picked, 2, 4) == -1);
 	CHECK(ltSlotFor(c, 5, picked, 0, 1) == -1);
+	int sparse[3] = { -1, 1, -1 };
+	CHECK(ltSlotFor(c, 5, sparse, 3, 1) == 1);
+	CHECK(ltSlotFor(c, 5, sparse, 3, 2) == 1);
+	CHECK(ltSlotFor(c, 5, sparse, 3, 0) == -1);
+	CHECK(ltSlotFor(c, 5, sparse, 3, 4) == -1);
+}
+
+static void
+TestGroupSignature(void)
+{
+	LTCand c[5] = { { 1.0f, 21u, 0u, 5u, 0 }, { 1.0f, 20u, 0u, 5u, 0 }, { 1.0f, 22u, 0u, 0u, 0 }, { 1.0f, 30u, 0u, 6u, 0 }, { 1.0f, 19u, 0u, 5u, 0 } };
+	CHECK(ltGroupSignature(c, 5, 2) == 0u);
+	CHECK(ltGroupSignature(c, 5, 0) == ltGroupSignature(c, 5, 1));
+	CHECK(ltGroupSignature(c, 5, 0) == ltGroupSignature(c, 5, 4));
+	CHECK(ltGroupSignature(c, 5, 0) != 0u);
+	CHECK(ltGroupSignature(c, 5, 3) != 0u && ltGroupSignature(c, 5, 3) != ltGroupSignature(c, 5, 0));
+	LTCand order[3] = { c[4], c[0], c[1] };
+	CHECK(ltGroupSignature(order, 3, 0) == ltGroupSignature(c, 5, 0));
+	CHECK(ltGroupSignature(c, 2, 0) != ltGroupSignature(c, 5, 0));
+	LTCand leave[2] = { c[4], c[1] };
+	CHECK(ltGroupSignature(leave, 2, 0) != ltGroupSignature(order, 3, 0));
+	LTCand swap[3] = { c[4], c[0], { 1.0f, 23u, 0u, 5u, 0 } };
+	CHECK(ltGroupSignature(swap, 3, 0) != ltGroupSignature(order, 3, 0));
+	CHECK(ltGroupIdentity(leave, 2, 0) == ltGroupIdentity(order, 3, 0) && ltGroupSignature(leave, 2, 0) != ltGroupSignature(order, 3, 0));
 }
 
 static void
@@ -376,6 +400,94 @@ TestEntrySlot(void)
 	CHECK(ltLightTextureBound(true, 1u));
 	CHECK(!ltLightTextureBound(false, 1u));
 	CHECK(!ltLightTextureBound(true, 0u));
+}
+
+static void
+TestOrderSlots(void)
+{
+	LTCand c[6] = { { 1.0f, 10u, 0u, 0u, 0 }, { 1.0f, 11u, 0u, 0u, 0 }, { 1.0f, 12u, 0u, 0u, 0 }, { 1.0f, 13u, 0u, 0u, 0 }, { 1.0f, 14u, 0u, 0u, 0 }, { 1.0f, 15u, 0u, 0u, 0 } };
+	int s[LT_MAX_SHADOWED];
+	int a[2] = { 1, 0 };
+	unsigned int prev[2] = { 10u, 11u };
+	CHECK(ltOrderSlots(s, 2, a, 2, c, prev, 2, 0u) == 2);
+	CHECK(s[0] == 0 && s[1] == 1);
+	int b[3] = { 2, 0, 1 };
+	unsigned int prevB[3] = { 10u, 11u, 12u };
+	CHECK(ltOrderSlots(s, 3, b, 3, c, prevB, 3, 0u) == 3);
+	CHECK(s[0] == 0 && s[1] == 1 && s[2] == 2);
+	int d[3] = { 3, 1, 0 };
+	CHECK(ltOrderSlots(s, 3, d, 3, c, prevB, 3, 0u) == 3);
+	CHECK(s[1] == 1 && s[0] == 0 && s[2] == 3);
+	int e[2] = { 4, 5 };
+	CHECK(ltOrderSlots(s, 2, e, 2, c, prev, 2, 0u) == 2);
+	CHECK(s[0] == 4 && s[1] == 5);
+	int f[2] = { 5, 1 };
+	CHECK(ltOrderSlots(s, 2, f, 2, c, prev, 2, 0u) == 2);
+	CHECK(s[1] == 1 && s[0] == 5);
+	int g[2] = { 0, 4 };
+	unsigned int wide[4] = { 13u, 10u, 11u, 12u };
+	CHECK(ltOrderSlots(s, 4, g, 2, c, wide, 4, 0u) == 2);
+	CHECK(s[1] == 0 && s[0] == 4 && s[2] == -1 && s[3] == -1);
+	int over[2] = { 0, 4 };
+	unsigned int tall[4] = { 13u, 12u, 11u, 10u };
+	CHECK(ltOrderSlots(s, 2, over, 2, c, tall, 4, 0u) == 2);
+	CHECK(s[0] == 0 && s[1] == 4);
+	int h[2] = { 1, 0 };
+	CHECK(ltOrderSlots(s, 2, h, 2, c, nullptr, 0, 0u) == 2);
+	CHECK(s[0] == 1 && s[1] == 0);
+	int zero[1] = { 7 };
+	CHECK(ltOrderSlots(s, 2, zero, 0, c, prev, 2, 0u) == 0);
+	CHECK(s[0] == -1 && s[1] == -1);
+
+	int mid[2] = { 0, 2 };
+	CHECK(ltOrderSlots(s, 3, mid, 2, c, prevB, 3, 0u) == 3);
+	CHECK(s[0] == 0 && s[1] == -1 && s[2] == 2);
+	int top[1] = { 2 };
+	CHECK(ltOrderSlots(s, 3, top, 1, c, prevB, 3, 0u) == 3);
+	CHECK(s[0] == -1 && s[1] == -1 && s[2] == 2);
+	unsigned int holed[3] = { 10u, LT_NO_ID, 12u };
+	int fill[3] = { 0, 3, 2 };
+	CHECK(ltOrderSlots(s, 3, fill, 3, c, holed, 3, 2u) == 3);
+	CHECK(s[0] == 0 && s[1] == 3 && s[2] == 2);
+	int two[2] = { 0, 3 };
+	CHECK(ltOrderSlots(s, 3, two, 2, c, holed, 3, 2u) == 2);
+	CHECK(s[0] == 0 && s[1] == 3 && s[2] == -1);
+	int mix[3] = { 1, 4, 5 };
+	CHECK(ltOrderSlots(s, 4, mix, 3, c, prevB, 3, 0u) == 3);
+	CHECK(s[0] == 4 && s[1] == 1 && s[2] == 5 && s[3] == -1);
+	int hole[2] = { 4, 0 };
+	unsigned int gone[3] = { LT_NO_ID, 11u, 12u };
+	CHECK(ltOrderSlots(s, 3, hole, 2, c, gone, 3, 1u) == 2);
+	CHECK(s[0] == 4 && s[1] == 0 && s[2] == -1);
+	int back[2] = { 3, 2 };
+	unsigned int lowGone[3] = { LT_NO_ID, LT_NO_ID, 12u };
+	CHECK(ltOrderSlots(s, 3, back, 2, c, lowGone, 3, 3u) == 3);
+	CHECK(s[0] == 3 && s[1] == -1 && s[2] == 2);
+
+	LTCand edge[2] = { { 1.0f, 10u, 0u, 0u, 0 }, { 1.0f, LT_NO_ID, 0u, 0u, 0 } };
+	int liveBoth[2] = { 1, 0 };
+	unsigned int liveIds[2] = { 10u, LT_NO_ID };
+	CHECK(ltOrderSlots(s, 2, liveBoth, 2, edge, liveIds, 2, 0u) == 2);
+	CHECK(s[0] == 0 && s[1] == 1);
+	int lone[1] = { 1 };
+	unsigned int holeAbove[2] = { 10u, LT_NO_ID };
+	CHECK(ltOrderSlots(s, 2, lone, 1, edge, holeAbove, 2, 2u) == 1);
+	CHECK(s[0] == 1 && s[1] == -1);
+}
+
+static void
+TestGroupIdentity(void)
+{
+	LTCand c[5] = { { 1.0f, 21u, 0u, 5u, 0 }, { 1.0f, 20u, 0u, 5u, 0 }, { 1.0f, 22u, 0u, 0u, 0 }, { 1.0f, 30u, 0u, 6u, 0 }, { 1.0f, 19u, 0u, 5u, 0 } };
+	CHECK(ltGroupIdentity(c, 5, 0) == 19u);
+	CHECK(ltGroupIdentity(c, 5, 1) == 19u);
+	CHECK(ltGroupIdentity(c, 5, 4) == 19u);
+	CHECK(ltGroupIdentity(c, 5, 2) == 22u);
+	CHECK(ltGroupIdentity(c, 5, 3) == 30u);
+	CHECK(ltGroupIdentity(c, 2, 0) == 20u);
+	LTCand swapped[2] = { c[1], c[0] };
+	CHECK(ltGroupIdentity(swapped, 2, 0) == ltGroupIdentity(c, 2, 0));
+	CHECK(ltGroupIdentity(swapped, 2, 1) == ltGroupIdentity(c, 2, 1));
 }
 
 int
@@ -401,6 +513,9 @@ main(void)
 	TestInView();
 	TestSlotReset();
 	TestSlotLookup();
+	TestOrderSlots();
+	TestGroupIdentity();
+	TestGroupSignature();
 	TestEntrySlot();
 	if(failures == 0)
 		printf("all lights tests passed\n");

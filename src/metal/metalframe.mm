@@ -187,6 +187,7 @@ struct FrameState
 static FrameState frame;
 
 static bool realShadowSource(void);
+static bool lightShadowSource(void);
 static void dropLayerTargets(void);
 static uint64 layerTargetBytes(void);
 
@@ -267,13 +268,14 @@ applySettings(const RenderSettings *s)
 		prewarmShadowTwins();
 	if(!lightsBefore && frameLightsSource())
 		prewarmLightVariants();
-	if(n.lights != LIGHTS_SHADOWED || ltBudget(n.shadowedLights, n.shadowQuality) == 0)
+	if(!lightShadowSource())
 		rtDropLightTargets();
 	if(realBefore && !realShadowSource()){
 		rtDropShadowTargets();
 		rtReleaseLevels();
-		dropLayerTargets();
 	}
+	if(!realShadowSource() && !lightShadowSource())
+		dropLayerTargets();
 }
 
 void
@@ -368,12 +370,14 @@ static void
 appendLightsTail(char *buf, size_t size)
 {
 	LightStats l = getLightStats();
-	char ms[32] = "-";
+	char ms[32] = "-", shadowMs[32] = "-";
 	if(l.clusterMs >= 0.0f)
 		snprintf(ms, sizeof(ms), "%.2fms", l.clusterMs);
+	if(l.lightShadowMs > 0.0f)
+		snprintf(shadowMs, sizeof(shadowMs), "%.2fms", l.lightShadowMs);
 	size_t n = strlen(buf);
-	snprintf(buf + n, size - n, " lights %u dropped %u clusterloss %u percluster %u cluster %s",
-		l.submitted, l.dropped, l.clusterLoss, l.maxPerCluster, ms);
+	snprintf(buf + n, size - n, " lights %u dropped %u clusterloss %u percluster %u cluster %s lslots %u lshadow %s lowner %u loverflow %u",
+		l.submitted, l.dropped, l.clusterLoss, l.maxPerCluster, ms, l.shadowed, shadowMs, l.ownerListed, l.ownerOverflow);
 }
 
 static const char*
@@ -1449,6 +1453,13 @@ realShadowSource(void)
 	return shSourceOn(frame.settings.shadowQuality, rtShadowsSupported(), frame.activeTier == TIER_MODERN);
 }
 
+static bool
+lightShadowSource(void)
+{
+	return frame.settings.lights == LIGHTS_SHADOWED && ltBudget(frame.settings.shadowedLights, frame.settings.shadowQuality) > 0 &&
+		rtShadowsSupported() && frame.activeTier == TIER_MODERN;
+}
+
 bool32
 shadowSourceOn(void)
 {
@@ -2173,9 +2184,9 @@ frameRayWork(void)
 		d.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 		[[frameCommandBuffer() renderCommandEncoderWithDescriptor:d] endEncoding];
 	}
+	if(ppLayerRuns(casters || lightRays, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
+		encodeLayer(frameCommandBuffer(), &in);
 	if(casters){
-		if(ppLayerRuns(casters, cutoutLayerDraws()) && in.depth && ensureLayerTargets())
-			encodeLayer(frameCommandBuffer(), &in);
 		frame.shadow = rtEncodeShadows(frameCommandBuffer(), in);
 		noteShadowTraced();
 	}
@@ -2392,6 +2403,32 @@ readLightShadowForTest(int32 slot, int32 x, int32 y, float32 *value)
 		if(!commitAndWait(cb))
 			return 0;
 		*value = (float32)*(const uint8*)buf.contents/255.0f;
+	}
+	return 1;
+}
+
+bool32
+readLightHistoryForTest(int32 slot, int32 x, int32 y, float32 *value, float32 *length)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = slot < 0 ? nil : rtLightHistoryTexture((uint32)slot);
+
+	if(ctx == nil || tex == nil || x < 0 || y < 0 || x >= (int32)tex.width || y >= (int32)tex.height)
+		return 0;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:8 options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x, y, 0)
+			sourceSize:MTLSizeMake(1, 1, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:4 destinationBytesPerImage:4];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		const __fp16 *px = (const __fp16*)buf.contents;
+		*value = (float32)px[0];
+		*length = (float32)px[1];
 	}
 	return 1;
 }

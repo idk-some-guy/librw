@@ -54,8 +54,10 @@ static struct LightState
 	uint32 lastIdCount = 0;
 	uint64 candFrame = 0;
 	uint32 candCur = 0, candPrev = 0;
+	bool candFresh = false, candScene = false;
 	std::vector<LTCand> cands;
-	std::vector<std::pair<uint32, int32>> held;
+	std::vector<uint32> idents;
+	std::vector<std::pair<uint32, int32>> held, next;
 	uint32 slots = 0;
 	std::vector<int32> slotOf;
 	id<MTLTexture> whiteShadow = nil, shadowTex = nil;
@@ -154,8 +156,14 @@ rollCandidates(void)
 	uint64 f = getFrameId();
 	if(f == lt.candFrame)
 		return;
-	lt.candPrev = f == lt.candFrame + 1 ? lt.candCur : 0;
-	lt.candCur = 0;
+	if(lt.candFresh){
+		lt.candPrev = f == lt.candFrame + 1 ? lt.candCur : 0;
+		lt.candCur = 0;
+		lt.candFresh = lt.candScene = false;
+	}else if(lt.candScene){
+		lt.candPrev = 0;
+		lt.candScene = false;
+	}
 	lt.candFrame = f;
 }
 
@@ -170,6 +178,7 @@ void
 lightsSceneBegin(Camera *cam)
 {
 	rollCandidates();
+	lt.candScene = true;
 	clearSubmission();
 	lt.cam = cam;
 	lt.scenePass = 0;
@@ -196,6 +205,7 @@ setLights(const LightDesc *lights, int32 n)
 		return;
 	rollCandidates();
 	lt.candCur = 0;
+	lt.candFresh = true;
 	if(lights == nil || n <= 0)
 		return;
 	float32 eye[3];
@@ -247,26 +257,41 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		float32 dx = d.pos[0] - eye[0], dy = d.pos[1] - eye[1], dz = d.pos[2] - eye[2];
 		bool seen = d.radius > 0.0f && ltInView(vp, LTVec3{ d.pos[0], d.pos[1], d.pos[2] }, d.radius);
 		float32 intensity = 0.2126f*d.color[0] + 0.7152f*d.color[1] + 0.0722f*d.color[2];
-		int32 held = 0;
+		lt.cands[i] = { seen ? ltScore(intensity, dx*dx + dy*dy + dz*dz) : 0.0f, d.id, (d.flags & LIGHT_PINNED) ? LT_CAND_PINNED : 0u, d.group, 0 };
+	}
+	lt.idents.resize(n);
+	for(uint32 i = 0; i < n; i++)
+		lt.idents[i] = ltGroupIdentity(lt.cands.data(), (int)n, (int)i);
+	for(uint32 i = 0; i < n; i++){
+		lt.cands[i].id = lt.idents[i];
 		for(const auto &h : lt.held)
-			if(h.first == d.id)
-				held = h.second;
-		lt.cands[i] = { seen ? ltScore(intensity, dx*dx + dy*dy + dz*dz) : 0.0f, d.id, (d.flags & LIGHT_PINNED) ? LT_CAND_PINNED : 0u, d.group, held };
+			if(h.first == lt.idents[i])
+				lt.cands[i].held = h.second;
 	}
 	int picked[LT_MAX_SHADOWED];
 	int count = ltPickShadowed(lt.cands.data(), (int)n, budget, picked);
-	std::vector<std::pair<uint32, int32>> next;
+	uint32 prevIds[LT_MAX_SHADOWED], prevHoles = 0;
+	int slotPick[LT_MAX_SHADOWED];
+	int span = ltOrderSlots(slotPick, budget, picked, count, lt.cands.data(), prevIds, (int)rtLightHeldSlots(prevIds, &prevHoles), prevHoles);
+	lt.next.clear();
 	for(uint32 i = 0; i < n; i++){
-		bool was = false;
-		for(int k = 0; k < count; k++)
-			was = was || picked[k] == (int)i;
-		int32 h = ltHoldNext(lt.cands[i].held, was, LT_HOLD_FRAMES);
-		if(h > 0)
-			next.push_back({ lt.cands[i].id, h });
+		int32 h = ltHoldNext(lt.cands[i].held, ltSlotFor(lt.cands.data(), (int)n, picked, count, (int)i) >= 0, LT_HOLD_FRAMES);
+		bool dup = false;
+		for(const auto &e : lt.next)
+			dup = dup || e.first == lt.cands[i].id;
+		if(h > 0 && !dup)
+			lt.next.push_back({ lt.cands[i].id, h });
 	}
-	lt.held.swap(next);
-	for(int k = 0; k < count; k++){
-		const LightDesc &d = lt.kept[picked[k]];
+	lt.held.swap(lt.next);
+	for(int k = 0; k < span; k++){
+		if(slotPick[k] < 0){
+			out[k].posRadius = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+			out[k].dirOuter = simd_make_float4(0.0f, 0.0f, 1.0f, -2.0f);
+			out[k].misc = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+			out[k].ids = simd_make_uint4(LT_NO_ID, 0u, 0u, 0u);
+			continue;
+		}
+		const LightDesc &d = lt.kept[slotPick[k]];
 		float32 sum[3] = { 0.0f, 0.0f, 0.0f };
 		int32 members = 0;
 		for(const LightDesc &g : lt.kept)
@@ -280,12 +305,12 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		out[k].posRadius = simd_make_float4(sum[0]*inv, sum[1]*inv, sum[2]*inv, d.radius);
 		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
 		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
-		out[k].ids = simd_make_uint4(d.id, d.owner, d.group, 0u);
+		out[k].ids = simd_make_uint4(lt.cands[slotPick[k]].id, d.owner, d.group, ltGroupSignature(lt.cands.data(), (int)n, slotPick[k]));
 	}
 	for(uint32 i = 0; i < n; i++)
-		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, picked, count, (int)i);
-	lt.slots = (uint32)count;
-	return (uint32)count;
+		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, slotPick, span, (int)i);
+	lt.slots = (uint32)span;
+	return (uint32)span;
 }
 
 void
@@ -401,6 +426,12 @@ lightsViewEncode(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> o
 }
 
 void
+lightsReleaseShadowTexture(void)
+{
+	lt.shadowTex = lt.whiteShadow;
+}
+
+void
 lightsBind(id<MTLRenderCommandEncoder> e)
 {
 	if(lt.sceneSlot < 0 || lt.frameBuffer == nil)
@@ -420,6 +451,12 @@ getLightStats(void)
 	s.kept = (uint32)lt.kept.size();
 	s.dropped = lt.dropped;
 	s.shadowed = lt.slots;
+	if(lt.slots > 0){
+		RayStats r = getRayStats();
+		s.lightShadowMs = r.lightMs;
+		s.ownerListed = r.lightOwnerListed;
+		s.ownerOverflow = r.lightOwnerOverflow;
+	}
 	s.clusterMs = -1.0f;
 	ClusterResult r;
 	{
@@ -446,6 +483,12 @@ int32
 lightClusterPassesForTest(void)
 {
 	return lt.passes;
+}
+
+bool32
+lightShadowHeldForTest(void)
+{
+	return lt.shadowTex != nil && lt.shadowTex != lt.whiteShadow;
 }
 
 int32
@@ -489,6 +532,10 @@ lightsTerm(void)
 {
 	clearSubmission();
 	lt.cam = nil;
+	lt.held.clear();
+	lt.next.clear();
+	lt.candFrame = lt.candCur = lt.candPrev = 0;
+	lt.candFresh = lt.candScene = false;
 	lt.pipe = lt.viewPipe = nil;
 	lt.pipeTried = false;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){

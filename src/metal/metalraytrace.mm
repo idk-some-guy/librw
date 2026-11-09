@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include "metalobjc.h"
@@ -78,7 +79,7 @@ static struct
 	uint64 budget;
 	uint32 buildBudgetTest;
 	uint64 serial;
-	uint64 frame;
+	uint64 frame, scene;
 	std::atomic<uint64> completed;
 	uint32 spent;
 	uint32 backlog;
@@ -228,6 +229,14 @@ static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params"
 static_assert(sizeof(LightRaySlotHost) == 64, "light ray slot");
 static_assert(LT_MAX_SHADOWED == 8, "RayStats carries eight light slots");
 
+struct LightResult
+{
+	uint32 serial;
+	uint64 ticks;
+	uint32 listed, overflow;
+	uint32 rays[LT_MAX_SHADOWED];
+};
+
 static struct
 {
 	id<MTLComputePipelineState> rays, raysAlpha, accumulate[4], clear, ownerReset, ownerFix;
@@ -236,14 +245,20 @@ static struct
 	id<MTLComputePipelineState> lightRays, lightRaysAlpha, lightFix, lightAccumulate, lightUpsample;
 	id<MTLTexture> lightRaw, lightShadow;
 	id<MTLTexture> lightRawView[LT_MAX_SHADOWED], lightOutView[LT_MAX_SHADOWED], lightHist[LT_MAX_SHADOWED][2];
-	uint32 lightPrevId[LT_MAX_SHADOWED], lightPrevCount, lightIndex, lightSamples;
+	uint32 lightPrevId[LT_MAX_SHADOWED], lightPrevSig[LT_MAX_SHADOWED], lightPrevCount, lightPrevHoles, lightIndex, lightSamples;
 	int32 lightQuality;
 	uint64 lightLastFrame;
 	bool lightHave;
 	simd_float4x4 lightPrevInvViewProj;
 	simd_float3 lightPrevEye;
 	id<MTLBuffer> lightList, lightCounts[MAXFRAMESINFLIGHT];
-	std::atomic<uint32> lightRayCount[LT_MAX_SHADOWED];
+	id<MTLCounterSampleBuffer> lightTiming[MAXFRAMESINFLIGHT];
+	uint32 lightTimingSlot;
+	std::atomic<uint32> lightSerial;
+	std::mutex lightLock;
+	LightResult lightResult;
+	uint64 lightPassScene;
+	uint32 lightRunSerial;
 	uint32 lightListCap, lightFrame, lightCountSlot;
 	uint64 lightBytes;
 	bool lightReported;
@@ -366,13 +381,14 @@ initShadows(id<MTLDevice> dev)
 		fprintf(stderr, "rw::metal: the light ray kernels failed to build; shadowed lights are unshadowed: %s\n",
 			err ? err.localizedDescription.UTF8String : "");
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
-		sh.lightCounts[i] = [dev newBufferWithLength:LT_MAX_SHADOWED*sizeof(uint32) options:MTLResourceStorageModeShared];
+		sh.lightCounts[i] = [dev newBufferWithLength:(LT_MAX_SHADOWED + 1)*sizeof(uint32) options:MTLResourceStorageModeShared];
 	id<MTLCounterSet> timestamps = timestampCounters(dev);
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
 		sh.timing[i] = twoSampleBuffer(dev, timestamps);
+		sh.lightTiming[i] = twoSampleBuffer(dev, timestamps);
 		rf.buildTiming[i] = sampleBuffer(dev, timestamps, RT_BUILD_SAMPLES);
 	}
-	sh.timingSlot = 0;
+	sh.timingSlot = sh.lightTimingSlot = 0;
 	rf.buildSlot = 0;
 	[dev sampleTimestamps:&sh.cpu0 gpuTimestamp:&sh.gpu0];
 	sh.wall0 = std::chrono::steady_clock::now();
@@ -474,8 +490,14 @@ rtTerm(void)
 		sh.accumulate[k] = nil;
 	sh.alphaHit = nil;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++)
-		sh.timing[i] = nil;
+		sh.timing[i] = sh.lightTiming[i] = nil;
 	sh.ticks.store(0);
+	{
+		std::lock_guard<std::mutex> g(sh.lightLock);
+		sh.lightResult = { sh.lightSerial.load(), 0, 0, 0, {} };
+	}
+	sh.lightPassScene = 0;
+	sh.lightRunSerial = 0;
 	sh.valid = sh.ran = false;
 	sh.frame = 0;
 	sh.lightFrame = 0;
@@ -974,6 +996,7 @@ rtCastersOpen(void)
 void
 rtSceneBegin(void)
 {
+	rt.scene++;
 	rf.current = nil;
 	rf.currentAlpha = rf.currentParams = nil;
 	rf.currentTable = rf.passTable = nil;
@@ -1856,6 +1879,7 @@ rtDropLightTargets(void)
 	sh.lightListCap = 0;
 	sh.lightBytes = 0;
 	sh.lightHave = false;
+	lightsReleaseShadowTexture();
 }
 
 static bool
@@ -1894,7 +1918,7 @@ ensureLightTargets(const ShadowInputs &in, const SHQuality &q, uint32 slices)
 		sh.lightHist[i][1] = [dev newTextureWithDescriptor:hd];
 		built = sh.lightRawView[i] && sh.lightOutView[i] && sh.lightHist[i][0] && sh.lightHist[i][1];
 	}
-	uint32 capacity = shOwnerListCapacity(rw, rh);
+	uint32 capacity = shOwnerListCapacity(rw, rh)*slices;
 	sh.lightList = [dev newBufferWithLength:16 + (NSUInteger)capacity*8 options:MTLResourceStorageModePrivate];
 	if(!built || sh.lightList == nil){
 		rtDropLightTargets();
@@ -1921,10 +1945,40 @@ rtLightShadowTexture(void)
 	return sh.lightShadow;
 }
 
+id<MTLTexture>
+rtLightHistoryTexture(uint32 slot)
+{
+	return slot < LT_MAX_SHADOWED && sh.lightHave ? sh.lightHist[slot][sh.lightIndex] : nil;
+}
+
 uint32
 rtLightSlotCount(void)
 {
 	return rt.stats.lightSlots;
+}
+
+uint32
+rtLightHeldSlots(uint32 *ids, uint32 *holes)
+{
+	*holes = 0;
+	if(!sh.lightHave)
+		return 0;
+	*holes = sh.lightPrevHoles;
+	for(uint32 i = 0; i < sh.lightPrevCount; i++)
+		ids[i] = sh.lightPrevId[i];
+	return sh.lightPrevCount;
+}
+
+static id<MTLComputeCommandEncoder>
+lightEncoder(id<MTLCommandBuffer> cb, id<MTLCounterSampleBuffer> sb)
+{
+	if(sb == nil)
+		return [cb computeCommandEncoder];
+	MTLComputePassDescriptor *pd = [MTLComputePassDescriptor computePassDescriptor];
+	pd.sampleBufferAttachments[0].sampleBuffer = sb;
+	pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
+	pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
+	return [cb computeCommandEncoderWithDescriptor:pd];
 }
 
 void
@@ -1933,11 +1987,10 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	SHQuality q = shQuality(in.quality);
 	q.halfRes = 1u;
 	id<MTLAccelerationStructure> tlas = rf.current;
-	rt.stats.lightSlots = 0;
-	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++){
+	rt.stats.lightSlots = rt.stats.lightSlices = 0;
+	bool continuing = sh.lightPassScene != 0 && sh.lightPassScene + 1 == rt.scene;
+	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
 		rt.stats.lightSlotId[i] = 0;
-		sh.lightRayCount[i].store(0);
-	}
 	count = std::min(count, std::min(budget, (uint32)LT_MAX_SHADOWED));
 	bool had = sh.lightHave && sh.lightLastFrame + 1 == rt.frame && !rt.cutFrame && in.history && in.motion && in.samples == sh.lightSamples &&
 		in.quality == sh.lightQuality;
@@ -1956,13 +2009,17 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	simd_float3 eye = toWorld.columns[3].xyz;
 	uint32 rw = (uint32)sh.lightRaw.width, rh = (uint32)sh.lightRaw.height, frameNo = sh.lightFrame++;
 	bool owners = sh.ownerReset && !sh.ownerOff && rt.stats.ownedInstances > 0;
+	uint32 listCap = std::min(sh.lightListCap, sh.listCapTest);
 	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f), simd_make_float4(eye, SH_RAY_DISTANCE),
 		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, 1u, q.halfRes, alpha ? rt.stats.alphaEntries : 0u, 1u,
-		owners ? 0u : 1u, sh.lightListCap };
+		owners ? 0u : 1u, listCap };
 	id<MTLBuffer> counts = sh.lightCounts[sh.lightCountSlot];
 	sh.lightCountSlot = (sh.lightCountSlot + 1) % MAXFRAMESINFLIGHT;
-	memset(counts.contents, 0, LT_MAX_SHADOWED*sizeof(uint32));
-	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	memset(counts.contents, 0, (LT_MAX_SHADOWED + 1)*sizeof(uint32));
+	uint32 serial = sh.lightSerial.fetch_add(1) + 1;
+	id<MTLCounterSampleBuffer> timing = sh.lightTiming[sh.lightTimingSlot];
+	sh.lightTimingSlot = (sh.lightTimingSlot + 1) % MAXFRAMESINFLIGHT;
+	id<MTLComputeCommandEncoder> e = lightEncoder(cb, timing);
 	if(alpha)
 		encodeAlphaTable(e, rf.currentTable, rf.currentAlpha, rf.currentParams, textures);
 	[e setBuffer:sh.lightList offset:0 atIndex:3];
@@ -1987,13 +2044,18 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 		[e memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers];
 		[e setComputePipelineState:sh.lightFix];
 		[e setBuffer:alpha ? rf.currentAlpha : sh.lightList offset:0 atIndex:5];
+		[e setBuffer:counts offset:LT_MAX_SHADOWED*sizeof(uint32) atIndex:6];
 		[e dispatchThreads:MTLSizeMake(SH_OWNER_THREADS, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 	}
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 	uint32 idx = sh.lightIndex;
 	[e setComputePipelineState:sh.lightAccumulate];
+	uint32 slices = 0;
 	for(uint32 i = 0; i < count; i++){
-		bool reset = ltSlotReset(i < sh.lightPrevCount, sh.lightPrevId[i], slots[i].ids.x);
+		if(!(slots[i].posRadius.w > 0.0f))
+			continue;
+		slices++;
+		bool reset = ltSlotReset(i < sh.lightPrevCount && !((sh.lightPrevHoles >> i) & 1u) && sh.lightPrevSig[i] == slots[i].ids.w, sh.lightPrevId[i], slots[i].ids.x);
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
 			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, had && !reset ? 1u : 0u, q.maxHistory, frameNo };
 		[e setTexture:sh.lightRawView[i] atIndex:0];
@@ -2008,6 +2070,8 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 	[e setComputePipelineState:sh.lightUpsample];
 	for(uint32 i = 0; i < count; i++){
+		if(!(slots[i].posRadius.w > 0.0f))
+			continue;
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
 			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo };
 		[e setTexture:sh.lightHist[i][idx ^ 1] atIndex:0];
@@ -2016,10 +2080,16 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 		[e setTexture:sh.lightOutView[i] atIndex:3];
 		[e setBytes:&ap length:sizeof(ap) atIndex:0];
 		[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+		slices++;
 	}
 	[e endEncoding];
-	for(uint32 i = 0; i < count; i++)
+	sh.lightPrevHoles = 0;
+	for(uint32 i = 0; i < count; i++){
 		sh.lightPrevId[i] = slots[i].ids.x;
+		sh.lightPrevSig[i] = slots[i].ids.w;
+		if(!(slots[i].posRadius.w > 0.0f))
+			sh.lightPrevHoles |= 1u << i;
+	}
 	sh.lightPrevCount = count;
 	sh.lightIndex ^= 1;
 	sh.lightHave = true;
@@ -2030,13 +2100,22 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	sh.lightPrevEye = eye;
 	[cb addCompletedHandler:^(id<MTLCommandBuffer>){
 		const uint32 *c = (const uint32*)counts.contents;
+		LightResult r = { serial, timing ? tickSpan(timing, 0, 1) : 0, c[LT_MAX_SHADOWED], 0, {} };
+		r.overflow = r.listed > listCap ? r.listed - listCap : 0u;
 		for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
-			sh.lightRayCount[i].store(c[i]);
+			r.rays[i] = c[i];
+		std::lock_guard<std::mutex> g(sh.lightLock);
+		if(r.serial > sh.lightResult.serial)
+			sh.lightResult = r;
 	}];
 	rt.stats.lightSlots = count;
+	rt.stats.lightSlices = slices;
 	rt.stats.lightFrame = frameNo;
 	for(uint32 i = 0; i < count; i++)
-		rt.stats.lightSlotId[i] = slots[i].ids.x;
+		rt.stats.lightSlotId[i] = slots[i].posRadius.w > 0.0f ? slots[i].ids.x : 0u;
+	if(!continuing)
+		sh.lightRunSerial = serial;
+	sh.lightPassScene = rt.scene;
 }
 
 RayStats
@@ -2051,13 +2130,28 @@ getRayStats(void)
 	s.walkMs = rf.walkMs;
 	s.ownerListed = sh.listed.load();
 	s.ownerOverflow = sh.overflow.load();
+	LightResult lr;
+	{
+		std::lock_guard<std::mutex> g(sh.lightLock);
+		lr = sh.lightResult;
+	}
+	bool lightRan = sh.lightPassScene != 0 && sh.lightPassScene == rt.scene;
+	if(!lightRan){
+		s.lightSlots = s.lightSlices = 0;
+		memset(s.lightSlotId, 0, sizeof(s.lightSlotId));
+		lr = { 0, 0, 0, 0, {} };
+	}else if(lr.serial < sh.lightRunSerial)
+		lr = { 0, 0, 0, 0, {} };
+	s.lightOwnerListed = lr.listed;
+	s.lightOwnerOverflow = lr.overflow;
 	s.shadowMegabytes = (float32)((sh.bytes + sh.lightBytes)/1048576.0);
 	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
-		s.lightRays[i] = sh.lightRayCount[i].load();
+		s.lightRays[i] = lr.rays[i];
 	s.passMs = -1.0f;
 	s.topMs = s.buildMs = -1.0f;
+	s.lightMs = 0.0f;
 	MetalContext *ctx = getContext();
-	if(ctx == nil || (sh.timing[0] == nil && rf.buildTiming[0] == nil))
+	if(ctx == nil || (sh.timing[0] == nil && sh.lightTiming[0] == nil && rf.buildTiming[0] == nil))
 		return s;
 	MTLTimestamp cpu1, gpu1;
 	[ctx->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
@@ -2065,6 +2159,8 @@ getRayStats(void)
 	double nsPerTick = gpu1 > sh.gpu0 ? wall/(double)(gpu1 - sh.gpu0) : 1.0;
 	if(sh.timing[0] != nil && s.raysPerFrame != 0)
 		s.passMs = (float32)(sh.ticks.load()*nsPerTick/1e6);
+	if(sh.lightTiming[0] != nil)
+		s.lightMs = (float32)(lr.ticks*nsPerTick/1e6);
 	if(rf.buildTiming[0] != nil){
 		s.topMs = (float32)(rf.topTicks.load()*nsPerTick/1e6);
 		s.buildMs = (float32)(rf.buildTicks.load()*nsPerTick/1e6);

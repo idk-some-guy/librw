@@ -437,12 +437,15 @@ lightShadowOwnerFix(instance_acceleration_structure tlas [[buffer(0)]],
                     device const uint *listed [[buffer(3)]],
                     device const uint2 *list [[buffer(4)]],
                     device const ShadowAlphaEntry *alpha [[buffer(5)]],
+                    device uint *taken [[buffer(6)]],
                     constant LightRaySlot *slots [[buffer(7)]],
                     depth2d<float, access::read> depth [[texture(0)]],
                     texture2d_array<float, access::write> raw [[texture(1)]],
                     texture2d<float, access::read> normals [[texture(2)]],
                     uint tid [[thread_position_in_grid]])
 {
+	if(tid == 0u)
+		taken[0] = listed[0];
 	uint n = min(listed[0], p.listCap);
 	for(uint i = tid; i < n; i += SH_OWNER_THREADS){
 		uint2 e = list[i];

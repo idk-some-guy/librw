@@ -387,6 +387,9 @@ struct RayStats
 	uint32 ownerListed, ownerOverflow;
 	uint32 lightSlots, lightFrame;
 	uint32 lightRays[8], lightSlotId[8];
+	float32 lightMs;
+	uint32 lightOwnerListed, lightOwnerOverflow;
+	uint32 lightSlices;
 };
 RayStats getRayStats(void);
 
@@ -470,7 +473,7 @@ struct LightFrameParams
 
 struct LightStats
 {
-	uint32 submitted, kept, dropped, clusterLoss, maxPerCluster, shadowed, lightRays;
+	uint32 submitted, kept, dropped, clusterLoss, maxPerCluster, shadowed, lightRays, ownerListed, ownerOverflow;
 	float32 clusterMs, lightShadowMs;
 };
 

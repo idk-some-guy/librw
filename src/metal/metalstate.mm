@@ -460,7 +460,7 @@ beginPrepassState(bool continuous)
 	prepassFrame = true;
 	prepassFrameBound = false;
 	layerDraws.clear();
-	layerWanted = frameShadowPassPlanned() && prepassLayerShader && prepassLayerSkinShader && prepassLayerFaceShader &&
+	layerWanted = frameCasterPassPlanned() && prepassLayerShader && prepassLayerSkinShader && prepassLayerFaceShader &&
 		prepassLayerDepth && layerCopyPipe && layerCopyDepth;
 	prepassDrawsThisFrame = 0;
 	prepassEqualThisFrame = 0;

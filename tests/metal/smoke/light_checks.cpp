@@ -1402,8 +1402,15 @@ NightEnd(NightRig *r)
 	metal::setRenderSettings(&r->saved);
 }
 
+struct NightRead
+{
+	metal::LightStats lights;
+	metal::RayStats rays;
+	char line[2048];
+};
+
 static bool
-NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0, Atomic *wall = nil)
+NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0, Atomic *wall = nil, NightRead *read = nil, bool prepass = true)
 {
 	RGBA sky = { 64, 64, 64, 255 };
 	Atomic *surface = wall ? wall : backdrop;
@@ -1413,7 +1420,7 @@ NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint3
 	if(wall)
 		SetRenderState(CULLMODE, CULLNONE);
 	metal::setLights(lights, n);
-	bool began = metal::beginPrepass() != 0;
+	bool began = prepass && metal::beginPrepass() != 0;
 	if(began){
 		metal::addShadowCaster(surface, metal::SHADOWCASTER_STATIC);
 		if(blocker){
@@ -1426,6 +1433,12 @@ NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint3
 	}
 	surface->render();
 	metal::endScene(nil);
+	if(read){
+		metal::logStats();
+		read->lights = metal::getLightStats();
+		read->rays = metal::getRayStats();
+		snprintf(read->line, sizeof(read->line), "%s", metal::getStatsLine());
+	}
 	WorldEnd();
 	return began;
 }
@@ -1705,6 +1718,9 @@ CheckLightGroupedPair(void)
 	ReadAt(litX, CY, inLight);
 	bool read = metal::readLightShadowForTest(0, CX, CY, &factorDark) != 0;
 	read = metal::readLightShadowForTest(0, litX, CY, &factorLit) != 0 && read;
+	float midLeft = -1.0f, midRight = -1.0f;
+	read = metal::readLightShadowForTest(0, CX - (int32)(8.5f/perPixel), CY, &midLeft) != 0 && read;
+	read = metal::readLightShadowForTest(0, CX + (int32)(8.5f/perPixel), CY, &midRight) != 0 && read;
 	SetMode(metal::LIGHTS_ON);
 	float base[2][3], terms[2][2][3];
 	const int32 xs[2] = { CX, litX };
@@ -1721,8 +1737,8 @@ CheckLightGroupedPair(void)
 	DestroyAtomic(box);
 	geo->destroy();
 	NightEnd(&rig);
-	bool slots = st.lightSlots == 2 && (st.lightSlotId[0] == 93 || st.lightSlotId[0] == 94) && st.lightSlotId[1] == 95;
-	bool ok = began && read && slots && factorDark < 0.05f && factorLit > 0.9f;
+	bool slots = st.lightSlots == 2 && st.lightSlotId[0] == 93 && st.lightSlotId[1] == 95;
+	bool ok = began && read && slots && factorDark < 0.05f && factorLit > 0.9f && midLeft > 0.9f && midRight > 0.9f;
 	const float factors[2] = { factorDark, factorLit };
 	for(int i = 0; i < 2; i++)
 		for(int c = 0; c < 3; c++){
@@ -1735,8 +1751,788 @@ CheckLightGroupedPair(void)
 					base[i][c], a, b, factors[i]);
 		}
 	if(!ok)
-		Detail("  prepass %d read %d slots %u ids %u %u (want 2, a pair member and 95); factor in the shadow %.3f (want 0), beside it %.3f (want 1)\n",
-			began, read, st.lightSlots, st.lightSlotId[0], st.lightSlotId[1], factorDark, factorLit);
+		Detail("  prepass %d read %d slots %u ids %u %u (want 2, 93 and 95); factor in the shadow %.3f (want 0), beside it %.3f (want 1); past either member's own umbra edge %.3f and %.3f (want 1, the midpoint's umbra ends first)\n",
+			began, read, st.lightSlots, st.lightSlotId[0], st.lightSlotId[1], factorDark, factorLit, midLeft, midRight);
+	return Report(ok, name);
+}
+
+static void
+CameraSlide(const Matrix &home, float x)
+{
+	Frame *f = lightCamera->getFrame();
+	f->matrix = home;
+	V3d d = { x, 0.0f, 0.0f };
+	f->translate(&d, COMBINEPOSTCONCAT);
+	f->updateObjects();
+}
+
+static bool
+CheckLightGroupedPairFlip(void)
+{
+	const char *name = "a grouped pair keeps one slot identity and its history when the other member becomes the nearer one";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc pair[2] = { PointLight(161, -3.0f, 0.0f, 70.0f, 60.0f), PointLight(162, 3.0f, 0.0f, 70.0f, 60.0f) };
+	for(int i = 0; i < 2; i++){
+		pair[i].flags = metal::LIGHT_PINNED;
+		pair[i].group = 7;
+	}
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	Matrix home = lightCamera->getFrame()->matrix;
+	bool began = true, ids = true;
+	for(int f = 0; f < 12; f++){
+		CameraSlide(home, f < 8 ? 2.0f : -2.0f);
+		began = NightFrame(pair, 2) && began;
+		metal::RayStats st = metal::getRayStats();
+		ids = ids && (f < 3 || (st.lightSlots == 1 && st.lightSlotId[0] == 161));
+	}
+	float value = 0.0f, length = 0.0f;
+	bool read = metal::readLightHistoryForTest(0, HX, HY, &value, &length) != 0;
+	lightCamera->getFrame()->matrix = home;
+	lightCamera->getFrame()->updateObjects();
+	NightEnd(&rig);
+	bool ok = began && read && ids && length >= 8.5f;
+	if(!ok)
+		Detail("  prepass %d read %d; the slot kept the identity 161 on every frame %d; the history length after four frames with the other member nearer is %.1f (want 9, a restart reads 4)\n",
+			began, read, ids, length);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightSparseSlots(void)
+{
+	const char *name = "a freed slot index stays a hole, the lights above it keep their index and history, and a new light takes the hole";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 3;
+	metal::setRenderSettings(&high);
+	metal::LightDesc all[3] = { PointLight(171, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(172, 0.0f, 0.0f, 70.0f, 60.0f), PointLight(173, 12.0f, 0.0f, 70.0f, 60.0f) };
+	all[0].color[0] = all[0].color[1] = all[0].color[2] = 30.0f;
+	all[1].color[0] = all[1].color[1] = all[1].color[2] = 20.0f;
+	all[2].color[0] = all[2].color[1] = all[2].color[2] = 10.0f;
+	metal::LightDesc gone[2] = { all[0], all[2] };
+	metal::LightDesc again[3] = { all[0], PointLight(174, 6.0f, 0.0f, 70.0f, 60.0f), all[2] };
+	again[1].color[0] = again[1].color[1] = again[1].color[2] = 20.0f;
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	bool began = true, order = true, holeKept = true, taken = true;
+	metal::RayStats st;
+	for(int f = 0; f < 6; f++){
+		began = NightFrame(all, 3) && began;
+		st = metal::getRayStats();
+		order = order && (f < 3 || (st.lightSlots == 3 && st.lightSlotId[0] == 171 && st.lightSlotId[1] == 172 && st.lightSlotId[2] == 173));
+	}
+	for(int f = 0; f < 3; f++){
+		began = NightFrame(gone, 2) && began;
+		st = metal::getRayStats();
+		holeKept = holeKept && st.lightSlots == 3 && st.lightSlotId[0] == 171 && st.lightSlotId[1] == 0 && st.lightSlotId[2] == 173;
+	}
+	for(int f = 0; f < 3; f++){
+		began = NightFrame(again, 3) && began;
+		st = metal::getRayStats();
+		taken = taken && st.lightSlots == 3 && st.lightSlotId[0] == 171 && st.lightSlotId[1] == 174 && st.lightSlotId[2] == 173;
+	}
+	float value, top = 0.0f, fresh = 0.0f;
+	bool read = metal::readLightHistoryForTest(2, HX, HY, &value, &top) != 0;
+	read = metal::readLightHistoryForTest(1, HX, HY, &value, &fresh) != 0 && read;
+	for(int f = 0; f < 6; f++)
+		began = NightFrame(all, 3) && began;
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(gone, 2) && began;
+	metal::rtWaitForTest();
+	st = metal::getRayStats();
+	bool noRays = st.lightRays[0] > 0 && st.lightRays[1] == 0 && st.lightRays[2] > 0;
+	NightEnd(&rig);
+	bool ok = began && read && order && holeKept && taken && top >= 9.0f && fresh <= 3.5f && noRays;
+	if(!ok)
+		Detail("  prepass %d read %d; ids 171 172 173 at first %d; with the middle gone the ids hold %d; a new light takes the hole %d; the top slot's history length %.1f (want 9 or more, a move reads at most 6), the hole's new light %.1f (want 3); the hole traced rays %u %u %u (want some, 0, some)\n",
+			began, read, order, holeKept, taken, top, fresh, st.lightRays[0], st.lightRays[1], st.lightRays[2]);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightHeldSlots(void)
+{
+	const char *name = "held lights whose scores cross keep their slots";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc ab[2] = { PointLight(101, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(102, 12.0f, 0.0f, 70.0f, 60.0f) };
+	bool began = true, stable = true;
+	uint32 firstId[2] = { 0, 0 };
+	for(int f = 0; f < 8; f++){
+		int bright = f < 3 ? 0 : (f & 1);
+		for(int i = 0; i < 2; i++)
+			ab[i].color[0] = ab[i].color[1] = ab[i].color[2] = i == bright ? 30.0f : 10.0f;
+		began = NightFrame(ab, 2) && began;
+		metal::RayStats st = metal::getRayStats();
+		if(f == 2){
+			firstId[0] = st.lightSlotId[0];
+			firstId[1] = st.lightSlotId[1];
+		}
+		if(f >= 2)
+			stable = stable && st.lightSlots == 2 && st.lightSlotId[0] == firstId[0] && st.lightSlotId[1] == firstId[1];
+	}
+	NightEnd(&rig);
+	bool ok = began && stable && firstId[0] == 101 && firstId[1] == 102;
+	if(!ok)
+		Detail("  prepass %d; first frames hold %u %u (want 101 102), stable through the crossings %d\n", began, firstId[0], firstId[1], stable);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightReplacedSlot(void)
+{
+	const char *name = "a slot given a new light starts without the old light's shadow";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 60.0f, 45.0f, -60.0f, -45.0f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	metal::LightDesc oldLight = PointLight(111, 0.0f, 0.0f, 86.0f, 40.0f), other = PointLight(112, 40.0f, 30.0f, 86.0f, 14.0f), fresh = PointLight(113, 6.0f, 0.0f, 86.0f, 40.0f);
+	for(metal::LightDesc *l : { &oldLight, &other, &fresh })
+		l->color[0] = l->color[1] = l->color[2] = 20.0f;
+	metal::LightDesc before[2] = { oldLight, other }, after[2] = { fresh, other };
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 W = info.internalWidth, CX = W/2, CY = info.internalHeight/2;
+	const float perPixel = 180.0f/(float)W;
+	bool began = true;
+	for(int f = 0; f < 16; f++)
+		began = NightFrame(before, 2, box, 0, wall) && began;
+	began = NightFrame(after, 2, box, 0, wall) && began;
+	metal::rtWaitForTest();
+	float v = 0.0f;
+	bool read = true;
+	metal::RayStats st = metal::getRayStats();
+	float trace = 1.0f;
+	for(float x : { 6.7f, 7.0f }){
+		read = metal::readLightShadowForTest(0, CX - (int32)(x/perPixel), CY, &v) != 0 && read;
+		trace = std::min(trace, v);
+	}
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && read && st.lightSlots == 2 && st.lightSlotId[0] == 113 && st.lightSlotId[1] == 112 && trace > 0.9f;
+	if(!ok)
+		Detail("  prepass %d read %d; slots %u ids %u %u (want 113 112); lowest factor on the old umbra's edge %.2f (want 1)\n",
+			began, read, st.lightSlots, st.lightSlotId[0], st.lightSlotId[1], trace);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightShadowTime(void)
+{
+	const char *name = "the stats carry the light shadow time and the slot count when the pass ran and zero when it did not";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(121, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(122, 12.0f, 0.0f, 70.0f, 60.0f) };
+	bool began = true;
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(two, 2) && began;
+	metal::rtWaitForTest();
+	metal::LightStats ran = metal::getLightStats();
+	metal::logStats();
+	unsigned slots = 0;
+	char ms[32] = "";
+	const char *tail = strstr(metal::getStatsLine(), " lslots ");
+	bool parsed = tail && sscanf(tail, " lslots %u lshadow %31s", &slots, ms) == 2;
+	bool lineRan = parsed && slots == 2 && strcmp(ms, "-") != 0;
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(nil, 0) && began;
+	metal::rtWaitForTest();
+	metal::LightStats idle = metal::getLightStats();
+	metal::logStats();
+	tail = strstr(metal::getStatsLine(), " lslots ");
+	parsed = tail && sscanf(tail, " lslots %u lshadow %31s", &slots, ms) == 2;
+	bool lineIdle = parsed && slots == 0 && strcmp(ms, "-") == 0;
+	NightEnd(&rig);
+	bool ok = began && ran.shadowed == 2 && ran.lightShadowMs > 0.0f && lineRan && idle.shadowed == 0 && idle.lightShadowMs == 0.0f && lineIdle;
+	if(!ok)
+		Detail("  prepass %d; with the pass: slots %u time %.3f ms (want 2, above 0), line ok %d; without: slots %u time %.3f (want 0, 0), line ok %d; line \"%s\"\n",
+			began, ran.shadowed, ran.lightShadowMs, lineRan, idle.shadowed, idle.lightShadowMs, lineIdle, metal::getStatsLine());
+	return Report(ok, name);
+}
+
+static bool
+CheckLightStatsNoWait(void)
+{
+	const char *name = "the stats read as a host reads them, before the frame commits and with no wait, carry the light shadow time, the slot count and the owner counts and read zero once the pass stops";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 25.0f, 25.0f, -25.0f, -25.0f, 40.0f, col, nil, backMat);
+	Atomic *blocker = MakeAtomic(geo);
+	metal::LightDesc pair[2] = { PointLight(151, -1.0f, 0.0f, 10.0f, 95.0f), PointLight(152, 1.0f, 0.0f, 10.0f, 95.0f) };
+	pair[0].owner = pair[1].owner = 1;
+	bool began = true;
+	NightRead ran, idle1, idle2;
+	for(int f = 0; f < 8; f++)
+		began = NightFrame(pair, 2, blocker, 1, nil, &ran) && began;
+	unsigned slots = 0, listed = 0, overflow = 0;
+	char ms[32] = "";
+	const char *tail = strstr(ran.line, " lslots ");
+	bool lineRan = tail && sscanf(tail, " lslots %u lshadow %31s lowner %u loverflow %u", &slots, ms, &listed, &overflow) == 4 && slots == 2 &&
+		strcmp(ms, "-") != 0 && listed > 0;
+	bool ranOk = ran.lights.shadowed == 2 && ran.lights.lightShadowMs > 0.0f && ran.lights.ownerListed > 0 && ran.rays.lightSlots == 2 &&
+		ran.rays.lightMs > 0.0f && ran.rays.lightOwnerListed > 0 && ran.rays.lightSlotId[0] == 151 && ran.rays.lightSlotId[1] == 152;
+	began = NightFrame(nil, 0, nil, 0, nil, &idle1) && began;
+	began = NightFrame(nil, 0, nil, 0, nil, &idle2) && began;
+	unsigned islots = 9, ilisted = 9;
+	char ims[32] = "";
+	tail = strstr(idle2.line, " lslots ");
+	bool lineIdle = tail && sscanf(tail, " lslots %u lshadow %31s lowner %u loverflow %u", &islots, ims, &ilisted, &overflow) == 4 && islots == 0 &&
+		strcmp(ims, "-") == 0 && ilisted == 0;
+	auto quiet = [](const NightRead &r){
+		return r.lights.shadowed == 0 && r.lights.lightShadowMs == 0.0f && r.lights.ownerListed == 0 && r.rays.lightSlots == 0 &&
+			r.rays.lightMs == 0.0f && r.rays.lightOwnerListed == 0 && r.rays.lightOwnerOverflow == 0 && r.rays.lightSlotId[0] == 0 &&
+			r.rays.lightRays[0] == 0;
+	};
+	bool idleOk = quiet(idle1) && quiet(idle2);
+	bool alternate = true;
+	for(int f = 0; f < 6; f++){
+		NightRead r;
+		bool on = f % 2 == 0;
+		bool b = NightFrame(pair, 2, blocker, 1, nil, &r, on);
+		began = (b == on) && began;
+		alternate = alternate && (f == 0 ? true : on ? r.rays.lightSlots == 2 && r.lights.shadowed == 2 && r.rays.lightSlotId[0] == 151 : quiet(r));
+	}
+	DestroyAtomic(blocker);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && lineRan && ranOk && lineIdle && idleOk && alternate;
+	if(!ok)
+		Detail("  prepass %d; alternating frames read as each frame ran %d; with the pass: line ok %d, lights %u slots, %.3f ms, owner %u; rays %u slots, %.3f ms, owner %u (want 2, above 0, above 0); after it stopped: line ok %d, first idle frame %u slots %.3f ms, second %u slots %.3f ms, lights %u slots %.3f ms owner %u, rays %u slots %.3f ms owner %u (want 0); line \"%s\"\n",
+			began, alternate, lineRan, ran.lights.shadowed, ran.lights.lightShadowMs, ran.lights.ownerListed, ran.rays.lightSlots, ran.rays.lightMs,
+			ran.rays.lightOwnerListed, lineIdle, idle1.rays.lightSlots, idle1.rays.lightMs, idle2.rays.lightSlots, idle2.rays.lightMs, idle2.lights.shadowed, idle2.lights.lightShadowMs, idle2.lights.ownerListed, idle2.rays.lightSlots,
+			idle2.rays.lightMs, idle2.rays.lightOwnerListed, ran.line);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightStatsRestart(void)
+{
+	const char *name = "after the pass restarts the stats do not pair its slots with an older pass's time and ray counts";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(181, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(182, 12.0f, 0.0f, 70.0f, 60.0f) };
+	bool began = true;
+	NightRead before, restart, later;
+	for(int f = 0; f < 6; f++)
+		began = NightFrame(two, 2, nil, 0, nil, &before) && began;
+	metal::rtWaitForTest();
+	metal::RayStats settled = metal::getRayStats();
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(nil, 0) && began;
+	began = NightFrame(two, 2) && began;
+	began = NightFrame(two, 2, nil, 0, nil, &restart) && began;
+	metal::rtWaitForTest();
+	later.rays = metal::getRayStats();
+	bool settledOk = settled.lightSlots == 2 && settled.lightMs > 0.0f && settled.lightRays[0] > 0 && settled.lightRays[1] > 0;
+	bool restartOk = restart.rays.lightSlots == 2 && restart.rays.lightSlotId[0] == 181 && restart.rays.lightSlotId[1] == 182 &&
+		restart.rays.lightMs == 0.0f && restart.rays.lightRays[0] == 0 && restart.rays.lightRays[1] == 0 && restart.lights.lightShadowMs == 0.0f;
+	bool laterOk = later.rays.lightSlots == 2 && later.rays.lightMs > 0.0f && later.rays.lightRays[0] > 0 && later.rays.lightRays[1] > 0;
+	NightEnd(&rig);
+	bool ok = began && settledOk && restartOk && laterOk;
+	if(!ok)
+		Detail("  prepass %d; settled: %u slots %.3f ms rays %u %u (want 2, above 0); first frame after the restart: %u slots ids %u %u, %.3f ms, rays %u %u, lights %.3f ms (want 2 slots, 0 and 0 results); once it completed: %u slots %.3f ms rays %u %u (want 2, above 0)\n",
+			began, settled.lightSlots, settled.lightMs, settled.lightRays[0], settled.lightRays[1], restart.rays.lightSlots, restart.rays.lightSlotId[0],
+			restart.rays.lightSlotId[1], restart.rays.lightMs, restart.rays.lightRays[0], restart.rays.lightRays[1], restart.lights.lightShadowMs,
+			later.rays.lightSlots, later.rays.lightMs, later.rays.lightRays[0], later.rays.lightRays[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightHoleWork(void)
+{
+	const char *name = "a hole in the slot span runs neither the accumulate nor the upsample, so the pass's work is that of the active slots";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 3;
+	metal::setRenderSettings(&high);
+	metal::LightDesc all[3] = { PointLight(201, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(202, 0.0f, 0.0f, 70.0f, 60.0f), PointLight(203, 12.0f, 0.0f, 70.0f, 60.0f) };
+	all[0].color[0] = all[0].color[1] = all[0].color[2] = 30.0f;
+	all[1].color[0] = all[1].color[1] = all[1].color[2] = 20.0f;
+	all[2].color[0] = all[2].color[1] = all[2].color[2] = 10.0f;
+	metal::LightDesc gone[2] = { all[0], all[2] };
+	bool began = true;
+	for(int f = 0; f < 5; f++)
+		began = NightFrame(all, 3) && began;
+	metal::RayStats full = metal::getRayStats();
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(gone, 2) && began;
+	metal::RayStats holed = metal::getRayStats();
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(all, 3) && began;
+	metal::RayStats back = metal::getRayStats();
+	NightEnd(&rig);
+	bool ok = began && full.lightSlots == 3 && full.lightSlices == 6 && holed.lightSlots == 3 && holed.lightSlices == 4 && holed.lightSlotId[1] == 0 &&
+		back.lightSlots == 3 && back.lightSlices == 6;
+	if(!ok)
+		Detail("  prepass %d; three lights: span %u, accumulate and upsample dispatches %u (want 3, 6); the middle one gone: span %u, dispatches %u, id %u (want 3, 4, 0); back: span %u, dispatches %u (want 3, 6)\n",
+			began, full.lightSlots, full.lightSlices, holed.lightSlots, holed.lightSlices, holed.lightSlotId[1], back.lightSlots, back.lightSlices);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightHoleMarkerId(void)
+{
+	const char *name = "a light whose id equals the empty slot marker is a light, not a hole, and a light taking a hole always restarts";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 3;
+	metal::setRenderSettings(&high);
+	const uint32 marker = 0xFFFFFFFFu;
+	metal::LightDesc all[3] = { PointLight(211, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(marker, 0.0f, 0.0f, 70.0f, 60.0f), PointLight(213, 12.0f, 0.0f, 70.0f, 60.0f) };
+	all[0].color[0] = all[0].color[1] = all[0].color[2] = 30.0f;
+	all[1].color[0] = all[1].color[1] = all[1].color[2] = 20.0f;
+	all[2].color[0] = all[2].color[1] = all[2].color[2] = 10.0f;
+	metal::LightDesc gone[2] = { all[0], all[2] };
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	bool began = true;
+	for(int f = 0; f < 6; f++)
+		began = NightFrame(all, 3) && began;
+	metal::RayStats first = metal::getRayStats();
+	float value, grown = 0.0f, fresh = 0.0f, top = 0.0f;
+	bool read = metal::readLightHistoryForTest(1, HX, HY, &value, &grown) != 0;
+	bool idsOk = first.lightSlots == 3 && first.lightSlotId[0] == 211 && first.lightSlotId[1] == marker && first.lightSlotId[2] == 213 && first.lightSlices == 6;
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(gone, 2) && began;
+	metal::RayStats holed = metal::getRayStats();
+	bool holeOk = holed.lightSlots == 3 && holed.lightSlotId[1] == 0 && holed.lightSlices == 4;
+	for(int f = 0; f < 3; f++)
+		began = NightFrame(all, 3) && began;
+	read = metal::readLightHistoryForTest(1, HX, HY, &value, &fresh) != 0 && read;
+	read = metal::readLightHistoryForTest(2, HX, HY, &value, &top) != 0 && read;
+	NightEnd(&rig);
+	bool ok = began && read && idsOk && holeOk && grown >= 4.5f && fresh <= 3.5f && top >= 11.0f;
+	if(!ok)
+		Detail("  prepass %d read %d; slots %u, ids %u %u %u, dispatches %u (want 3, 211 4294967295 213, 6); with it gone the hole reads id %u and %u dispatches (want 0, 4); the history of the slot with the marker id after six frames %.1f (want 5 or more), after it left and came back into the hole %.1f (want 3, a restart), the slot above %.1f (want 12)\n",
+			began, read, first.lightSlots, first.lightSlotId[0], first.lightSlotId[1], first.lightSlotId[2], first.lightSlices, holed.lightSlotId[1], holed.lightSlices, grown, fresh, top);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightGroupMembership(void)
+{
+	const char *name = "a grouped slot restarts its history when a member leaves or joins";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc pair[2] = { PointLight(221, -3.0f, 0.0f, 70.0f, 60.0f), PointLight(222, 3.0f, 0.0f, 70.0f, 60.0f) };
+	for(int i = 0; i < 2; i++){
+		pair[i].flags = metal::LIGHT_PINNED;
+		pair[i].group = 9;
+	}
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	bool began = true, ids = true;
+	float value, together = 0.0f, left = 0.0f, joined = 0.0f;
+	for(int f = 0; f < 8; f++)
+		began = NightFrame(pair, 2) && began;
+	bool read = metal::readLightHistoryForTest(0, HX, HY, &value, &together) != 0;
+	for(int f = 0; f < 3; f++){
+		began = NightFrame(pair, 1) && began;
+		metal::RayStats st = metal::getRayStats();
+		ids = ids && st.lightSlots == 1 && st.lightSlotId[0] == 221;
+	}
+	read = metal::readLightHistoryForTest(0, HX, HY, &value, &left) != 0 && read;
+	for(int f = 0; f < 3; f++){
+		began = NightFrame(pair, 2) && began;
+		metal::RayStats st = metal::getRayStats();
+		ids = ids && st.lightSlots == 1 && st.lightSlotId[0] == 221;
+	}
+	read = metal::readLightHistoryForTest(0, HX, HY, &value, &joined) != 0 && read;
+	NightEnd(&rig);
+	bool ok = began && read && ids && together >= 6.5f && left <= 3.5f && joined <= 3.5f;
+	if(!ok)
+		Detail("  prepass %d read %d; the identity stayed 221 %d; history length with both members %.1f (want 7 or more), three frames after the higher one left %.1f and three after it came back %.1f (want 3 and 3, a restart each)\n",
+			began, read, ids, together, left, joined);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightOwnerOverflow(void)
+{
+	const char *name = "the light owner list holds the entries of every slot and an overflow is counted";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 25.0f, 25.0f, -25.0f, -25.0f, 40.0f, col, nil, backMat);
+	Atomic *blocker = MakeAtomic(geo);
+	metal::LightDesc pair[2] = { PointLight(131, -1.0f, 0.0f, 10.0f, 95.0f), PointLight(132, 1.0f, 0.0f, 10.0f, 95.0f) };
+	pair[0].owner = pair[1].owner = 1;
+	metal::FrameInfo info = metal::getFrameInfo();
+	const uint32 oneSlice = shOwnerListCapacity((uint32)(info.internalWidth + 1)/2, (uint32)(info.internalHeight + 1)/2);
+	bool began = true;
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(pair, 2, blocker, 1) && began;
+	metal::rtWaitForTest();
+	metal::RayStats full = metal::getRayStats();
+	metal::logStats();
+	unsigned listed = 0, overflow = 0;
+	const char *tail = strstr(metal::getStatsLine(), " lowner ");
+	bool parsed = tail && sscanf(tail, " lowner %u loverflow %u", &listed, &overflow) == 2;
+	uint32 half = full.lightOwnerListed/2;
+	metal::setShadowOwnerListCapForTest(half);
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(pair, 2, blocker, 1) && began;
+	metal::rtWaitForTest();
+	metal::RayStats cut = metal::getRayStats();
+	metal::setShadowOwnerListCapForTest(~0u);
+	DestroyAtomic(blocker);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && parsed && full.lightSlots == 2 && full.lightOwnerListed > oneSlice && full.lightOwnerOverflow == 0 && listed == full.lightOwnerListed &&
+		overflow == 0 && cut.lightOwnerListed == full.lightOwnerListed && cut.lightOwnerOverflow == full.lightOwnerListed - half;
+	if(!ok)
+		Detail("  prepass %d line %d (%u, %u); slots %u; listed %u of one slice's %u with overflow %u; cut to %u: listed %u overflow %u (want %u)\n",
+			began, parsed, listed, overflow, full.lightSlots, full.lightOwnerListed, oneSlice, full.lightOwnerOverflow, half, cut.lightOwnerListed,
+			cut.lightOwnerOverflow, full.lightOwnerListed - half);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightTargetsRelease(void)
+{
+	const char *name = "the light targets and the shadow array's reference go with the tier and with the shadowed setting";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(141, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(142, 12.0f, 0.0f, 70.0f, 60.0f) };
+	bool began = true;
+	auto run = [&](){
+		for(int f = 0; f < 3; f++)
+			began = NightFrame(two, 2) && began;
+		metal::rtWaitForTest();
+	};
+	run();
+	float live = metal::getRayStats().shadowMegabytes;
+	bool held = metal::lightShadowHeldForTest() != 0;
+	metal::RenderSettings s = high;
+	s.tier = metal::TIER_ENHANCED;
+	metal::setRenderSettings(&s);
+	float enhanced = metal::getRayStats().shadowMegabytes;
+	bool heldEnhanced = metal::lightShadowHeldForTest() != 0;
+	metal::setRenderSettings(&high);
+	run();
+	float back = metal::getRayStats().shadowMegabytes;
+	SetMode(metal::LIGHTS_ON);
+	bool heldOff = metal::lightShadowHeldForTest() != 0;
+	float off = metal::getRayStats().shadowMegabytes;
+	NightEnd(&rig);
+	bool ok = began && live > 0.0f && held && enhanced == 0.0f && !heldEnhanced && back > 0.0f && off == 0.0f && !heldOff;
+	if(!ok)
+		Detail("  prepass %d; running %.2f MB held %d (want above 0, 1); enhanced tier %.2f MB held %d (want 0, 0); back %.2f MB; lights on %.2f MB held %d (want 0, 0)\n",
+			began, live, held, enhanced, heldEnhanced, back, off, heldOff);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightCutoutAtNight(void)
+{
+	const char *name = "a cutout texel over a shadowed floor reads its own light factor at night as it does with a sun pass";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 1;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *boxGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(boxGeo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 60.0f, 45.0f, -60.0f, -45.0f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	RGBA fringe = { 255, 96, 32, 191 };
+	TexCoords uv[4] = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+	RGBA texels[16];
+	for(int i = 0; i < 16; i++)
+		texels[i] = fringe;
+	Texture *tex = MakeTexture(4, 4, texels, Texture::LINEAR, Texture::CLAMP, Texture::CLAMP);
+	Material *cutMat = LitMaterial();
+	cutMat->setTexture(tex);
+	Geometry *cutGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT | Geometry::TEXTURED, 14.0f, 14.0f, -14.0f, -14.0f, 70.0f,
+		greys, uv, cutMat);
+	Atomic *cut = MakeAtomic(cutGeo);
+	metal::LightDesc light = PointLight(151, 0.0f, 0.0f, 60.0f, 40.0f);
+	light.color[0] = light.color[1] = light.color[2] = 20.0f;
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 CX = info.internalWidth/2, CY = info.internalHeight/2;
+	RGBA sky = { 64, 64, 64, 255 };
+	bool began = true;
+	auto frame = [&](){
+		metal::beginScene(lightCamera);
+		WorldBegin(sky);
+		SetRenderState(VERTEXALPHA, 0);
+		SetRenderState(CULLMODE, CULLNONE);
+		SetRenderState(SRCBLEND, BLENDSRCALPHA);
+		SetRenderState(DESTBLEND, BLENDINVSRCALPHA);
+		metal::setLights(&light, 1);
+		bool b = metal::beginPrepass() != 0;
+		if(b){
+			metal::addShadowCaster(wall, metal::SHADOWCASTER_STATIC);
+			metal::addShadowCaster(box, metal::SHADOWCASTER_STATIC);
+			wall->render();
+			SetRenderState(ALPHATESTFUNC, ALPHAGREATEREQUAL);
+			SetRenderState(ALPHATESTREF, 128);
+			cut->render();
+			metal::endPrepass();
+		}
+		wall->render();
+		SetRenderState(ALPHATESTFUNC, ALPHAGREATEREQUAL);
+		SetRenderState(ALPHATESTREF, 128);
+		cut->render();
+		metal::endScene(nil);
+		WorldEnd();
+		began = b && began;
+	};
+	metal::StateStats s0 = metal::getStateStats();
+	for(int f = 0; f < 16; f++)
+		frame();
+	uint32 cutouts = metal::getStateStats().prepassCutoutDraws - s0.prepassCutoutDraws;
+	metal::rtWaitForTest();
+	metal::RayStats night = metal::getRayStats();
+	float atNight = -1.0f, withSun = -1.0f;
+	bool read = metal::readLightShadowForTest(0, CX, CY, &atNight) != 0;
+	V3d axis = { 0.0f, 1.0f, 0.0f };
+	rig.sunFrame->rotate(&axis, 180.0f, COMBINEREPLACE);
+	rig.sunFrame->updateObjects();
+	for(int f = 0; f < 16; f++)
+		frame();
+	metal::rtWaitForTest();
+	metal::RayStats day = metal::getRayStats();
+	read = metal::readLightShadowForTest(0, CX, CY, &withSun) != 0 && read;
+	DestroyAtomic(cut);
+	cutGeo->destroy();
+	cutMat->destroy();
+	tex->destroy();
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	boxGeo->destroy();
+	NightEnd(&rig);
+	bool ok = began && read && night.raysPerFrame == 0 && day.raysPerFrame > 0 && night.lightSlots == 1 && day.lightSlots == 1 && atNight > 0.8f && withSun > 0.8f && cutouts > 0;
+	if(!ok)
+		Detail("  prepass %d read %d; sun pass rays at night %u (want 0), with the sun %u (want some); light factor under the fringe at night %.2f, with the sun %.2f (want both near 1, the cutout's own); cutout draws %u (want some)\n",
+			began, read, night.raysPerFrame, day.raysPerFrame, atNight, withSun, cutouts);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightMovingCaster(void)
+{
+	const char *name = "a caster moving under a light leaves a trail of at most two half-resolution cells and no lit pixel inside its umbra";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 1;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 60.0f, 45.0f, -60.0f, -45.0f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	metal::LightDesc light = PointLight(161, 0.0f, 0.0f, 86.0f, 60.0f);
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 W = info.internalWidth, CX = W/2, CY = info.internalHeight/2;
+	const float perPixel = 180.0f/(float)W, step = 0.3f, scale = 4.0f/3.0f;
+	RGBA sky = { 64, 64, 64, 255 };
+	bool began = true;
+	float centre = 0.0f;
+	for(int f = 0; f < 24; f++){
+		centre = (f - 8)*step;
+		V3d at = { centre, 0.0f, 0.0f };
+		box->getFrame()->translate(&at, COMBINEREPLACE);
+		box->getFrame()->updateObjects();
+		metal::beginScene(lightCamera);
+		WorldBegin(sky);
+		SetRenderState(VERTEXALPHA, 0);
+		SetRenderState(CULLMODE, CULLNONE);
+		metal::setLights(&light, 1);
+		bool b = metal::beginPrepass() != 0;
+		if(b){
+			metal::addShadowCaster(wall, metal::SHADOWCASTER_STATIC);
+			metal::addShadowCaster(box, metal::SHADOWCASTER_MOVING);
+			wall->render();
+			metal::endPrepass();
+		}
+		wall->render();
+		metal::endScene(nil);
+		WorldEnd();
+		began = b && began;
+	}
+	metal::rtWaitForTest();
+	const float lo = (centre - 6.0f)*scale, hi = (centre + 6.0f)*scale;
+	int32 trail = 0, leaks = 0, dark = 0;
+	bool read = true;
+	for(int32 px = CX - (int32)(40.0f/perPixel); px <= CX + (int32)(40.0f/perPixel); px++){
+		float v = -1.0f, x = (float)(CX - px)*perPixel;
+		read = metal::readLightShadowForTest(0, px, CY, &v) != 0 && read;
+		bool dim = v < 0.5f;
+		dark += dim ? 1 : 0;
+		float outside = x < lo ? lo - x : x > hi ? x - hi : 0.0f;
+		float inside = std::min(x - lo, hi - x);
+		if(dim && outside > 0.0f)
+			trail = std::max(trail, (int32)ceilf(outside/perPixel - 0.5f));
+		if(!dim && inside > 2.0f*perPixel)
+			leaks++;
+	}
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	bool ok = began && read && trail <= 4 && leaks == 0 && dark > 0;
+	if(!ok)
+		Detail("  prepass %d read %d; trail %d pixels (want at most 4, two half cells); lit pixels inside the umbra %d (want 0); dark pixels %d\n", began, read, trail, leaks, dark);
+	return Report(ok, name);
+}
+
+enum { RB_WAIT, RB_CAMERA, RB_DEPTH, RB_GPUWAIT, RB_HISTORY, RB_COUNT };
+
+static const char *ReadbackNames[RB_COUNT] = { "wait", "camera pixels", "depth pixel", "gpu wait", "history" };
+
+static void
+Readback(int kind)
+{
+	if(kind == RB_WAIT)
+		metal::rtWaitForTest();
+	else if(kind == RB_CAMERA){
+		Image *img = ReadCamera();
+		if(img)
+			img->destroy();
+	}else if(kind == RB_DEPTH){
+		float d;
+		metal::readDepthPixel(lightCamera->zBuffer, 100, 100, &d);
+	}else if(kind == RB_GPUWAIT)
+		metal::waitForGPUWrites(metal::getFrameId());
+	else{
+		float v, l;
+		metal::readLightHistoryForTest(0, 100, 100, &v, &l);
+	}
+}
+
+static void
+HostFrame(const metal::LightDesc *lights, int32 n, bool submitInPrepass, int midKind = -1)
+{
+	RGBA sky = { 64, 64, 64, 255 };
+	metal::beginScene(lightCamera);
+	WorldBegin(sky);
+	SetRenderState(VERTEXALPHA, 0);
+	if(!submitInPrepass)
+		metal::setLights(lights, n);
+	bool began = metal::beginPrepass() != 0;
+	if(began){
+		backdrop->render();
+		if(submitInPrepass){
+			metal::lightShadowsPlanned();
+			metal::setLights(lights, n);
+		}
+		metal::endPrepass();
+	}
+	backdrop->render();
+	metal::endScene(nil);
+	if(midKind >= 0)
+		Readback(midKind);
+	WorldEnd();
+}
+
+static bool
+CheckLightReadbackKeepsPass(void)
+{
+	const char *name = "a readback between two frames leaves the light pass running and every slot's history growing";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(141, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(142, 12.0f, 0.0f, 70.0f, 60.0f) };
+	const int frames = 10;
+	bool ok = true;
+	for(int where = 0; where < 3; where++)
+		for(int kind = 0; kind < RB_COUNT; kind++){
+			bool inPrepass = where == 1, beforeShow = where == 2, ran = true;
+			uint32 last = 0, missed = 0;
+			float len[2] = { 0.0f, 0.0f };
+			for(int f = 0; f < frames; f++){
+				bool at = f == 3 || f == 5 || f == 6;
+				HostFrame(two, 2, inPrepass, beforeShow && at ? kind : -1);
+				metal::RayStats st = metal::getRayStats();
+				if(f >= 2 && (st.lightSlots != 2 || st.lightFrame != last + 1)){
+					ran = false;
+					missed++;
+				}
+				last = st.lightFrame;
+				if(!beforeShow && at)
+					Readback(kind);
+			}
+			metal::rtWaitForTest();
+			float v;
+			bool read = true;
+			for(int i = 0; i < 2; i++)
+				read = metal::readLightHistoryForTest(i, 100, 100, &v, &len[i]) != 0 && read;
+			bool good = ran && read && len[0] >= 8.0f && len[1] >= 8.0f;
+			if(!good)
+				Detail("  %s, %s readback: the pass missed %u frames, history lengths %.1f %.1f (want 8 or more)\n",
+					beforeShow ? "before the show" : inPrepass ? "lights submitted in the prepass" : "lights submitted first", ReadbackNames[kind], missed, len[0], len[1]);
+			ok = ok && good;
+		}
+	NightEnd(&rig);
 	return Report(ok, name);
 }
 
@@ -1830,6 +2626,21 @@ RunLightChecks(Camera *camera)
 	CheckLightShadowBox();
 	CheckLightShadowTermOnly();
 	CheckLightGroupedPair();
+	CheckLightHeldSlots();
+	CheckLightReplacedSlot();
+	CheckLightShadowTime();
+	CheckLightStatsNoWait();
+	CheckLightStatsRestart();
+	CheckLightGroupedPairFlip();
+	CheckLightSparseSlots();
+	CheckLightHoleWork();
+	CheckLightHoleMarkerId();
+	CheckLightGroupMembership();
+	CheckLightOwnerOverflow();
+	CheckLightTargetsRelease();
+	CheckLightCutoutAtNight();
+	CheckLightMovingCaster();
+	CheckLightReadbackKeepsPass();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();
