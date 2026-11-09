@@ -86,7 +86,7 @@ void lightsInit(void);
 void lightsSceneBegin(Camera *cam);
 uint32 lightsCandidates(void);
 struct LightRaySlotHost;
-uint32 lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out);
+uint32 lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out, uint32 *holes);
 bool lightsEncode(id<MTLCommandBuffer> cb, const RawMatrix &view, const RawMatrix &viewProj, int32 width, int32 height);
 bool lightsViewEncode(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> output);
 void lightsBind(id<MTLRenderCommandEncoder> e);

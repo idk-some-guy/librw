@@ -1410,7 +1410,7 @@ struct NightRead
 };
 
 static bool
-NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0, Atomic *wall = nil, NightRead *read = nil, bool prepass = true)
+NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint32 blockerOwner = 0, Atomic *wall = nil, NightRead *read = nil, bool prepass = true, bool show = true)
 {
 	RGBA sky = { 64, 64, 64, 255 };
 	Atomic *surface = wall ? wall : backdrop;
@@ -1439,7 +1439,10 @@ NightFrame(const metal::LightDesc *lights, int32 n, Atomic *blocker = nil, uint3
 		read->rays = metal::getRayStats();
 		snprintf(read->line, sizeof(read->line), "%s", metal::getStatsLine());
 	}
-	WorldEnd();
+	if(show)
+		WorldEnd();
+	else
+		lightCamera->endUpdate();
 	return began;
 }
 
@@ -2192,6 +2195,110 @@ CheckLightGroupMembership(void)
 }
 
 static bool
+CheckLightGroupReplaced(void)
+{
+	const char *name = "a grouped slot restarts its history when a member is replaced at the same count or a member's radius moves between zero and positive";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc pair[2] = { PointLight(231, -3.0f, 0.0f, 70.0f, 60.0f), PointLight(232, 3.0f, 0.0f, 70.0f, 60.0f) };
+	for(int i = 0; i < 2; i++){
+		pair[i].flags = metal::LIGHT_PINNED;
+		pair[i].group = 9;
+	}
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 HX = (info.internalWidth + 1)/4, HY = (info.internalHeight + 1)/4;
+	bool began = true, ids = true, read = true;
+	float value, together = 0.0f, replaced = 0.0f, settled = 0.0f, dark = 0.0f, lit = 0.0f;
+	auto history = [&](float *len){
+		read = metal::readLightHistoryForTest(0, HX, HY, &value, len) != 0 && read;
+	};
+	auto run = [&](int frames){
+		for(int f = 0; f < frames; f++){
+			began = NightFrame(pair, 2) && began;
+			metal::RayStats st = metal::getRayStats();
+			ids = ids && st.lightSlots == 1 && st.lightSlotId[0] == 231;
+		}
+	};
+	run(8);
+	history(&together);
+	pair[1].id = 233;
+	pair[1].pos[0] = 4.0f;
+	run(3);
+	history(&replaced);
+	run(5);
+	history(&settled);
+	pair[1].radius = 0.0f;
+	run(3);
+	history(&dark);
+	pair[1].radius = 60.0f;
+	run(3);
+	history(&lit);
+	NightEnd(&rig);
+	bool ok = began && read && ids && together >= 6.5f && replaced <= 3.5f && settled >= 6.5f && dark <= 3.5f && lit <= 3.5f;
+	if(!ok)
+		Detail("  prepass %d read %d; the identity stayed 231 %d; history length with the pair %.1f (want 7 or more), three frames after the higher member was replaced by another id %.1f (want 3, a restart), five frames on %.1f (want 7 or more), three after its radius went to 0 %.1f and three after it came back %.1f (want 3 and 3, a restart each)\n",
+			began, read, ids, together, replaced, settled, dark, lit);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightPinnedZeroRadius(void)
+{
+	const char *name = "a pinned light of radius 0 takes a slot that runs like any other and is not taken for a hole";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(241, -12.0f, 0.0f, 70.0f, 0.0f), PointLight(242, 12.0f, 0.0f, 70.0f, 60.0f) };
+	two[0].flags = metal::LIGHT_PINNED;
+	bool began = true;
+	for(int f = 0; f < 6; f++)
+		began = NightFrame(two, 2) && began;
+	metal::RayStats st = metal::getRayStats();
+	bool have241 = st.lightSlotId[0] == 241 || st.lightSlotId[1] == 241, have242 = st.lightSlotId[0] == 242 || st.lightSlotId[1] == 242;
+	NightEnd(&rig);
+	bool ok = began && st.lightSlots == 2 && st.lightSlices == 4 && have241 && have242;
+	if(!ok)
+		Detail("  prepass %d; span %u, dispatches %u, ids %u %u (want 2, 4, and 241 with 242)\n", began, st.lightSlots, st.lightSlices, st.lightSlotId[0], st.lightSlotId[1]);
+	return Report(ok, name);
+}
+
+static bool
+CheckLightStatsTwoScenes(void)
+{
+	const char *name = "a host with two scenes in each frame still reads the light time and ray counts after the lit scene, and zero after the unlit one";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	metal::LightDesc two[2] = { PointLight(251, -12.0f, 0.0f, 70.0f, 60.0f), PointLight(252, 12.0f, 0.0f, 70.0f, 60.0f) };
+	bool began = true, litOk = true, unlitOk = true;
+	NightRead lit, unlit;
+	for(int f = 0; f < 8; f++){
+		began = NightFrame(two, 2, nil, 0, nil, &lit, true, false) && began;
+		began = !NightFrame(nil, 0, nil, 0, nil, &unlit, false, true) && began;
+		if(f >= 5){
+			litOk = litOk && lit.rays.lightSlots == 2 && lit.rays.lightMs > 0.0f && lit.rays.lightRays[0] > 0 && lit.rays.lightRays[1] > 0;
+			unlitOk = unlitOk && unlit.rays.lightSlots == 0 && unlit.rays.lightMs == 0.0f && unlit.rays.lightRays[0] == 0;
+		}
+	}
+	NightEnd(&rig);
+	bool ok = began && litOk && unlitOk;
+	if(!ok)
+		Detail("  prepass %d; after the lit scene: %u slots, %.3f ms, rays %u %u (want 2, above 0); after the unlit one: %u slots, %.3f ms, rays %u (want 0)\n",
+			began, lit.rays.lightSlots, lit.rays.lightMs, lit.rays.lightRays[0], lit.rays.lightRays[1], unlit.rays.lightSlots, unlit.rays.lightMs, unlit.rays.lightRays[0]);
+	return Report(ok, name);
+}
+
+static bool
 CheckLightOwnerOverflow(void)
 {
 	const char *name = "the light owner list holds the entries of every slot and an overflow is counted";
@@ -2636,6 +2743,9 @@ RunLightChecks(Camera *camera)
 	CheckLightHoleWork();
 	CheckLightHoleMarkerId();
 	CheckLightGroupMembership();
+	CheckLightGroupReplaced();
+	CheckLightPinnedZeroRadius();
+	CheckLightStatsTwoScenes();
 	CheckLightOwnerOverflow();
 	CheckLightTargetsRelease();
 	CheckLightCutoutAtNight();

@@ -389,6 +389,109 @@ TestGroupSignature(void)
 }
 
 static void
+TestIdentify(void)
+{
+	LTCand base[3] = { { 1.0f, 5u, LT_CAND_PINNED, 9u, 0 }, { 1.0f, 9u, LT_CAND_PINNED, 9u, 0 }, { 1.0f, 40u, 0u, 0u, 0 } };
+	LTCand a[3] = { base[0], base[1], base[2] }, swap[3] = { base[0], { 1.0f, 12u, LT_CAND_PINNED, 9u, 0 }, base[2] };
+	unsigned int ia[3], sa[3], is[3], ss[3];
+	ltIdentify(a, 3, ia, sa);
+	ltIdentify(swap, 3, is, ss);
+	CHECK(ia[0] == 5u && ia[1] == 5u && ia[2] == 40u && is[0] == 5u && is[1] == 5u);
+	CHECK(a[0].id == 5u && a[1].id == 5u && a[2].id == 40u);
+	CHECK(sa[0] == sa[1] && sa[0] != 0u && sa[2] == 0u);
+	CHECK(ss[1] != sa[1] && ss[0] != sa[0]);
+	LTCand lone[1] = { base[0] };
+	unsigned int il[1], sl[1];
+	ltIdentify(lone, 1, il, sl);
+	CHECK(sl[0] != 0u && sl[0] != sa[0]);
+
+	LTCand dark[3] = { base[0], base[1], base[2] };
+	dark[1].flags |= LT_CAND_EMPTY;
+	unsigned int id[3], sd[3];
+	ltIdentify(dark, 3, id, sd);
+	CHECK(id[0] == 5u && id[1] == 5u);
+	CHECK(sd[0] != sa[0] && sd[0] == sl[0]);
+	CHECK(sd[1] == sa[1]);
+
+	LTCand picked[2] = { base[0], base[1] };
+	picked[0].flags |= LT_CAND_EMPTY;
+	unsigned int ip[2], sp[2];
+	ltIdentify(picked, 2, ip, sp);
+	CHECK(sp[0] == sa[0] && sp[1] != sp[0]);
+}
+
+static void
+TestHoleMask(void)
+{
+	int s[4] = { 2, -1, 0, -1 };
+	CHECK(ltHoleMask(s, 4) == 10u);
+	CHECK(ltHoleMask(s, 3) == 2u);
+	CHECK(ltHoleMask(s, 0) == 0u);
+	LTCand c[3] = { { 0.0f, 31u, LT_CAND_PINNED | LT_CAND_EMPTY, 0u, 0 }, { 2.0f, 32u, 0u, 0u, 0 }, { 0.0f, 33u, 0u, 0u, 0 } };
+	int picked[LT_MAX_SHADOWED], slots[LT_MAX_SHADOWED];
+	int count = ltPickShadowed(c, 3, 2, picked);
+	int span = ltOrderSlots(slots, 2, picked, count, c, nullptr, 0, 0u);
+	CHECK(count == 2 && span == 2 && slots[0] >= 0 && slots[1] >= 0);
+	CHECK(ltHoleMask(slots, span) == 0u);
+	unsigned int ids[2] = { 31u, 32u };
+	int back[1] = { 1 };
+	span = ltOrderSlots(slots, 2, back, 1, c, ids, 2, 0u);
+	CHECK(span == 2 && slots[0] == -1 && slots[1] == 1 && ltHoleMask(slots, span) == 1u);
+}
+
+static void
+TestRollCandidates(void)
+{
+	LTRoll r = {};
+	ltRollCandidates(&r, 10);
+	r.cur = 4;
+	r.fresh = true;
+	ltRollCandidates(&r, 11);
+	CHECK(r.prev == 4 && r.cur == 0 && !r.fresh);
+	ltRollCandidates(&r, 11);
+	CHECK(r.prev == 4);
+	ltRollCandidates(&r, 12);
+	CHECK(r.prev == 4);
+	ltRollCandidates(&r, 13);
+	CHECK(r.prev == 4);
+	ltRollCandidates(&r, 16);
+	CHECK(r.prev == 0);
+
+	LTRoll g = {};
+	ltRollCandidates(&g, 20);
+	g.cur = 3;
+	g.fresh = true;
+	ltRollCandidates(&g, 24);
+	CHECK(g.prev == 0);
+
+	LTRoll s = {};
+	s.frame = 30;
+	s.prev = 5;
+	s.scene = true;
+	ltRollCandidates(&s, 31);
+	CHECK(s.prev == 0 && !s.scene);
+
+	LTRoll gap = {};
+	gap.frame = 40;
+	gap.cur = 2;
+	gap.fresh = true;
+	ltRollCandidates(&gap, 41);
+	CHECK(gap.prev == 2);
+	ltRollCandidates(&gap, 45);
+	CHECK(gap.prev == 0);
+}
+
+static void
+TestRunContinues(void)
+{
+	CHECK(!ltRunContinues(false, 0, 5));
+	CHECK(ltRunContinues(true, 5, 6));
+	CHECK(ltRunContinues(true, 5, 5));
+	CHECK(!ltRunContinues(true, 5, 7));
+	CHECK(!ltRunContinues(true, 5, 4));
+}
+
+static void
 TestEntrySlot(void)
 {
 	CHECK(ltEntrySlot(1, 2u, true) == 1);
@@ -516,6 +619,10 @@ main(void)
 	TestOrderSlots();
 	TestGroupIdentity();
 	TestGroupSignature();
+	TestIdentify();
+	TestHoleMask();
+	TestRollCandidates();
+	TestRunContinues();
 	TestEntrySlot();
 	if(failures == 0)
 		printf("all lights tests passed\n");

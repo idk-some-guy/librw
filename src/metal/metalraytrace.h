@@ -53,7 +53,7 @@ struct LightRaySlotHost
 	simd_uint4 ids;
 };
 
-void rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget);
+void rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget, uint32 holes);
 id<MTLTexture> rtLightRawTexture(void);
 id<MTLTexture> rtLightShadowTexture(void);
 id<MTLTexture> rtLightHistoryTexture(uint32 slot);

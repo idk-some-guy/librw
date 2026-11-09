@@ -52,11 +52,9 @@ static struct LightState
 	int32 sceneSlot = -1, scenePass = 0;
 	uint32 lastIds[LT_MAX_LIGHTS];
 	uint32 lastIdCount = 0;
-	uint64 candFrame = 0;
-	uint32 candCur = 0, candPrev = 0;
-	bool candFresh = false, candScene = false;
+	LTRoll roll = {};
 	std::vector<LTCand> cands;
-	std::vector<uint32> idents;
+	std::vector<uint32> idents, sigs;
 	std::vector<std::pair<uint32, int32>> held, next;
 	uint32 slots = 0;
 	std::vector<int32> slotOf;
@@ -153,32 +151,21 @@ clearSubmission(void)
 static void
 rollCandidates(void)
 {
-	uint64 f = getFrameId();
-	if(f == lt.candFrame)
-		return;
-	if(lt.candFresh){
-		lt.candPrev = f == lt.candFrame + 1 ? lt.candCur : 0;
-		lt.candCur = 0;
-		lt.candFresh = lt.candScene = false;
-	}else if(lt.candScene){
-		lt.candPrev = 0;
-		lt.candScene = false;
-	}
-	lt.candFrame = f;
+	ltRollCandidates(&lt.roll, getFrameId());
 }
 
 uint32
 lightsCandidates(void)
 {
 	rollCandidates();
-	return lt.candPrev;
+	return lt.roll.prev;
 }
 
 void
 lightsSceneBegin(Camera *cam)
 {
 	rollCandidates();
-	lt.candScene = true;
+	lt.roll.scene = true;
 	clearSubmission();
 	lt.cam = cam;
 	lt.scenePass = 0;
@@ -204,8 +191,8 @@ setLights(const LightDesc *lights, int32 n)
 	if(!frameLightsLive())
 		return;
 	rollCandidates();
-	lt.candCur = 0;
-	lt.candFresh = true;
+	lt.roll.cur = 0;
+	lt.roll.fresh = true;
 	if(lights == nil || n <= 0)
 		return;
 	float32 eye[3];
@@ -233,13 +220,14 @@ setLights(const LightDesc *lights, int32 n)
 			d.flags &= ~(uint32)LIGHT_SPOT;
 		lt.kept.push_back(d);
 		if(d.radius > 0.0f)
-			lt.candCur++;
+			lt.roll.cur++;
 	}
 }
 
 uint32
-lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out)
+lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj, LightRaySlotHost *out, uint32 *holes)
 {
+	*holes = 0;
 	uint32 n = (uint32)lt.kept.size();
 	lt.slotOf.assign(n, -1);
 	if(budget <= 0 || n == 0){
@@ -257,13 +245,12 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		float32 dx = d.pos[0] - eye[0], dy = d.pos[1] - eye[1], dz = d.pos[2] - eye[2];
 		bool seen = d.radius > 0.0f && ltInView(vp, LTVec3{ d.pos[0], d.pos[1], d.pos[2] }, d.radius);
 		float32 intensity = 0.2126f*d.color[0] + 0.7152f*d.color[1] + 0.0722f*d.color[2];
-		lt.cands[i] = { seen ? ltScore(intensity, dx*dx + dy*dy + dz*dz) : 0.0f, d.id, (d.flags & LIGHT_PINNED) ? LT_CAND_PINNED : 0u, d.group, 0 };
+		lt.cands[i] = { seen ? ltScore(intensity, dx*dx + dy*dy + dz*dz) : 0.0f, d.id, ((d.flags & LIGHT_PINNED) ? LT_CAND_PINNED : 0u) | (d.radius > 0.0f ? 0u : LT_CAND_EMPTY), d.group, 0 };
 	}
 	lt.idents.resize(n);
-	for(uint32 i = 0; i < n; i++)
-		lt.idents[i] = ltGroupIdentity(lt.cands.data(), (int)n, (int)i);
+	lt.sigs.resize(n);
+	ltIdentify(lt.cands.data(), (int)n, lt.idents.data(), lt.sigs.data());
 	for(uint32 i = 0; i < n; i++){
-		lt.cands[i].id = lt.idents[i];
 		for(const auto &h : lt.held)
 			if(h.first == lt.idents[i])
 				lt.cands[i].held = h.second;
@@ -283,6 +270,7 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 			lt.next.push_back({ lt.cands[i].id, h });
 	}
 	lt.held.swap(lt.next);
+	*holes = ltHoleMask(slotPick, span);
 	for(int k = 0; k < span; k++){
 		if(slotPick[k] < 0){
 			out[k].posRadius = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -305,7 +293,7 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		out[k].posRadius = simd_make_float4(sum[0]*inv, sum[1]*inv, sum[2]*inv, d.radius);
 		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
 		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
-		out[k].ids = simd_make_uint4(lt.cands[slotPick[k]].id, d.owner, d.group, ltGroupSignature(lt.cands.data(), (int)n, slotPick[k]));
+		out[k].ids = simd_make_uint4(lt.cands[slotPick[k]].id, d.owner, d.group, lt.sigs[slotPick[k]]);
 	}
 	for(uint32 i = 0; i < n; i++)
 		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, slotPick, span, (int)i);
@@ -534,8 +522,7 @@ lightsTerm(void)
 	lt.cam = nil;
 	lt.held.clear();
 	lt.next.clear();
-	lt.candFrame = lt.candCur = lt.candPrev = 0;
-	lt.candFresh = lt.candScene = false;
+	lt.roll = {};
 	lt.pipe = lt.viewPipe = nil;
 	lt.pipeTried = false;
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){

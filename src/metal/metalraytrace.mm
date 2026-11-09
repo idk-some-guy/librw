@@ -257,7 +257,7 @@ static struct
 	std::atomic<uint32> lightSerial;
 	std::mutex lightLock;
 	LightResult lightResult;
-	uint64 lightPassScene;
+	uint64 lightPassScene, lightPassFrame;
 	uint32 lightRunSerial;
 	uint32 lightListCap, lightFrame, lightCountSlot;
 	uint64 lightBytes;
@@ -496,7 +496,7 @@ rtTerm(void)
 		std::lock_guard<std::mutex> g(sh.lightLock);
 		sh.lightResult = { sh.lightSerial.load(), 0, 0, 0, {} };
 	}
-	sh.lightPassScene = 0;
+	sh.lightPassScene = sh.lightPassFrame = 0;
 	sh.lightRunSerial = 0;
 	sh.valid = sh.ran = false;
 	sh.frame = 0;
@@ -1982,13 +1982,13 @@ lightEncoder(id<MTLCommandBuffer> cb, id<MTLCounterSampleBuffer> sb)
 }
 
 void
-rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget)
+rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget, uint32 holes)
 {
 	SHQuality q = shQuality(in.quality);
 	q.halfRes = 1u;
 	id<MTLAccelerationStructure> tlas = rf.current;
 	rt.stats.lightSlots = rt.stats.lightSlices = 0;
-	bool continuing = sh.lightPassScene != 0 && sh.lightPassScene + 1 == rt.scene;
+	bool continuing = ltRunContinues(sh.lightPassScene != 0, sh.lightPassFrame, rt.frame);
 	for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
 		rt.stats.lightSlotId[i] = 0;
 	count = std::min(count, std::min(budget, (uint32)LT_MAX_SHADOWED));
@@ -2052,7 +2052,7 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	[e setComputePipelineState:sh.lightAccumulate];
 	uint32 slices = 0;
 	for(uint32 i = 0; i < count; i++){
-		if(!(slots[i].posRadius.w > 0.0f))
+		if((holes >> i) & 1u)
 			continue;
 		slices++;
 		bool reset = ltSlotReset(i < sh.lightPrevCount && !((sh.lightPrevHoles >> i) & 1u) && sh.lightPrevSig[i] == slots[i].ids.w, sh.lightPrevId[i], slots[i].ids.x);
@@ -2070,7 +2070,7 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 	[e setComputePipelineState:sh.lightUpsample];
 	for(uint32 i = 0; i < count; i++){
-		if(!(slots[i].posRadius.w > 0.0f))
+		if((holes >> i) & 1u)
 			continue;
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
 			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo };
@@ -2087,7 +2087,7 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	for(uint32 i = 0; i < count; i++){
 		sh.lightPrevId[i] = slots[i].ids.x;
 		sh.lightPrevSig[i] = slots[i].ids.w;
-		if(!(slots[i].posRadius.w > 0.0f))
+		if((holes >> i) & 1u)
 			sh.lightPrevHoles |= 1u << i;
 	}
 	sh.lightPrevCount = count;
@@ -2112,10 +2112,11 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	rt.stats.lightSlices = slices;
 	rt.stats.lightFrame = frameNo;
 	for(uint32 i = 0; i < count; i++)
-		rt.stats.lightSlotId[i] = slots[i].posRadius.w > 0.0f ? slots[i].ids.x : 0u;
+		rt.stats.lightSlotId[i] = (holes >> i) & 1u ? 0u : slots[i].ids.x;
 	if(!continuing)
 		sh.lightRunSerial = serial;
 	sh.lightPassScene = rt.scene;
+	sh.lightPassFrame = rt.frame;
 }
 
 RayStats

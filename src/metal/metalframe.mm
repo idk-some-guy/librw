@@ -2193,8 +2193,8 @@ frameRayWork(void)
 	if(lightRays){
 		int32 budget = ltBudget(frame.settings.shadowedLights, q);
 		LightRaySlotHost slots[LT_MAX_SHADOWED];
-		uint32 count = lightsAssignSlots(budget, m.view, m.uploadedViewProj, slots);
-		rtEncodeLightRays(frameCommandBuffer(), in, slots, count, (uint32)budget);
+		uint32 holes, count = lightsAssignSlots(budget, m.view, m.uploadedViewProj, slots, &holes);
+		rtEncodeLightRays(frameCommandBuffer(), in, slots, count, (uint32)budget, holes);
 	}
 }
 

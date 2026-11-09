@@ -189,6 +189,7 @@ ltBudget(int setting, int shadowQuality)
 
 #ifndef __METAL_VERSION__
 #define LT_CAND_PINNED 1u
+#define LT_CAND_EMPTY 2u
 #define LT_NO_ID 0xFFFFFFFFu
 
 struct LTCand { float score; unsigned id; unsigned flags; unsigned group; int held; };
@@ -296,9 +297,55 @@ ltGroupSignature(const LTCand *c, int n, int i)
 		return 0u;
 	unsigned int sig = 0u;
 	for(int j = 0; j < n; j++)
-		if(c[j].group == c[i].group)
+		if(j == i || (c[j].group == c[i].group && !(c[j].flags & LT_CAND_EMPTY)))
 			sig += c[j].id*2654435761u + 1u;
 	return sig;
+}
+
+static inline void
+ltIdentify(LTCand *c, int n, unsigned int *idents, unsigned int *sigs)
+{
+	for(int i = 0; i < n; i++){
+		idents[i] = ltGroupIdentity(c, n, i);
+		sigs[i] = ltGroupSignature(c, n, i);
+	}
+	for(int i = 0; i < n; i++)
+		c[i].id = idents[i];
+}
+
+static inline unsigned int
+ltHoleMask(const int *slots, int span)
+{
+	unsigned int mask = 0u;
+	for(int k = 0; k < span && k < 32; k++)
+		if(slots[k] < 0)
+			mask |= 1u << k;
+	return mask;
+}
+
+struct LTRoll { uint64_t frame; unsigned int cur, prev; bool fresh, scene; };
+
+static inline void
+ltRollCandidates(LTRoll *r, uint64_t f)
+{
+	if(f == r->frame)
+		return;
+	if(r->fresh){
+		r->prev = f == r->frame + 1 ? r->cur : 0;
+		r->cur = 0;
+		r->fresh = r->scene = false;
+	}else if(r->scene){
+		r->prev = 0;
+		r->scene = false;
+	}else if(f != r->frame + 1)
+		r->prev = 0;
+	r->frame = f;
+}
+
+static inline bool
+ltRunContinues(bool ran, uint64_t prevFrame, uint64_t frame)
+{
+	return ran && frame >= prevFrame && frame - prevFrame <= 1;
 }
 
 static inline int
