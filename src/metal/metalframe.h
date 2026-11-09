@@ -82,6 +82,7 @@ bool frameCasterPassPlanned(void);
 bool frameLightsLive(void);
 bool frameLightsReady(void);
 bool frameLightsSource(void);
+id<MTLTexture> frameSceneDepth(void);
 void lightsInit(void);
 void lightsSceneBegin(Camera *cam);
 uint32 lightsCandidates(void);

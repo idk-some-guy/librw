@@ -58,7 +58,9 @@ static struct LightState
 	std::vector<std::pair<uint32, int32>> held, next;
 	uint32 slots = 0;
 	std::vector<int32> slotOf;
-	id<MTLTexture> whiteShadow = nil, shadowTex = nil;
+	id<MTLTexture> whiteShadow = nil, shadowTex = nil, forwardTarget = nil;
+	id<MTLRenderPipelineState> forwardPipe[2] = { nil, nil };
+	bool forwardTried = false;
 	int32 passes = 0, waited = 0;
 	std::mutex lock;
 	ClusterResult result = { 0, 0, 0, 0 };
@@ -413,6 +415,139 @@ lightsViewEncode(id<MTLCommandBuffer> cb, id<MTLTexture> depth, id<MTLTexture> o
 	return true;
 }
 
+static const char *forwardSrc = R"MSL(
+struct ForwardVertex
+{
+	float4 position [[position]];
+};
+
+vertex ForwardVertex
+lightForwardVS(uint vid [[vertex_id]])
+{
+	float2 p = float2((vid << 1) & 2, vid & 2);
+	ForwardVertex o;
+	o.position = float4(p*2.0 - 1.0, 0.0, 1.0);
+	return o;
+}
+
+fragment float4
+lightForwardFS(ForwardVertex in [[stage_in]],
+               depth2d<float, access::read> depth [[texture(0)]],
+               constant Material &material [[buffer(0)]],
+               constant LTFrame &lightFrame [[buffer(BUFFER_LIGHTFRAME), function_constant(lights)]],
+               const device LTLight *lightList [[buffer(BUFFER_LIGHTLIST), function_constant(lights)]],
+               const device ushort *lightClusters [[buffer(BUFFER_LIGHTCLUSTERS), function_constant(lights)]],
+               texture2d_array<float> lightShadow [[texture(TEXTURE_LIGHTSHADOW), function_constant(lights)]])
+{
+	float d = depth.read(uint2(in.position.xy));
+	float3 color = float3(0.25 + 0.001*d);
+	if(lights){
+		float2 ndc = in.position.xy/lightFrame.grid.xy*float2(2.0, -2.0) + float2(-1.0, 1.0);
+		float4 p = lightFrame.invProj*float4(ndc, d*2.0 - 1.0, 1.0);
+		float3x3 rot = float3x3(lightFrame.view[0].xyz, lightFrame.view[1].xyz, lightFrame.view[2].xyz);
+		LightSurface s = LightsSurface(transpose(rot)*(p.xyz/p.w), lightFrame, material);
+		if(d < 1.0)
+			color += LightsSum(s.rel, s.N, s.albedo, s.gloss, in.position, lightFrame, lightList, lightClusters, lightShadow);
+	}
+	return float4(color, 1.0);
+}
+)MSL";
+
+static bool
+forwardInit(MetalContext *ctx)
+{
+	if(lt.forwardPipe[0] && lt.forwardPipe[1])
+		return true;
+	if(lt.forwardTried)
+		return false;
+	lt.forwardTried = true;
+	NSMutableString *src = [NSMutableString stringWithUTF8String:header_metal_src];
+	[src appendString:[NSString stringWithUTF8String:forwardSrc]];
+	NSError *err = nil;
+	id<MTLLibrary> lib = [ctx->device newLibraryWithSource:src options:nil error:&err];
+	for(int i = 0; lib && i < 2; i++){
+		MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+		bool off = false, on = i != 0;
+		for(int k : { 0, 1, 2, 3, 6, 7, 8 })
+			[cv setConstantValue:&off type:MTLDataTypeBool atIndex:k];
+		[cv setConstantValue:&on type:MTLDataTypeBool atIndex:9];
+		MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+		d.vertexFunction = [lib newFunctionWithName:@"lightForwardVS"];
+		d.fragmentFunction = [lib newFunctionWithName:@"lightForwardFS" constantValues:cv error:&err];
+		d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+		lt.forwardPipe[i] = d.fragmentFunction ? [ctx->device newRenderPipelineStateWithDescriptor:d error:&err] : nil;
+	}
+	if(lt.forwardPipe[0] == nil || lt.forwardPipe[1] == nil){
+		lt.forwardPipe[0] = lt.forwardPipe[1] = nil;
+		fprintf(stderr, "rw::metal: the forward sum timing shaders failed to build: %s\n", err ? err.localizedDescription.UTF8String : "");
+		return false;
+	}
+	return true;
+}
+
+static double
+forwardDraw(MetalContext *ctx, id<MTLTexture> depth, bool lit)
+{
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = lt.forwardTarget;
+	pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+	[e setRenderPipelineState:lt.forwardPipe[lit ? 1 : 0]];
+	const float32 material[8] = { 0.5f, 0.5f, 0.5f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f };
+	[e setFragmentBytes:material length:sizeof(material) atIndex:0];
+	[e setFragmentTexture:depth atIndex:0];
+	if(lit)
+		lightsBind(e);
+	[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[e endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	if(cb.status != MTLCommandBufferStatusCompleted)
+		return -1.0;
+	return (cb.GPUEndTime - cb.GPUStartTime)*1000.0;
+}
+
+bool32
+rtLightForwardTimingForTest(double *withLights, double *withoutLights)
+{
+	*withLights = *withoutLights = 0.0;
+	MetalContext *ctx = getContext();
+	if(ctx == nil)
+		return 0;
+	id<MTLTexture> depth = frameSceneDepth();
+	if(depth == nil || !forwardInit(ctx))
+		return 0;
+	if(ctx->commandBuffer){
+		flushPasses();
+		commitAndWait(ctx->commandBuffer);
+	}else if(ctx->lastCommitted)
+		[ctx->lastCommitted waitUntilCompleted];
+	if(lt.forwardTarget == nil || lt.forwardTarget.width != depth.width || lt.forwardTarget.height != depth.height){
+		MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:depth.width
+			height:depth.height mipmapped:NO];
+		d.storageMode = MTLStorageModePrivate;
+		d.usage = MTLTextureUsageRenderTarget;
+		lt.forwardTarget = [ctx->device newTextureWithDescriptor:d];
+	}
+	if(lt.forwardTarget == nil)
+		return 0;
+	bool lights = lt.sceneSlot >= 0 && lt.frameBuffer != nil && lt.scenePass != 0;
+	for(int warm = 0; warm < 3; warm++){
+		forwardDraw(ctx, depth, false);
+		if(lights)
+			forwardDraw(ctx, depth, true);
+	}
+	double bare = forwardDraw(ctx, depth, false);
+	double lit = lights ? forwardDraw(ctx, depth, true) : bare;
+	if(bare < 0.0 || lit < 0.0)
+		return 0;
+	*withLights = lit;
+	*withoutLights = bare;
+	return 1;
+}
+
 void
 lightsReleaseShadowTexture(void)
 {
@@ -530,7 +665,9 @@ lightsTerm(void)
 		lt.timing[i] = nil;
 	}
 	lt.frameBuffer = lt.listBuffer = nil;
-	lt.whiteShadow = lt.shadowTex = nil;
+	lt.whiteShadow = lt.shadowTex = lt.forwardTarget = nil;
+	lt.forwardPipe[0] = lt.forwardPipe[1] = nil;
+	lt.forwardTried = false;
 	lt.sceneSlot = -1;
 	lt.scenePass = 0;
 	lt.lastIdCount = 0;

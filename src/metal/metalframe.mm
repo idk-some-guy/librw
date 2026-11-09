@@ -2222,6 +2222,12 @@ frameLightsReady(void)
 	return frame.lightsReady;
 }
 
+id<MTLTexture>
+frameSceneDepth(void)
+{
+	return frame.sceneDepth ? getRasterTexture(frame.sceneDepth) : nil;
+}
+
 bool
 frameLightsSource(void)
 {

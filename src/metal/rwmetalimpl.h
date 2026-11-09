@@ -215,6 +215,7 @@ bool32 readLightShadowForTest(int32 slot, int32 x, int32 y, float32 *value);
 bool32 readLightHistoryForTest(int32 slot, int32 x, int32 y, float32 *value, float32 *length);
 bool32 readClusterForTest(int32 cx, int32 cy, int32 cz, uint32 *ids, int32 max, int32 *count);
 int32 lightClusterPassesForTest(void);
+bool32 rtLightForwardTimingForTest(double *withLights, double *withoutLights);
 int32 lightClusterSlotForTest(void);
 bool32 lightShadowHeldForTest(void);
 void forcePrepassEqualForTest(void);

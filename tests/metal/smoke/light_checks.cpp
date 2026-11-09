@@ -2643,6 +2643,24 @@ CheckLightReadbackKeepsPass(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckLightForwardTiming(void)
+{
+	const char *name = "the forward sum timing hook reads two times, equal with no light in the frame and the lit draw costs more than the bare one";
+	LightFrame(nil, 0);
+	double plain = -1.0, bare = -1.0;
+	bool none = metal::rtLightForwardTimingForTest(&plain, &bare) != 0;
+	metal::LightDesc l[3] = { PointLight(1, -2.0f, 0.0f, 80.0f, 40.0f), PointLight(2, 2.0f, 1.0f, 80.0f, 40.0f), PointLight(3, 0.0f, -2.0f, 70.0f, 40.0f) };
+	LightFrame(l, 3);
+	double lit = -1.0, base = -1.0;
+	bool some = metal::rtLightForwardTimingForTest(&lit, &base) != 0;
+	bool ok = none && some && plain > 0.0 && bare > 0.0 && plain == bare && lit > base && base > 0.0;
+	if(!ok)
+		Detail("  no lights: ran %d, times %f and %f (want equal and positive); lights: ran %d, times %f and %f (want the first above the second)\n",
+			none, plain, bare, some, lit, base);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -2682,6 +2700,8 @@ PrintClusterTiming(void)
 	}
 	metal::FrameInfo info = metal::getFrameInfo();
 	metal::LightStats st = metal::getLightStats();
+	double sumLit = 0.0, sumBare = 0.0;
+	bool summed = metal::rtLightForwardTimingForTest(&sumLit, &sumBare) != 0;
 	lightCamera->frameBuffer = savedColor;
 	lightCamera->zBuffer = savedDepth;
 	depth->destroy();
@@ -2690,6 +2710,8 @@ PrintClusterTiming(void)
 		printf("  cluster pass timing: not measured (no stage-boundary counter samples)\n");
 		return;
 	}
+	if(summed)
+		printf("  forward sum timing, same frame: %.3f ms with the lights, %.3f ms without\n", sumLit, sumBare);
 	std::sort(ms, ms + measured);
 	printf("  cluster pass timing, 256 lights (a quarter spots), internal %dx%d, median of %d: %.3f ms (worst cluster %u lights, %u lost)\n",
 		info.internalWidth, info.internalHeight, measured, ms[measured/2], st.maxPerCluster, st.clusterLoss);
@@ -2751,6 +2773,7 @@ RunLightChecks(Camera *camera)
 	CheckLightCutoutAtNight();
 	CheckLightMovingCaster();
 	CheckLightReadbackKeepsPass();
+	CheckLightForwardTiming();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();
