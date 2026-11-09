@@ -1665,6 +1665,81 @@ CheckLightShadowTermOnly(void)
 	return Report(ok, name);
 }
 
+static bool
+CheckLightGroupedPair(void)
+{
+	const char *name = "two pinned lights in one group share one slot and both their terms take that slot's factor";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings high = metal::getRenderSettings();
+	high.shadowQuality = metal::SHADOWQUALITY_HIGH;
+	high.shadowedLights = 2;
+	metal::setRenderSettings(&high);
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 6.0f, 6.0f, -6.0f, -6.0f, 89.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 60.0f, 45.0f, -60.0f, -45.0f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	metal::LightDesc pair[2] = { PointLight(93, -3.0f, 0.0f, 86.0f, 40.0f), PointLight(94, 3.0f, 0.0f, 86.0f, 40.0f) };
+	metal::LightDesc third = PointLight(95, -40.0f, 0.0f, 86.0f, 14.0f);
+	for(int i = 0; i < 2; i++){
+		pair[i].flags = metal::LIGHT_PINNED;
+		pair[i].group = 5;
+		pair[i].color[0] = pair[i].color[1] = pair[i].color[2] = 20.0f;
+	}
+	third.color[0] = third.color[1] = third.color[2] = 10.0f;
+	metal::LightDesc all[3] = { pair[0], pair[1], third };
+	metal::FrameInfo info = metal::getFrameInfo();
+	const int32 W = info.internalWidth, H = info.internalHeight, CX = W/2, CY = H/2;
+	const float perPixel = 180.0f/(float)W;
+	const int32 litX = CX + (int32)(10.0f/perPixel);
+	bool began = true;
+	for(int f = 0; f < 16; f++)
+		began = NightFrame(all, 3, box, 0, wall) && began;
+	metal::rtWaitForTest();
+	metal::RayStats st = metal::getRayStats();
+	float inShadow[3], inLight[3], factorDark = -1.0f, factorLit = -1.0f;
+	ReadAt(CX, CY, inShadow);
+	ReadAt(litX, CY, inLight);
+	bool read = metal::readLightShadowForTest(0, CX, CY, &factorDark) != 0;
+	read = metal::readLightShadowForTest(0, litX, CY, &factorLit) != 0 && read;
+	SetMode(metal::LIGHTS_ON);
+	float base[2][3], terms[2][2][3];
+	const int32 xs[2] = { CX, litX };
+	const metal::LightDesc *sets[3] = { nil, &pair[0], &pair[1] };
+	for(int k = 0; k < 3; k++){
+		for(int f = 0; f < 4; f++)
+			began = NightFrame(sets[k], k ? 1 : 0, box, 0, wall) && began;
+		for(int i = 0; i < 2; i++)
+			ReadAt(xs[i], CY, k == 0 ? base[i] : terms[k - 1][i]);
+	}
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	bool slots = st.lightSlots == 2 && (st.lightSlotId[0] == 93 || st.lightSlotId[0] == 94) && st.lightSlotId[1] == 95;
+	bool ok = began && read && slots && factorDark < 0.05f && factorLit > 0.9f;
+	const float factors[2] = { factorDark, factorLit };
+	for(int i = 0; i < 2; i++)
+		for(int c = 0; c < 3; c++){
+			float *got = i ? inLight : inShadow;
+			float a = terms[0][i][c] - base[i][c], b = terms[1][i][c] - base[i][c];
+			float want = base[i][c] + factors[i]*(a + b);
+			ok = ok && a > 0.02f && b > 0.02f && fabsf(got[c] - want) <= 2.0f/255.0f;
+			if(!ok)
+				Detail("  pixel %d channel %d: reads %.4f, want %.4f (base %.4f, terms %.4f and %.4f, factor %.3f)\n", i, c, got[c], want,
+					base[i][c], a, b, factors[i]);
+		}
+	if(!ok)
+		Detail("  prepass %d read %d slots %u ids %u %u (want 2, a pair member and 95); factor in the shadow %.3f (want 0), beside it %.3f (want 1)\n",
+			began, read, st.lightSlots, st.lightSlotId[0], st.lightSlotId[1], factorDark, factorLit);
+	return Report(ok, name);
+}
+
 static void
 PrintClusterTiming(void)
 {
@@ -1754,6 +1829,7 @@ RunLightChecks(Camera *camera)
 	CheckLightRaysOwner();
 	CheckLightShadowBox();
 	CheckLightShadowTermOnly();
+	CheckLightGroupedPair();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

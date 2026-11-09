@@ -384,11 +384,6 @@ struct LightShadowRead
 	}
 };
 
-struct LightShadowNone
-{
-	float operator()(float, float4) const { return 1.0; }
-};
-
 template<typename Shadow>
 static float3
 LightsSumWith(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
@@ -421,14 +416,6 @@ LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, con
 {
 	LightShadowRead read = { lightShadow };
 	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, read);
-}
-
-static float3
-LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,
-          const device LTLight *list, const device ushort *clusters)
-{
-	LightShadowNone none;
-	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, none);
 }
 
 static float3

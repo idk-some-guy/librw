@@ -933,11 +933,6 @@ const char *header_metal_src =
 "	}\n"
 "};\n"
 
-"struct LightShadowNone\n"
-"{\n"
-"	float operator()(float, float4) const { return 1.0; }\n"
-"};\n"
-
 "template<typename Shadow>\n"
 "static float3\n"
 "LightsSumWith(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,\n"
@@ -970,14 +965,6 @@ const char *header_metal_src =
 "{\n"
 "	LightShadowRead read = { lightShadow };\n"
 "	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, read);\n"
-"}\n"
-
-"static float3\n"
-"LightsSum(float3 rel, float3 N, float3 albedo, float gloss, float4 position, constant LTFrame &lf,\n"
-"          const device LTLight *list, const device ushort *clusters)\n"
-"{\n"
-"	LightShadowNone none;\n"
-"	return LightsSumWith(rel, N, albedo, gloss, position, lf, list, clusters, none);\n"
 "}\n"
 
 "static float3\n"
