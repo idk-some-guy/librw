@@ -357,8 +357,9 @@ const char *shadow_metal_src =
 "{\n"
 "	float3 toLight = L.posRadius.xyz - o;\n"
 "	return dot(toLight, toLight) > 1e-8 &&\n"
-"	       ltRayWanted(LTVec3{ o.x, o.y, o.z }, LTVec3{ L.posRadius.x, L.posRadius.y, L.posRadius.z }, L.posRadius.w,\n"
-"	                   LTVec3{ L.dirOuter.x, L.dirOuter.y, L.dirOuter.z }, L.dirOuter.w, L.misc.y != 0.0);\n"
+"	       ltRayWantedSlot(LTVec3{ o.x, o.y, o.z }, LTVec3{ L.posRadius.x, L.posRadius.y, L.posRadius.z }, fmax(L.posRadius.w, L.extent.x),\n"
+"	                       LTVec3{ L.extent.y, L.extent.z, L.extent.w }, LTVec3{ L.dirOuter.x, L.dirOuter.y, L.dirOuter.z }, L.dirOuter.w,\n"
+"	                       L.misc.y != 0.0);\n"
 "}\n"
 
 "static ray\n"

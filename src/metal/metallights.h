@@ -273,6 +273,12 @@ ltHoldNext(int held, bool picked, int holdFrames)
 	return held > 0 ? held - 1 : 0;
 }
 
+static inline int
+ltHoldAge(int held, uint64_t skipped)
+{
+	return held > 0 && skipped < (uint64_t)held ? held - (int)skipped : 0;
+}
+
 static inline bool
 ltSlotReset(bool hadPrev, unsigned int prevId, unsigned int id)
 {
@@ -292,6 +298,17 @@ ltGroupIdentity(const LTCand *c, int n, int i)
 }
 
 static inline unsigned int
+ltMixId(unsigned int x)
+{
+	x ^= x >> 16;
+	x *= 0x85ebca6bu;
+	x ^= x >> 13;
+	x *= 0xc2b2ae35u;
+	x ^= x >> 16;
+	return x + 1u;
+}
+
+static inline unsigned int
 ltGroupSignature(const LTCand *c, int n, int i)
 {
 	if(c[i].group == 0)
@@ -299,7 +316,7 @@ ltGroupSignature(const LTCand *c, int n, int i)
 	unsigned int sig = 0u;
 	for(int j = 0; j < n; j++)
 		if(j == i || (c[j].group == c[i].group && !(c[j].flags & LT_CAND_EMPTY)))
-			sig += c[j].id*2654435761u + 1u;
+			sig += ltMixId(c[j].id);
 	return sig;
 }
 
@@ -483,7 +500,14 @@ ltSphereSpan(float c, float cz, float r, float zn, float *lo, float *hi)
 	return l <= h;
 }
 
-// proj is column major with w = k*z and the centre in view space; the part behind the near plane is off screen, another projection gets the whole grid.
+static inline float
+ltNearFromProj(const float *m)
+{
+	float d = 1.0f + m[10], n = -m[14]/d;
+	return m[11] > 0.0f && d > 0.0f && std::isfinite(n) && n > 0.0f ? n : 0.0f;
+}
+
+// the part behind the near plane is off screen
 static inline LTRect
 ltSphereRect(const float *m, float cx, float cy, float cz, float radius, float zNear, int width, int height)
 {
@@ -552,17 +576,30 @@ ltLightRects(LTRect full, int width, int height, int rawWidth, int rawHeight)
 #endif
 
 static inline bool
-ltRayWanted(LTVec3 p, LTVec3 lightPos, float radius, LTVec3 dir, float cosOuter, bool spot)
+ltInCone(LTVec3 v, LTVec3 dir, float cosOuter)
 {
-	if(!(radius > 0.0f))
+	return (v.x*dir.x + v.y*dir.y + v.z*dir.z) >= cosOuter*LT_SQRT(v.x*v.x + v.y*v.y + v.z*v.z);
+}
+
+static inline bool
+ltRayWantedSlot(LTVec3 p, LTVec3 centre, float reach, LTVec3 off, LTVec3 dir, float cosOuter, bool spot)
+{
+	if(!(reach > 0.0f))
 		return false;
-	float vx = p.x - lightPos.x, vy = p.y - lightPos.y, vz = p.z - lightPos.z;
+	float vx = p.x - centre.x, vy = p.y - centre.y, vz = p.z - centre.z;
 	float d2 = vx*vx + vy*vy + vz*vz;
-	if(!(d2 <= radius*radius))
+	if(!(d2 <= reach*reach))
 		return false;
 	if(!spot || d2 == 0.0f)
 		return true;
-	return (vx*dir.x + vy*dir.y + vz*dir.z) >= cosOuter*LT_SQRT(d2);
+	return ltInCone(LTVec3{ vx - off.x, vy - off.y, vz - off.z }, dir, cosOuter) ||
+	       ltInCone(LTVec3{ vx + off.x, vy + off.y, vz + off.z }, dir, cosOuter);
+}
+
+static inline bool
+ltRayWanted(LTVec3 p, LTVec3 lightPos, float radius, LTVec3 dir, float cosOuter, bool spot)
+{
+	return ltRayWantedSlot(p, lightPos, radius, LTVec3{ 0.0f, 0.0f, 0.0f }, dir, cosOuter, spot);
 }
 
 static inline float

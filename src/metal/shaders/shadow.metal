@@ -356,8 +356,9 @@ lightRayWanted(constant LightRaySlot &L, float3 o)
 {
 	float3 toLight = L.posRadius.xyz - o;
 	return dot(toLight, toLight) > 1e-8 &&
-	       ltRayWanted(LTVec3{ o.x, o.y, o.z }, LTVec3{ L.posRadius.x, L.posRadius.y, L.posRadius.z }, L.posRadius.w,
-	                   LTVec3{ L.dirOuter.x, L.dirOuter.y, L.dirOuter.z }, L.dirOuter.w, L.misc.y != 0.0);
+	       ltRayWantedSlot(LTVec3{ o.x, o.y, o.z }, LTVec3{ L.posRadius.x, L.posRadius.y, L.posRadius.z }, fmax(L.posRadius.w, L.extent.x),
+	                       LTVec3{ L.extent.y, L.extent.z, L.extent.w }, LTVec3{ L.dirOuter.x, L.dirOuter.y, L.dirOuter.z }, L.dirOuter.w,
+	                       L.misc.y != 0.0);
 }
 
 static ray

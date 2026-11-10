@@ -56,6 +56,7 @@ static struct LightState
 	std::vector<LTCand> cands;
 	std::vector<uint32> idents, sigs;
 	std::vector<std::pair<uint32, int32>> held, next;
+	uint64 heldFrame = 0;
 	uint32 slots = 0;
 	std::vector<int32> slotOf;
 	id<MTLTexture> whiteShadow = nil, shadowTex = nil, forwardTarget = nil;
@@ -108,16 +109,30 @@ lightsInit(void)
 			err ? err.localizedDescription.UTF8String : "");
 }
 
+static id<MTLCounterSet>
+timestampCounterSet(MetalContext *ctx)
+{
+	if(![ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+		return nil;
+	for(id<MTLCounterSet> s in ctx->device.counterSets)
+		if([s.name isEqualToString:MTLCommonCounterSetTimestamp])
+			return s;
+	return nil;
+}
+
+bool32
+stageTimestampsForTest(void)
+{
+	MetalContext *ctx = getContext();
+	return ctx != nil && timestampCounterSet(ctx) != nil;
+}
+
 static bool
 ensureBuffers(MetalContext *ctx)
 {
 	if(lt.clusters[0])
 		return true;
-	id<MTLCounterSet> timestamps = nil;
-	if([ctx->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
-		for(id<MTLCounterSet> s in ctx->device.counterSets)
-			if([s.name isEqualToString:MTLCommonCounterSetTimestamp])
-				timestamps = s;
+	id<MTLCounterSet> timestamps = timestampCounterSet(ctx);
 	for(uint32 i = 0; i < MAXFRAMESINFLIGHT; i++){
 		lt.clusters[i] = [ctx->device newBufferWithLength:CLUSTERS*(LT_PER_CLUSTER*2 + 4) options:MTLResourceStorageModeShared];
 		if(timestamps){
@@ -205,7 +220,7 @@ setLights(const LightDesc *lights, int32 n)
 		lt.kept.reserve(LT_MAX_LIGHTS);
 	lt.order.clear();
 	for(int32 i = 0; i < n; i++){
-		if(!(lights[i].radius >= 0.0f))
+		if(!(lights[i].radius >= 0.0f) || !std::isfinite(lights[i].pos[0]) || !std::isfinite(lights[i].pos[1]) || !std::isfinite(lights[i].pos[2]))
 			continue;
 		float32 dx = lights[i].pos[0] - eye[0], dy = lights[i].pos[1] - eye[1], dz = lights[i].pos[2] - eye[2];
 		lt.order.push_back({ dx*dx + dy*dy + dz*dz, i });
@@ -220,6 +235,12 @@ setLights(const LightDesc *lights, int32 n)
 		float32 len2 = d.dir[0]*d.dir[0] + d.dir[1]*d.dir[1] + d.dir[2]*d.dir[2];
 		if(!(len2 > 0.0f) || !std::isfinite(len2))
 			d.flags &= ~(uint32)LIGHT_SPOT;
+		else if(d.flags & LIGHT_SPOT){
+			float32 inv = 1.0f/std::sqrt(len2);
+			d.dir[0] *= inv;
+			d.dir[1] *= inv;
+			d.dir[2] *= inv;
+		}
 		lt.kept.push_back(d);
 		if(d.radius > 0.0f)
 			lt.roll.cur++;
@@ -232,11 +253,17 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 	*holes = 0;
 	uint32 n = (uint32)lt.kept.size();
 	lt.slotOf.assign(n, -1);
+	uint64 frameNow = getFrameId();
 	if(budget <= 0 || n == 0){
 		lt.held.clear();
+		lt.heldFrame = frameNow;
 		lt.slots = 0;
 		return 0;
 	}
+	uint64 skipped = frameNow > lt.heldFrame + 1 ? frameNow - lt.heldFrame - 1 : 0;
+	for(auto &h : lt.held)
+		h.second = ltHoldAge(h.second, skipped);
+	lt.heldFrame = frameNow;
 	const float32 *m = (const float32*)&view, *vp = (const float32*)&viewProj;
 	float32 eye[3];
 	for(int i = 0; i < 3; i++)
@@ -285,12 +312,15 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		const LightDesc &d = lt.kept[slotPick[k]];
 		float32 sum[3] = { 0.0f, 0.0f, 0.0f };
 		int32 members = 0;
+		const LightDesc *other = nil;
 		for(const LightDesc &g : lt.kept)
 			if(&g == &d || (d.group != 0 && g.group == d.group && g.radius > 0.0f)){
 				sum[0] += g.pos[0];
 				sum[1] += g.pos[1];
 				sum[2] += g.pos[2];
 				members++;
+				if(&g != &d)
+					other = &g;
 			}
 		float32 inv = 1.0f/(float32)members, reach = d.radius;
 		for(const LightDesc &g : lt.kept)
@@ -298,22 +328,26 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 				float32 dx = g.pos[0] - sum[0]*inv, dy = g.pos[1] - sum[1]*inv, dz = g.pos[2] - sum[2]*inv;
 				reach = std::max(reach, std::sqrt(dx*dx + dy*dy + dz*dz) + g.radius);
 			}
-		out[k].extent = simd_make_float4(reach, 0.0f, 0.0f, 0.0f);
-		out[k].posRadius = simd_make_float4(sum[0]*inv, sum[1]*inv, sum[2]*inv, d.radius);
-		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
-		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
+		float32 mid[3] = { sum[0]*inv, sum[1]*inv, sum[2]*inv }, cosOuter = d.cosOuter;
+		float32 off[3] = { 0.0f, 0.0f, 0.0f };
+		bool spot = (d.flags & LIGHT_SPOT) != 0;
+		if(members > 1){
+			spot = members == 2 && spot && (other->flags & LIGHT_SPOT) && d.dir[0]*other->dir[0] + d.dir[1]*other->dir[1] + d.dir[2]*other->dir[2] >= 0.9999f;
+			cosOuter = std::min(cosOuter, other->cosOuter);
+			if(members == 2)
+				for(int i = 0; i < 3; i++)
+					off[i] = d.pos[i] - mid[i];
+		}
+		out[k].extent = simd_make_float4(reach, off[0], off[1], off[2]);
+		out[k].posRadius = simd_make_float4(mid[0], mid[1], mid[2], d.radius);
+		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], cosOuter);
+		out[k].misc = simd_make_float4(d.softness, spot ? 1.0f : 0.0f, 0.0f, 0.0f);
 		out[k].ids = simd_make_uint4(lt.cands[slotPick[k]].id, d.owner, d.group, lt.sigs[slotPick[k]]);
 	}
 	for(uint32 i = 0; i < n; i++)
 		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, slotPick, span, (int)i);
 	lt.slots = (uint32)span;
 	return (uint32)span;
-}
-
-float32
-lightsNearPlane(void)
-{
-	return lt.zNear;
 }
 
 void
@@ -522,16 +556,12 @@ forwardDraw(MetalContext *ctx, id<MTLTexture> depth, bool lit)
 	return (cb.GPUEndTime - cb.GPUStartTime)*1000.0;
 }
 
-bool32
-rtLightForwardTimingForTest(double *withLights, double *withoutLights)
+static id<MTLTexture>
+forwardPrepare(MetalContext *ctx)
 {
-	*withLights = *withoutLights = 0.0;
-	MetalContext *ctx = getContext();
-	if(ctx == nil)
-		return 0;
 	id<MTLTexture> depth = frameSceneDepth();
 	if(depth == nil || !forwardInit(ctx))
-		return 0;
+		return nil;
 	if(ctx->commandBuffer){
 		flushPasses();
 		commitAndWait(ctx->commandBuffer);
@@ -544,9 +574,26 @@ rtLightForwardTimingForTest(double *withLights, double *withoutLights)
 		d.usage = MTLTextureUsageRenderTarget;
 		lt.forwardTarget = [ctx->device newTextureWithDescriptor:d];
 	}
-	if(lt.forwardTarget == nil)
+	return lt.forwardTarget ? depth : nil;
+}
+
+static bool
+forwardLights(void)
+{
+	return lt.sceneSlot >= 0 && lt.frameBuffer != nil && lt.scenePass != 0;
+}
+
+bool32
+rtLightForwardTimingForTest(double *withLights, double *withoutLights)
+{
+	*withLights = *withoutLights = 0.0;
+	MetalContext *ctx = getContext();
+	if(ctx == nil)
 		return 0;
-	bool lights = lt.sceneSlot >= 0 && lt.frameBuffer != nil && lt.scenePass != 0;
+	id<MTLTexture> depth = forwardPrepare(ctx);
+	if(depth == nil)
+		return 0;
+	bool lights = forwardLights();
 	for(int warm = 0; warm < 3; warm++){
 		forwardDraw(ctx, depth, false);
 		if(lights)
@@ -558,6 +605,33 @@ rtLightForwardTimingForTest(double *withLights, double *withoutLights)
 		return 0;
 	*withLights = lit;
 	*withoutLights = bare;
+	return 1;
+}
+
+bool32
+rtLightForwardPixelForTest(bool32 lit, int32 x, int32 y, float32 rgb[3])
+{
+	MetalContext *ctx = getContext();
+	if(ctx == nil)
+		return 0;
+	id<MTLTexture> depth = forwardPrepare(ctx);
+	if(depth == nil || x < 0 || y < 0 || x >= (int32)depth.width || y >= (int32)depth.height)
+		return 0;
+	if(forwardDraw(ctx, depth, lit && forwardLights()) < 0.0)
+		return 0;
+	id<MTLBuffer> out = [ctx->device newBufferWithLength:8 options:MTLResourceStorageModeShared];
+	id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromTexture:lt.forwardTarget sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake((NSUInteger)x, (NSUInteger)y, 0)
+		sourceSize:MTLSizeMake(1, 1, 1) toBuffer:out destinationOffset:0 destinationBytesPerRow:8 destinationBytesPerImage:8];
+	[blit endEncoding];
+	[cb commit];
+	[cb waitUntilCompleted];
+	if(cb.status != MTLCommandBufferStatusCompleted)
+		return 0;
+	const __fp16 *h = (const __fp16*)out.contents;
+	for(int i = 0; i < 3; i++)
+		rgb[i] = (float32)h[i];
 	return 1;
 }
 
@@ -586,12 +660,14 @@ getLightStats(void)
 	s.submitted = lt.submitted;
 	s.kept = (uint32)lt.kept.size();
 	s.dropped = lt.dropped;
-	s.shadowed = lt.slots;
 	if(lt.slots > 0){
 		RayStats r = getRayStats();
+		s.shadowed = r.lightSlots;
 		s.lightShadowMs = r.lightMs;
 		s.ownerListed = r.lightOwnerListed;
 		s.ownerOverflow = r.lightOwnerOverflow;
+		for(uint32 i = 0; i < LT_MAX_SHADOWED; i++)
+			s.lightRays += r.lightRays[i];
 	}
 	s.clusterMs = -1.0f;
 	ClusterResult r;
@@ -670,6 +746,7 @@ lightsTerm(void)
 	lt.cam = nil;
 	lt.held.clear();
 	lt.next.clear();
+	lt.heldFrame = 0;
 	lt.roll = {};
 	lt.pipe = lt.viewPipe = nil;
 	lt.pipeTried = false;

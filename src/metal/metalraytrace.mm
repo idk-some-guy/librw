@@ -2025,7 +2025,7 @@ lightRegions(const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count
 	LTRect *accum, LTRect *upsample, LTRect *rayUnion)
 {
 	bool tiles = (sh.levers & LT_LEVER_TILES) != 0;
-	float32 zNear = lightsNearPlane();
+	float32 zNear = ltNearFromProj((const float*)&in.proj);
 	for(uint32 i = 0; i < count; i++){
 		placed[i] = slots[i];
 		LTRect full = { 0, 0, (int)in.width, (int)in.height }, acc = { 0, 0, (int)rw, (int)rh }, ray = acc, up = full;
@@ -2121,7 +2121,6 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	for(uint32 i = 0; i < count; i++){
 		if((holes >> i) & 1u)
 			continue;
-		slices++;
 		bool reset = ltSlotReset(i < sh.lightPrevCount && !((sh.lightPrevHoles >> i) & 1u) && sh.lightPrevSig[i] == slots[i].ids.w, sh.lightPrevId[i], slots[i].ids.x);
 		LTRect a = sh.lightRect[i], pr = sh.lightPrevRect[i];
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
@@ -2129,6 +2128,7 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 			simd_make_uint4((uint32)pr.x0, (uint32)pr.y0, (uint32)pr.x1, (uint32)pr.y1), simd_make_uint2((uint32)a.x0, (uint32)a.y0) };
 		if(ltRectEmpty(a))
 			continue;
+		slices++;
 		[e setTexture:sh.lightRawView[i] atIndex:0];
 		[e setTexture:sh.lightHist[i][idx] atIndex:1];
 		[e setTexture:in.motion atIndex:2];
@@ -2143,10 +2143,10 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	for(uint32 i = 0; i < count; i++){
 		if((holes >> i) & 1u)
 			continue;
-		slices++;
 		LTRect u = sh.lightUp[i];
 		if(ltRectEmpty(u))
 			continue;
+		slices++;
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
 			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo, simd_make_uint4(0u, 0u, 0u, 0u),
 			simd_make_uint2((uint32)u.x0, (uint32)u.y0) };

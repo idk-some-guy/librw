@@ -269,6 +269,38 @@ TestRayWanted(void)
 }
 
 static void
+TestRayWantedSlot(void)
+{
+	LTVec3 mid = {0.0f, 0.0f, 10.0f}, half = {8.0f, 0.0f, 0.0f}, none = {0.0f, 0.0f, 0.0f}, down = {0.0f, 0.0f, -1.0f};
+	float cosOuter = cosf(0.5f), reach = 20.0f;
+	LTVec3 underMid = {0.0f, 0.0f, 0.0f}, underNear = {8.0f, 0.0f, 0.0f}, underFar = {-8.0f, 0.0f, 0.0f};
+	CHECK(!ltRayWantedSlot(underMid, mid, reach, half, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(underMid, mid, reach, LTVec3{ 2.0f, 0.0f, 0.0f }, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(underNear, mid, reach, half, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(underFar, mid, reach, half, down, cosOuter, true));
+	CHECK(!ltRayWantedSlot(underNear, mid, reach, none, down, cosOuter, true));
+	CHECK(!ltRayWantedSlot(underFar, mid, reach, none, down, cosOuter, true));
+	LTVec3 fringeNear = {8.0f + 10.0f*tanf(0.45f), 0.0f, 0.0f}, fringeFar = {-8.0f - 10.0f*tanf(0.45f), 0.0f, 0.0f};
+	CHECK(ltRayWantedSlot(fringeNear, mid, reach, half, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(fringeFar, mid, reach, half, down, cosOuter, true));
+	LTVec3 outside = {8.0f + 10.0f*tanf(0.6f), 0.0f, 0.0f}, outsideFar = {-8.0f - 10.0f*tanf(0.6f), 0.0f, 0.0f};
+	CHECK(!ltRayWantedSlot(outside, mid, reach, half, down, cosOuter, true));
+	CHECK(!ltRayWantedSlot(outsideFar, mid, reach, half, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(outside, mid, reach, half, down, cosOuter, false));
+	LTVec3 beyond = {0.0f, 0.0f, -3.0f};
+	CHECK(!ltRayWantedSlot(beyond, mid, 12.0f, half, down, cosOuter, false));
+	CHECK(ltRayWantedSlot(beyond, mid, 13.5f, half, down, cosOuter, false));
+	CHECK(!ltRayWantedSlot(underMid, mid, 0.0f, half, down, cosOuter, true));
+	CHECK(!ltRayWantedSlot(underMid, mid, NAN, half, down, cosOuter, true));
+	CHECK(ltRayWantedSlot(mid, mid, reach, half, down, cosOuter, true));
+	LTVec3 sweep[4] = { {1.0f, 2.0f, 3.0f}, {-6.0f, 1.0f, 5.0f}, {4.0f, -3.0f, 9.0f}, {0.0f, 0.0f, 12.0f} };
+	for(int i = 0; i < 4; i++){
+		CHECK(ltRayWantedSlot(sweep[i], mid, 20.0f, none, down, cosOuter, true) == ltRayWanted(sweep[i], mid, 20.0f, down, cosOuter, true));
+		CHECK(ltRayWantedSlot(sweep[i], mid, 20.0f, none, down, cosOuter, false) == ltRayWanted(sweep[i], mid, 20.0f, down, cosOuter, false));
+	}
+}
+
+static void
 TestRayLength(void)
 {
 	CHECK(Near(ltRayLength(10.0f, 0.1f), 9.9f, 1e-6f));
@@ -387,6 +419,27 @@ TestGroupSignature(void)
 	LTCand swap[3] = { c[4], c[0], { 1.0f, 23u, 0u, 5u, 0 } };
 	CHECK(ltGroupSignature(swap, 3, 0) != ltGroupSignature(order, 3, 0));
 	CHECK(ltGroupIdentity(leave, 2, 0) == ltGroupIdentity(order, 3, 0) && ltGroupSignature(leave, 2, 0) != ltGroupSignature(order, 3, 0));
+	LTCand a[3] = { { 1.0f, 1u, 0u, 5u, 0 }, { 1.0f, 5u, 0u, 5u, 0 }, { 1.0f, 6u, 0u, 5u, 0 } };
+	LTCand b[3] = { { 1.0f, 1u, 0u, 5u, 0 }, { 1.0f, 4u, 0u, 5u, 0 }, { 1.0f, 7u, 0u, 5u, 0 } };
+	CHECK(ltGroupIdentity(a, 3, 0) == ltGroupIdentity(b, 3, 0));
+	CHECK(ltGroupSignature(a, 3, 0) != ltGroupSignature(b, 3, 0));
+	LTCand c2[3] = { { 1.0f, 2u, 0u, 5u, 0 }, { 1.0f, 9u, 0u, 5u, 0 }, { 1.0f, 12u, 0u, 5u, 0 } };
+	LTCand d2[3] = { { 1.0f, 2u, 0u, 5u, 0 }, { 1.0f, 10u, 0u, 5u, 0 }, { 1.0f, 11u, 0u, 5u, 0 } };
+	CHECK(ltGroupSignature(c2, 3, 0) != ltGroupSignature(d2, 3, 0));
+	LTCand shuffled[3] = { a[2], a[0], a[1] };
+	CHECK(ltGroupSignature(shuffled, 3, 1) == ltGroupSignature(a, 3, 0));
+}
+
+static void
+TestHoldAge(void)
+{
+	CHECK(ltHoldAge(6, 0u) == 6);
+	CHECK(ltHoldAge(6, 1u) == 5);
+	CHECK(ltHoldAge(6, 5u) == 1);
+	CHECK(ltHoldAge(6, 6u) == 0);
+	CHECK(ltHoldAge(6, 9u) == 0);
+	CHECK(ltHoldAge(0, 3u) == 0);
+	CHECK(ltHoldAge(6, 1000000000000ull) == 0);
 }
 
 static void
@@ -618,6 +671,32 @@ Projects(const float *m, float x, float y, float z, int w, int h, int *px, int *
 }
 
 static void
+TestNearFromProj(void)
+{
+	float m[16];
+	Projection(m, 1.5f, 2.6667f, 0.0f, 0.0f);
+	CHECK(Near(ltNearFromProj(m), 0.2f/2.002f, 1e-6f));
+	float f = 1000.0f, n = 0.1f;
+	m[10] = (f + n)/(f - n);
+	m[14] = -2.0f*n*f/(f - n);
+	CHECK(Near(ltNearFromProj(m), n, 1e-5f));
+	Projection(m, 1.5f, 2.6667f, 0.3f, -0.2f);
+	m[10] = (f + 0.5f)/(f - 0.5f);
+	m[14] = -2.0f*0.5f*f/(f - 0.5f);
+	CHECK(Near(ltNearFromProj(m), 0.5f, 1e-4f));
+	m[11] = 0.0f;
+	CHECK(ltNearFromProj(m) == 0.0f);
+	Projection(m, 1.5f, 2.6667f, 0.0f, 0.0f);
+	m[10] = -1.0f;
+	CHECK(ltNearFromProj(m) == 0.0f);
+	m[10] = NAN;
+	CHECK(ltNearFromProj(m) == 0.0f);
+	Projection(m, 1.5f, 2.6667f, 0.0f, 0.0f);
+	m[14] = 0.2f;
+	CHECK(ltNearFromProj(m) == 0.0f);
+}
+
+static void
 TestSphereRect(void)
 {
 	float m[16];
@@ -822,7 +901,10 @@ main(void)
 	TestEmissiveLuma();
 	TestPickShadowed();
 	TestHoldNext();
+	TestHoldAge();
+	TestNearFromProj();
 	TestRayWanted();
+	TestRayWantedSlot();
 	TestRayLength();
 	TestDisc();
 	TestHoldFrames();
