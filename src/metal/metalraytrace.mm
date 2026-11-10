@@ -204,6 +204,7 @@ struct ShadowRayParamsHost
 	simd_float4 sun, eye;
 	simd_uint2 size, depthSize;
 	uint32 frame, raysPerPixel, halfRes, alphaEntries, terminatorOff, ownerOff, listCap;
+	simd_uint2 origin;
 };
 
 struct ShadowAccumParamsHost
@@ -214,6 +215,8 @@ struct ShadowAccumParamsHost
 	uint32 halfRes, valid;
 	float32 maxHistory;
 	uint32 phase;
+	simd_uint4 prevRect;
+	simd_uint2 origin;
 };
 
 struct ShadowAlphaEntryHost
@@ -224,9 +227,9 @@ struct ShadowAlphaEntryHost
 };
 
 static_assert(sizeof(ShadowAlphaEntryHost) == 16, "shadow alpha entry");
-static_assert(sizeof(ShadowRayParamsHost) == 208, "shadow ray params");
-static_assert(sizeof(ShadowAccumParamsHost) == 256, "shadow accumulation params");
-static_assert(sizeof(LightRaySlotHost) == 64, "light ray slot");
+static_assert(sizeof(ShadowRayParamsHost) == 224, "shadow ray params");
+static_assert(sizeof(ShadowAccumParamsHost) == 288, "shadow accumulation params");
+static_assert(sizeof(LightRaySlotHost) == 96, "light ray slot");
 static_assert(LT_MAX_SHADOWED == 8, "RayStats carries eight light slots");
 
 struct LightResult
@@ -246,6 +249,8 @@ static struct
 	id<MTLTexture> lightRaw, lightShadow;
 	id<MTLTexture> lightRawView[LT_MAX_SHADOWED], lightOutView[LT_MAX_SHADOWED], lightHist[LT_MAX_SHADOWED][2];
 	uint32 lightPrevId[LT_MAX_SHADOWED], lightPrevSig[LT_MAX_SHADOWED], lightPrevCount, lightPrevHoles, lightIndex, lightSamples;
+	LTRect lightPrevRect[LT_MAX_SHADOWED], lightRect[LT_MAX_SHADOWED], lightUp[LT_MAX_SHADOWED];
+	uint32 levers = LT_LEVERS_ALL;
 	int32 lightQuality;
 	uint64 lightLastFrame;
 	bool lightHave;
@@ -1969,6 +1974,40 @@ rtLightHeldSlots(uint32 *ids, uint32 *holes)
 	return sh.lightPrevCount;
 }
 
+uint32
+rtLightLevers(void)
+{
+	return sh.levers;
+}
+
+void
+setLightLeversForTest(uint32 mask)
+{
+	rtWaitForTest();
+	sh.levers = mask & LT_LEVERS_ALL;
+	rtDropLightTargets();
+	sh.lightFrame = 0;
+}
+
+uint32
+lightLeversForTest(void)
+{
+	return sh.levers;
+}
+
+bool32
+rtLightRectForTest(int32 slot, int32 which, uint32 rect[4])
+{
+	if(slot < 0 || slot >= (int32)LT_MAX_SHADOWED || !sh.lightHave || (uint32)slot >= sh.lightPrevCount)
+		return 0;
+	const LTRect &r = which == 0 ? sh.lightPrevRect[slot] : sh.lightUp[slot];
+	rect[0] = (uint32)r.x0;
+	rect[1] = (uint32)r.y0;
+	rect[2] = (uint32)r.x1;
+	rect[3] = (uint32)r.y1;
+	return 1;
+}
+
 static id<MTLComputeCommandEncoder>
 lightEncoder(id<MTLCommandBuffer> cb, id<MTLCounterSampleBuffer> sb)
 {
@@ -1979,6 +2018,30 @@ lightEncoder(id<MTLCommandBuffer> cb, id<MTLCounterSampleBuffer> sb)
 	pd.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
 	pd.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
 	return [cb computeCommandEncoderWithDescriptor:pd];
+}
+
+static void
+lightRegions(const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 rw, uint32 rh, LightRaySlotHost *placed,
+	LTRect *accum, LTRect *upsample, LTRect *rayUnion)
+{
+	bool tiles = (sh.levers & LT_LEVER_TILES) != 0;
+	float32 zNear = lightsNearPlane();
+	for(uint32 i = 0; i < count; i++){
+		placed[i] = slots[i];
+		LTRect full = { 0, 0, (int)in.width, (int)in.height }, acc = { 0, 0, (int)rw, (int)rh }, ray = acc, up = full;
+		if(tiles){
+			simd_float4 v = simd_mul(in.view, simd_make_float4(slots[i].posRadius.x, slots[i].posRadius.y, slots[i].posRadius.z, 1.0f));
+			full = ltSphereRect((const float*)&in.proj, v.x, v.y, v.z, std::max(slots[i].posRadius.w, slots[i].extent.x), zNear, (int)in.width, (int)in.height);
+			LTRects r = ltLightRects(full, (int)in.width, (int)in.height, (int)rw, (int)rh);
+			acc = r.accum;
+			ray = r.ray;
+			up = r.upsample;
+		}
+		placed[i].rect = simd_make_uint4((uint32)ray.x0, (uint32)ray.y0, (uint32)ray.x1, (uint32)ray.y1);
+		accum[i] = acc;
+		upsample[i] = up;
+		*rayUnion = ltUnionRect(*rayUnion, ray);
+	}
 }
 
 void
@@ -1998,7 +2061,7 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	sh.lightHave = false;
 	if(count == 0 || tlas == nil || !rtShadowsSupported() || sh.lightRays == nil || sh.lightFix == nil || sh.lightAccumulate == nil ||
 	   sh.lightUpsample == nil || q.raysPerPixel == 0 || in.depth == nil || in.normals == nil ||
-	   !ensureLightTargets(in, q, std::min(budget, (uint32)LT_MAX_SHADOWED)))
+	   !ensureLightTargets(in, q, ltHistorySlices((int)budget, (sh.levers & LT_LEVER_HISTORY) != 0)))
 		return;
 	had = had && sh.lightRaw == before;
 	bool alpha = sh.lightRaysAlpha != nil && useAlphaKernel(rf.currentAlpha, rf.currentTable);
@@ -2010,9 +2073,12 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	uint32 rw = (uint32)sh.lightRaw.width, rh = (uint32)sh.lightRaw.height, frameNo = sh.lightFrame++;
 	bool owners = sh.ownerReset && !sh.ownerOff && rt.stats.ownedInstances > 0;
 	uint32 listCap = std::min(sh.lightListCap, sh.listCapTest);
+	LightRaySlotHost placed[LT_MAX_SHADOWED];
+	LTRect rayUnion = { 0, 0, 0, 0 };
+	lightRegions(in, slots, count, rw, rh, placed, sh.lightRect, sh.lightUp, &rayUnion);
 	ShadowRayParamsHost rp = { inv, toWorld, simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f), simd_make_float4(eye, SH_RAY_DISTANCE),
 		simd_make_uint2(rw, rh), simd_make_uint2(in.width, in.height), frameNo, 1u, q.halfRes, alpha ? rt.stats.alphaEntries : 0u, 1u,
-		owners ? 0u : 1u, listCap };
+		owners ? 0u : 1u, listCap, simd_make_uint2((uint32)rayUnion.x0, (uint32)rayUnion.y0) };
 	id<MTLBuffer> counts = sh.lightCounts[sh.lightCountSlot];
 	sh.lightCountSlot = (sh.lightCountSlot + 1) % MAXFRAMESINFLIGHT;
 	memset(counts.contents, 0, (LT_MAX_SHADOWED + 1)*sizeof(uint32));
@@ -2034,12 +2100,13 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 	rtUseHeaps(e);
 	[e setAccelerationStructure:tlas atBufferIndex:0];
 	[e setBytes:&rp length:sizeof(rp) atIndex:1];
-	[e setBytes:slots length:count*sizeof(LightRaySlotHost) atIndex:7];
+	[e setBytes:placed length:count*sizeof(LightRaySlotHost) atIndex:7];
 	[e setBuffer:counts offset:0 atIndex:8];
 	[e setTexture:in.depth atIndex:0];
 	[e setTexture:sh.lightRaw atIndex:1];
 	[e setTexture:in.normals atIndex:2];
-	[e dispatchThreads:MTLSizeMake(rw, rh, count) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	if(!ltRectEmpty(rayUnion))
+		[e dispatchThreads:MTLSizeMake(rayUnion.x1 - rayUnion.x0, rayUnion.y1 - rayUnion.y0, count) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	if(owners){
 		[e memoryBarrierWithScope:MTLBarrierScopeTextures | MTLBarrierScopeBuffers];
 		[e setComputePipelineState:sh.lightFix];
@@ -2056,8 +2123,12 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 			continue;
 		slices++;
 		bool reset = ltSlotReset(i < sh.lightPrevCount && !((sh.lightPrevHoles >> i) & 1u) && sh.lightPrevSig[i] == slots[i].ids.w, sh.lightPrevId[i], slots[i].ids.x);
+		LTRect a = sh.lightRect[i], pr = sh.lightPrevRect[i];
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
-			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, had && !reset ? 1u : 0u, q.maxHistory, frameNo };
+			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, had && !reset ? 1u : 0u, q.maxHistory, frameNo,
+			simd_make_uint4((uint32)pr.x0, (uint32)pr.y0, (uint32)pr.x1, (uint32)pr.y1), simd_make_uint2((uint32)a.x0, (uint32)a.y0) };
+		if(ltRectEmpty(a))
+			continue;
 		[e setTexture:sh.lightRawView[i] atIndex:0];
 		[e setTexture:sh.lightHist[i][idx] atIndex:1];
 		[e setTexture:in.motion atIndex:2];
@@ -2065,28 +2136,33 @@ rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRa
 		[e setTexture:in.depth atIndex:4];
 		[e setTexture:sh.lightHist[i][idx ^ 1] atIndex:5];
 		[e setBytes:&ap length:sizeof(ap) atIndex:0];
-		[e dispatchThreads:MTLSizeMake(rw, rh, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+		[e dispatchThreads:MTLSizeMake(a.x1 - a.x0, a.y1 - a.y0, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	}
 	[e memoryBarrierWithScope:MTLBarrierScopeTextures];
 	[e setComputePipelineState:sh.lightUpsample];
 	for(uint32 i = 0; i < count; i++){
 		if((holes >> i) & 1u)
 			continue;
+		slices++;
+		LTRect u = sh.lightUp[i];
+		if(ltRectEmpty(u))
+			continue;
 		ShadowAccumParamsHost ap = { inv, sh.lightPrevInvViewProj, toWorld, simd_make_float4(eye, 1.0f), simd_make_float4(sh.lightPrevEye, 1.0f),
-			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo };
+			simd_make_uint2(in.width, in.height), simd_make_uint2(rw, rh), 1u, 0u, q.maxHistory, frameNo, simd_make_uint4(0u, 0u, 0u, 0u),
+			simd_make_uint2((uint32)u.x0, (uint32)u.y0) };
 		[e setTexture:sh.lightHist[i][idx ^ 1] atIndex:0];
 		[e setTexture:in.normals atIndex:1];
 		[e setTexture:in.depth atIndex:2];
 		[e setTexture:sh.lightOutView[i] atIndex:3];
 		[e setBytes:&ap length:sizeof(ap) atIndex:0];
-		[e dispatchThreads:MTLSizeMake(in.width, in.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
-		slices++;
+		[e dispatchThreads:MTLSizeMake(u.x1 - u.x0, u.y1 - u.y0, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 	}
 	[e endEncoding];
 	sh.lightPrevHoles = 0;
 	for(uint32 i = 0; i < count; i++){
 		sh.lightPrevId[i] = slots[i].ids.x;
 		sh.lightPrevSig[i] = slots[i].ids.w;
+		sh.lightPrevRect[i] = sh.lightRect[i];
 		if((holes >> i) & 1u)
 			sh.lightPrevHoles |= 1u << i;
 	}

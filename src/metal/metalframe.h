@@ -84,6 +84,7 @@ bool frameLightsReady(void);
 bool frameLightsSource(void);
 id<MTLTexture> frameSceneDepth(void);
 void lightsInit(void);
+float32 lightsNearPlane(void);
 void lightsSceneBegin(Camera *cam);
 uint32 lightsCandidates(void);
 struct LightRaySlotHost;

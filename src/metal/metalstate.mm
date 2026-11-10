@@ -481,6 +481,7 @@ beginPrepassState(bool continuous)
 	mul44((float32*)&vp, projBase, uniformScene.view);
 	mul44((float32*)&prepassMats.uploadedViewProj, uniformScene.proj, uniformScene.view);
 	memcpy(&prepassMats.view, uniformScene.view, 64);
+	memcpy(&prepassMats.proj, uniformScene.proj, 64);
 	prepassMats.viewProj = vp;
 	prepassMats.prevViewProj = cut ? vp : lastViewProj;
 	prepassFrameBlock.viewProj = vp;

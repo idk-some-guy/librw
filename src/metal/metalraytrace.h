@@ -37,7 +37,7 @@ void rtDropLightTargets(void);
 struct ShadowInputs
 {
 	id<MTLTexture> depth, normals, motion;
-	simd_float4x4 viewProj, view;
+	simd_float4x4 viewProj, view, proj;
 	uint32 width, height, samples;
 	int32 quality;
 	float32 toSun[3];
@@ -50,7 +50,8 @@ id<MTLTexture> rtEncodeShadows(id<MTLCommandBuffer> cb, const ShadowInputs &in);
 struct LightRaySlotHost
 {
 	simd_float4 posRadius, dirOuter, misc;
-	simd_uint4 ids;
+	simd_uint4 ids, rect;
+	simd_float4 extent;
 };
 
 void rtEncodeLightRays(id<MTLCommandBuffer> cb, const ShadowInputs &in, const LightRaySlotHost *slots, uint32 count, uint32 budget, uint32 holes);
@@ -59,6 +60,7 @@ id<MTLTexture> rtLightShadowTexture(void);
 id<MTLTexture> rtLightHistoryTexture(uint32 slot);
 uint32 rtLightSlotCount(void);
 uint32 rtLightHeldSlots(uint32 *ids, uint32 *holes);
+uint32 rtLightLevers(void);
 void rtEncodeBuilds(id<MTLCommandBuffer> cb);
 id<MTLAccelerationStructure> rtBottomLevel(const InstanceDataHeader *h);
 void rtEncodeFrame(id<MTLCommandBuffer> cb, bool casters);

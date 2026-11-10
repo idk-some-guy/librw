@@ -2717,6 +2717,295 @@ PrintClusterTiming(void)
 		info.internalWidth, info.internalHeight, measured, ms[measured/2], st.maxPerCluster, st.clusterLoss);
 }
 
+
+struct TileRun
+{
+	uint8 *picture;
+	std::vector<float> shadow[2], hist[2];
+	uint32 shadowW, shadowH, histW, histH, acc[2][4], up[2][4];
+	uint32 rays[2], frame;
+	bool read;
+};
+
+static TileRun
+TileSequence(uint32 levers, const metal::LightDesc *lights, int n, int frames, float slide, float pan, Atomic *box, Atomic *wall, int slots = 2)
+{
+	TileRun r = {};
+	metal::setLightLeversForTest(levers);
+	metal::LightDesc set[4];
+	for(int i = 0; i < n; i++)
+		set[i] = lights[i];
+	r.read = true;
+	uint32 passes = 0;
+	Matrix home = lightCamera->getFrame()->matrix;
+	for(int f = 0; f < 6*frames && passes < (uint32)frames; f++){
+		set[0].pos[0] = lights[0].pos[0] + slide*(float)passes;
+		if(pan != 0.0f)
+			CameraSlide(home, pan*(float)passes);
+		r.read = NightFrame(set, n, box, 0, wall) && r.read;
+		metal::RayStats st = metal::getRayStats();
+		if(st.lightSlots == (uint32)slots)
+			passes = st.lightFrame + 1;
+	}
+	r.read = passes == (uint32)frames && r.read;
+	if(pan != 0.0f){
+		lightCamera->getFrame()->matrix = home;
+		lightCamera->getFrame()->updateObjects();
+	}
+	metal::rtWaitForTest();
+	r.picture = CompositeFrame();
+	for(int i = 0; i < slots; i++){
+		r.shadow[i].resize(640*480);
+		r.hist[i].resize(2*320*240);
+		r.read = metal::readLightPlaneForTest(0, i, r.shadow[i].data(), &r.shadowW, &r.shadowH) != 0 && r.read;
+		r.read = metal::readLightPlaneForTest(2, i, r.hist[i].data(), &r.histW, &r.histH) != 0 && r.read;
+		r.read = metal::rtLightRectForTest(i, 0, r.acc[i]) != 0 && r.read;
+		r.read = metal::rtLightRectForTest(i, 1, r.up[i]) != 0 && r.read;
+		r.rays[i] = metal::getRayStats().lightRays[i];
+	}
+	r.frame = metal::getRayStats().lightFrame;
+	return r;
+}
+
+static int
+PlaneDifference(const std::vector<float> &a, const std::vector<float> &b, uint32 width, uint32 per, const uint32 rect[4], int *compared)
+{
+	int differing = 0;
+	*compared = 0;
+	for(uint32 y = rect[1]; y < rect[3]; y++)
+		for(uint32 x = rect[0]; x < rect[2]; x++)
+			for(uint32 k = 0; k < per; k++){
+				(*compared)++;
+				if(a[(y*width + x)*per + k] != b[(y*width + x)*per + k])
+					differing++;
+			}
+	return differing;
+}
+
+static int
+PictureDifference(const uint8 *a, const uint8 *b, int *compared)
+{
+	int differing = 0;
+	*compared = 0;
+	for(int i = 0; i < 640*480*4; i++){
+		if(i % 4 == 3)
+			continue;
+		(*compared)++;
+		if(a[i] != b[i])
+			differing++;
+	}
+	return differing;
+}
+
+static bool
+CheckLightTilesExact(void)
+{
+	const char *name = "the light shadow pass over the tiles a light reaches matches the whole-screen pass: picture, shadow and history compare 0";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings med = metal::getRenderSettings();
+	med.shadowedLights = 2;
+	metal::setRenderSettings(&med);
+	uint32 saved = metal::lightLeversForTest();
+	RGBA white = { 255, 255, 255, 255 }, col[4] = { white, white, white, white };
+	Geometry *geo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT, 36.0f, 6.0f, -30.0f, -6.0f, 78.0f, col, nil, backMat);
+	Atomic *box = MakeAtomic(geo);
+	RGBA grey = { 90, 90, 90, 255 }, greys[4] = { grey, grey, grey, grey };
+	Material *wallMat = LitMaterial();
+	Geometry *wallGeo = QuadGeometry(Geometry::POSITIONS | Geometry::PRELIT | Geometry::LIGHT, 91.0f, 68.5f, -91.0f, -68.5f, 90.0f, greys, nil, wallMat);
+	Atomic *wall = MakeAtomic(wallGeo);
+	metal::LightDesc two[3] = { PointLight(201, -25.0f, 8.0f, 60.0f, 38.0f), PointLight(202, 6.0f, -6.0f, 84.0f, 14.0f), PointLight(203, 14.0f, -6.0f, 84.0f, 22.0f) };
+	for(int i = 1; i < 3; i++){
+		two[i].color[0] = two[i].color[1] = two[i].color[2] = 60.0f;
+		two[i].flags = metal::LIGHT_PINNED;
+		two[i].group = 7;
+	}
+	const uint32 rest = saved & ~LT_LEVER_TILES;
+	TileRun off = TileSequence(rest, two, 3, 10, 0.0f, 0.0f, box, wall);
+	TileRun on = TileSequence(rest | LT_LEVER_TILES, two, 3, 10, 0.0f, 0.0f, box, wall);
+	for(int f = 0; f < 4; f++)
+		NightFrame(nil, 0, nil, 0, wall);
+	uint8 *unlit = CompositeFrame();
+	int litN, litDiff = PictureDifference(unlit, on.picture, &litN);
+	delete[] unlit;
+	int pictureN, shadowN[2], histN[2], pictureDiff = PictureDifference(off.picture, on.picture, &pictureN), shadowDiff = 0, histDiff = 0;
+	for(int i = 0; i < 2; i++){
+		shadowDiff += PlaneDifference(off.shadow[i], on.shadow[i], off.shadowW, 1, on.up[i], &shadowN[i]);
+		histDiff += PlaneDifference(off.hist[i], on.hist[i], off.histW, 2, on.acc[i], &histN[i]);
+	}
+	double grid = 320.0*240.0, area[2];
+	for(int i = 0; i < 2; i++)
+		area[i] = (double)(on.acc[i][2] - on.acc[i][0])*(double)(on.acc[i][3] - on.acc[i][1]);
+	bool whole = off.acc[0][2] == 320 && off.acc[0][3] == 240 && off.up[1][2] == 640 && off.up[1][3] == 480;
+	bool darkened = false;
+	for(int i = 0; i < 640*480; i++)
+		darkened = darkened || on.shadow[0][i] < 0.5f;
+	TileRun moveOff = TileSequence(rest, two, 3, 14, 0.5f, 0.0f, box, wall), moveOn = TileSequence(rest | LT_LEVER_TILES, two, 3, 14, 0.5f, 0.0f, box, wall);
+	TileRun panOff = TileSequence(rest, two, 3, 14, 0.0f, 0.4f, box, wall), panOn = TileSequence(rest | LT_LEVER_TILES, two, 3, 14, 0.0f, 0.4f, box, wall);
+	int panN, panDiff = PictureDifference(panOff.picture, panOn.picture, &panN);
+	int moveN, moveDiff = PictureDifference(moveOff.picture, moveOn.picture, &moveN);
+	metal::setLightLeversForTest(saved);
+	delete[] off.picture;
+	delete[] on.picture;
+	delete[] moveOff.picture;
+	delete[] moveOn.picture;
+	delete[] panOff.picture;
+	delete[] panOn.picture;
+	DestroyAtomic(wall);
+	wallGeo->destroy();
+	wallMat->destroy();
+	DestroyAtomic(box);
+	geo->destroy();
+	NightEnd(&rig);
+	Detail("  the same frame without lights is unequal in %d of %d channel values\n", litDiff, litN);
+	Detail("  light moving half a unit a frame: %d of %d channel values unequal after 14 frames; camera moving 0.4 units a frame: %d of %d\n", moveDiff, moveN, panDiff, panN);
+	Detail("  picture: %d channel values compared, %d unequal; shadow: %d + %d pixels in the reach, %d unequal; history: %d + %d values, %d unequal; rays %u/%u against %u/%u;"
+		" slot 0's tiles are %.0f%% of the grid, slot 1's %.0f%%\n", pictureN, pictureDiff, shadowN[0], shadowN[1], shadowDiff, histN[0], histN[1], histDiff,
+		on.rays[0], on.rays[1], off.rays[0], off.rays[1], 100.0*area[0]/grid, 100.0*area[1]/grid);
+	bool ok = off.read && on.read && moveOff.read && moveOn.read && panOff.read && panOn.read && whole && darkened && litDiff > 20000 && moveDiff == 0 && panDiff == 0 && pictureDiff == 0 && shadowDiff == 0 && histDiff == 0 && on.rays[0] > 0 && on.rays[0] == off.rays[0] &&
+		on.rays[1] > 0 && on.rays[1] == off.rays[1] && area[0] < 0.4*grid && area[1] < 0.8*grid;
+	if(!ok)
+		Detail("  read %d %d; the whole-screen run has the whole grid %d; a shadow exists %d\n", off.read, on.read, whole, darkened);
+	return Report(ok, name);
+}
+
+
+static bool
+CheckLightTilesEdges(void)
+{
+	const char *name = "a light the eye is inside covers the whole grid, a light past the edge keeps the tiles on screen, and a hole slot covers none";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::RenderSettings med = metal::getRenderSettings();
+	med.shadowedLights = 2;
+	metal::setRenderSettings(&med);
+	metal::LightDesc around = PointLight(211, 0.0f, 0.0f, 10.0f, 40.0f), edge = PointLight(212, -70.0f, 0.0f, 60.0f, 20.0f);
+	uint32 inside[4] = { 1, 1, 1, 1 }, insideUp[4] = { 1, 1, 1, 1 }, clipped[4] = { 0, 0, 0, 0 };
+	bool began = true;
+	for(int f = 0; f < 5; f++)
+		began = NightFrame(&around, 1) && began;
+	metal::rtWaitForTest();
+	bool read = metal::rtLightRectForTest(0, 0, inside) != 0 && metal::rtLightRectForTest(0, 1, insideUp) != 0;
+	for(int f = 0; f < 5; f++)
+		began = NightFrame(&edge, 1) && began;
+	metal::rtWaitForTest();
+	read = metal::rtLightRectForTest(0, 0, clipped) != 0 && read;
+	metal::LightDesc both[2] = { PointLight(213, -25.0f, 8.0f, 60.0f, 38.0f), PointLight(214, 28.0f, -12.0f, 76.0f, 24.0f) };
+	both[1].color[0] = both[1].color[1] = both[1].color[2] = 2.0f;
+	for(int f = 0; f < 5; f++)
+		began = NightFrame(both, 2) && began;
+	metal::RayStats pair = metal::getRayStats();
+	const int32 leaving = 0;
+	for(int f = 0; f < 4; f++)
+		began = NightFrame(&both[pair.lightSlotId[0] == 213 ? 1 : 0], 1) && began;
+	metal::rtWaitForTest();
+	metal::RayStats alone = metal::getRayStats();
+	uint32 hole[4] = { 1, 1, 1, 1 }, kept[4] = { 0, 0, 0, 0 };
+	bool readHole = metal::rtLightRectForTest(leaving, 0, hole) != 0, readKept = metal::rtLightRectForTest(1 - leaving, 0, kept) != 0;
+	NightEnd(&rig);
+	bool ok = began && read && readHole && readKept && inside[0] == 0 && inside[1] == 0 && inside[2] == 320 && inside[3] == 240 && insideUp[2] == 640 &&
+		insideUp[3] == 480 && clipped[0] > 200 && clipped[0] < 320 && clipped[2] == 320 && clipped[3] > clipped[1] && pair.lightSlots == 2 && alone.lightSlots == 2 &&
+		alone.lightSlotId[leaving] == 0 && hole[0] == 0 && hole[1] == 0 && hole[2] == 0 && hole[3] == 0 && kept[2] > kept[0] && kept[3] > kept[1];
+	if(!ok)
+		Detail("  prepass %d read %d %d %d; eye inside: tiles (%u,%u)-(%u,%u), up to (%u,%u) (want the whole grid 320x240 and 640x480); past the edge: (%u,%u)-(%u,%u) (want the right edge, a few tiles wide);"
+			" pair slots %u, alone slots %u (want 2 and 2), slot %d id %u (want a hole 0): tiles (%u,%u)-(%u,%u) (want empty), the other (%u,%u)-(%u,%u) (want some)\n",
+			began, read, readHole, readKept, inside[0], inside[1], inside[2], inside[3], insideUp[2], insideUp[3], clipped[0], clipped[1], clipped[2], clipped[3],
+			pair.lightSlots, alone.lightSlots, leaving, alone.lightSlotId[leaving], hole[0], hole[1], hole[2], hole[3], kept[0], kept[1], kept[2], kept[3]);
+	return Report(ok, name);
+}
+
+
+static float
+EnteringLength(uint32 levers, int32 HX, int32 HY)
+{
+	metal::setLightLeversForTest(levers);
+	metal::LightDesc l = PointLight(221, 25.0f, 0.0f, 76.0f, 24.0f);
+	const float where[3] = { -25.0f, 25.0f, -25.0f };
+	const uint32 stops[4] = { 0, 8, 11, 12 };
+	uint32 passes = 0;
+	for(int leg = 0; leg < 3; leg++){
+		l.pos[0] = where[leg];
+		for(int f = 0; f < 40 && passes < stops[leg + 1]; f++){
+			NightFrame(&l, 1);
+			metal::RayStats st = metal::getRayStats();
+			if(st.lightSlots == 1)
+				passes = st.lightFrame + 1;
+		}
+	}
+	metal::rtWaitForTest();
+	float value = 0.0f, length = -1.0f;
+	if(!metal::readLightHistoryForTest(0, HX, HY, &value, &length))
+		return -1.0f;
+	return length;
+}
+
+static bool
+CheckLightTilesEntering(void)
+{
+	const char *name = "a pixel that enters a light's tiles starts a fresh history where the whole-screen pass keeps its own";
+	NightRig rig;
+	NightBegin(&rig);
+	uint32 saved = metal::lightLeversForTest();
+	float whole = EnteringLength(saved & ~LT_LEVER_TILES, 204, 120);
+	float tiled = EnteringLength(saved | LT_LEVER_TILES, 204, 120);
+	metal::setLightLeversForTest(saved);
+	NightEnd(&rig);
+	bool ok = whole >= 11.5f && tiled == 1.0f;
+	Detail("  history length after the light returns to a place it left three frames ago: %.1f whole-screen, %.1f tiled (want at least 12 and 1)\n", whole, tiled);
+	return Report(ok, name);
+}
+
+
+
+static bool
+CheckLightHistoryBudget(void)
+{
+	const char *name = "the light shadow history is allocated for the budget in force, no slot above it holds a texture, and without the rule every slot does";
+	NightRig rig;
+	NightBegin(&rig);
+	metal::LightDesc four[4] = { PointLight(321, -20.0f, 5.0f, 60.0f, 40.0f), PointLight(322, 20.0f, 5.0f, 60.0f, 40.0f), PointLight(323, 0.0f, -15.0f, 60.0f, 40.0f),
+		PointLight(324, 0.0f, 25.0f, 60.0f, 40.0f) };
+	for(int i = 0; i < 4; i++)
+		four[i].color[0] = four[i].color[1] = four[i].color[2] = 5.0f + 5.0f*(float)i;
+	uint32 base = metal::lightLeversForTest();
+	const int32 budgets[3] = { 2, 4, 8 };
+	float mb[3], mbOff = 0.0f;
+	bool began = true, below[3], above[3], offReads = false;
+	float value, length;
+	for(int pass = 0; pass < 2; pass++){
+		metal::setLightLeversForTest(pass == 0 ? base | LT_LEVER_HISTORY : base & ~LT_LEVER_HISTORY);
+		for(int k = 0; k < 3; k++){
+			if(pass == 1 && k != 0)
+				continue;
+			metal::RenderSettings st = metal::getRenderSettings();
+			st.shadowedLights = budgets[k];
+			metal::setRenderSettings(&st);
+			for(int f = 0; f < 6; f++)
+				began = NightFrame(four, 4) && began;
+			metal::rtWaitForTest();
+			float megabytes = metal::getRayStats().shadowMegabytes;
+			if(pass == 0){
+				mb[k] = megabytes;
+				below[k] = metal::readLightHistoryForTest(std::min(budgets[k], 4) - 1, 20, 20, &value, &length) != 0;
+				above[k] = budgets[k] >= 8 || metal::readLightHistoryForTest(budgets[k], 20, 20, &value, &length) != 0;
+			}else{
+				mbOff = megabytes;
+				offReads = metal::readLightHistoryForTest(7, 20, 20, &value, &length) != 0;
+			}
+		}
+	}
+	metal::setLightLeversForTest(base);
+	NightEnd(&rig);
+	float perSlot = (mb[1] - mb[0])/2.0f;
+	bool scales = perSlot > 0.1f && fabsf((mb[2] - mb[1]) - 4.0f*perSlot) <= 0.02f*perSlot*4.0f && fabsf(mbOff - mb[2]) <= 0.02f*mb[2];
+	Detail("  allocated %.2f, %.2f, %.2f MB at budgets 2, 4, 8 (%.2f MB a slot); without the rule at budget 2: %.2f MB\n", mb[0], mb[1], mb[2], perSlot, mbOff);
+	bool ok = began && scales && below[0] && below[1] && below[2] && !above[0] && !above[1] && offReads;
+	if(!ok)
+		Detail("  prepass %d; the last slot in force reads %d %d %d (want 1); the slot above reads %d %d (want 0 0); without the rule slot 7 reads %d (want 1)\n", began,
+			below[0], below[1], below[2], above[0], above[1], offReads);
+	return Report(ok, name);
+}
+
 int
 RunLightChecks(Camera *camera)
 {
@@ -2774,6 +3063,10 @@ RunLightChecks(Camera *camera)
 	CheckLightMovingCaster();
 	CheckLightReadbackKeepsPass();
 	CheckLightForwardTiming();
+	CheckLightTilesExact();
+	CheckLightTilesEdges();
+	CheckLightTilesEntering();
+	CheckLightHistoryBudget();
 	PrintClusterTiming();
 	LightsOff();
 	WorldClose();

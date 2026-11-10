@@ -142,6 +142,7 @@ struct PrepassMatrices
 	RawMatrix prevViewProj;
 	RawMatrix uploadedViewProj;
 	RawMatrix view;
+	RawMatrix proj;
 };
 const PrepassMatrices &prepassMatrices(void);
 struct ShadowSunInputs

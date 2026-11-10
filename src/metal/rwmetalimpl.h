@@ -216,6 +216,10 @@ bool32 readLightHistoryForTest(int32 slot, int32 x, int32 y, float32 *value, flo
 bool32 readClusterForTest(int32 cx, int32 cy, int32 cz, uint32 *ids, int32 max, int32 *count);
 int32 lightClusterPassesForTest(void);
 bool32 rtLightForwardTimingForTest(double *withLights, double *withoutLights);
+void setLightLeversForTest(uint32 mask);
+uint32 lightLeversForTest(void);
+bool32 rtLightRectForTest(int32 slot, int32 which, uint32 rect[4]);
+bool32 readLightPlaneForTest(int32 which, int32 slot, float32 *out, uint32 *width, uint32 *height);
 int32 lightClusterSlotForTest(void);
 bool32 lightShadowHeldForTest(void);
 void forcePrepassEqualForTest(void);

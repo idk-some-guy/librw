@@ -279,6 +279,7 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 			out[k].dirOuter = simd_make_float4(0.0f, 0.0f, 1.0f, -2.0f);
 			out[k].misc = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 			out[k].ids = simd_make_uint4(LT_NO_ID, 0u, 0u, 0u);
+			out[k].extent = simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 			continue;
 		}
 		const LightDesc &d = lt.kept[slotPick[k]];
@@ -291,7 +292,13 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 				sum[2] += g.pos[2];
 				members++;
 			}
-		float32 inv = 1.0f/(float32)members;
+		float32 inv = 1.0f/(float32)members, reach = d.radius;
+		for(const LightDesc &g : lt.kept)
+			if(&g == &d || (d.group != 0 && g.group == d.group && g.radius > 0.0f)){
+				float32 dx = g.pos[0] - sum[0]*inv, dy = g.pos[1] - sum[1]*inv, dz = g.pos[2] - sum[2]*inv;
+				reach = std::max(reach, std::sqrt(dx*dx + dy*dy + dz*dz) + g.radius);
+			}
+		out[k].extent = simd_make_float4(reach, 0.0f, 0.0f, 0.0f);
 		out[k].posRadius = simd_make_float4(sum[0]*inv, sum[1]*inv, sum[2]*inv, d.radius);
 		out[k].dirOuter = simd_make_float4(d.dir[0], d.dir[1], d.dir[2], d.cosOuter);
 		out[k].misc = simd_make_float4(d.softness, (d.flags & LIGHT_SPOT) ? 1.0f : 0.0f, 0.0f, 0.0f);
@@ -301,6 +308,12 @@ lightsAssignSlots(int32 budget, const RawMatrix &view, const RawMatrix &viewProj
 		lt.slotOf[i] = ltSlotFor(lt.cands.data(), (int)n, slotPick, span, (int)i);
 	lt.slots = (uint32)span;
 	return (uint32)span;
+}
+
+float32
+lightsNearPlane(void)
+{
+	return lt.zNear;
 }
 
 void

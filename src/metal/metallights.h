@@ -16,6 +16,7 @@ typedef uint4 LTUint4;
 typedef float4x4 LTMatrix;
 #else
 #include <math.h>
+#include <cmath>
 #include <stdint.h>
 #include <algorithm>
 #include <simd/simd.h>
@@ -399,6 +400,154 @@ static inline bool
 ltLightTextureBound(bool ranPass, unsigned int slots)
 {
 	return ranPass && slots > 0;
+}
+
+#define LT_LEVER_TILES 1u
+#define LT_LEVER_HISTORY 2u
+#define LT_LEVERS_ALL 3u
+
+static inline unsigned int
+ltHistorySlices(int budget, bool atBudget)
+{
+	if(!atBudget)
+		return LT_MAX_SHADOWED;
+	return budget <= 0 ? 0u : budget > LT_MAX_SHADOWED ? (unsigned int)LT_MAX_SHADOWED : (unsigned int)budget;
+}
+
+#define LT_TILE 8
+#define LT_TAP_MARGIN 2
+#define LT_CLAMP_MARGIN 1
+
+struct LTRect { int x0, y0, x1, y1; };
+
+static inline bool
+ltRectEmpty(LTRect r)
+{
+	return r.x1 <= r.x0 || r.y1 <= r.y0;
+}
+
+static inline bool
+ltRectHas(LTRect r, int x, int y)
+{
+	return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1;
+}
+
+static inline LTRect
+ltUnionRect(LTRect a, LTRect b)
+{
+	if(ltRectEmpty(a))
+		return ltRectEmpty(b) ? LTRect{ 0, 0, 0, 0 } : b;
+	if(ltRectEmpty(b))
+		return a;
+	return LTRect{ std::min(a.x0, b.x0), std::min(a.y0, b.y0), std::max(a.x1, b.x1), std::max(a.y1, b.y1) };
+}
+
+static inline LTRect
+ltAlignRect(LTRect r, int tile, int width, int height)
+{
+	if(ltRectEmpty(r))
+		return LTRect{ 0, 0, 0, 0 };
+	LTRect o = { r.x0/tile*tile, r.y0/tile*tile, (r.x1 + tile - 1)/tile*tile, (r.y1 + tile - 1)/tile*tile };
+	o.x1 = std::min(o.x1, width);
+	o.y1 = std::min(o.y1, height);
+	return ltRectEmpty(o) ? LTRect{ 0, 0, 0, 0 } : o;
+}
+
+static inline bool
+ltSphereSpan(float c, float cz, float r, float zn, float *lo, float *hi)
+{
+	float l = INFINITY, h = -INFINITY;
+	float den = cz*cz - r*r, d = c*c + cz*cz - r*r;
+	if(cz - r <= zn){
+		float rim = r*r - (zn - cz)*(zn - cz);
+		if(rim > 0.0f){
+			float w = LT_SQRT(rim);
+			l = LT_MIN(l, (c - w)/zn);
+			h = LT_MAX(h, (c + w)/zn);
+		}
+	}
+	if(d > 0.0f && std::fabs(den) > 1e-6f){
+		float q = r*LT_SQRT(d);
+		for(int k = 0; k < 2; k++){
+			float u = (c*cz + (k ? q : -q))/den;
+			float norm = LT_SQRT(1.0f + u*u), dist = (c - u*cz)/norm;
+			if(cz + dist*u/norm >= zn){
+				l = LT_MIN(l, u);
+				h = LT_MAX(h, u);
+			}
+		}
+	}else if(d > 0.0f)
+		return false;
+	*lo = l;
+	*hi = h;
+	return l <= h;
+}
+
+// proj is column major with w = k*z and the centre in view space; the part behind the near plane is off screen, another projection gets the whole grid.
+static inline LTRect
+ltSphereRect(const float *m, float cx, float cy, float cz, float radius, float zNear, int width, int height)
+{
+	LTRect whole = { 0, 0, width, height };
+	if(!(radius > 0.0f))
+		return LTRect{ 0, 0, 0, 0 };
+	if(!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) || !std::isfinite(radius) || !(zNear > 0.0f) || !(m[11] > 0.0f) ||
+	   m[1] != 0.0f || m[3] != 0.0f || m[4] != 0.0f || m[7] != 0.0f || m[12] != 0.0f || m[13] != 0.0f || m[15] != 0.0f)
+		return whole;
+	float zn = zNear*0.98f;
+	if(cz + radius <= zn)
+		return LTRect{ 0, 0, 0, 0 };
+	float k = m[11], ux0, ux1, uy0, uy1;
+	if(!ltSphereSpan(cx, cz, radius, zn, &ux0, &ux1) || !ltSphereSpan(cy, cz, radius, zn, &uy0, &uy1))
+		return whole;
+	float ax = m[0]/k, bx = m[8]/k, ay = m[5]/k, by = m[9]/k;
+	float px0 = (ax*ux0 + bx)*0.5f + 0.5f, px1 = (ax*ux1 + bx)*0.5f + 0.5f;
+	float py0 = 0.5f - (ay*uy0 + by)*0.5f, py1 = 0.5f - (ay*uy1 + by)*0.5f;
+	float x0 = LT_MIN(px0, px1)*(float)width, x1 = LT_MAX(px0, px1)*(float)width;
+	float y0 = LT_MIN(py0, py1)*(float)height, y1 = LT_MAX(py0, py1)*(float)height;
+	auto clampTo = [](float v, int limit){ return (int)LT_MIN(LT_MAX(v, -1.0f), (float)limit + 1.0f); };
+	LTRect r = { clampTo(LT_FLOOR(x0), width) - 1, clampTo(LT_FLOOR(y0), height) - 1, clampTo(ceilf(x1), width) + 1, clampTo(ceilf(y1), height) + 1 };
+	r.x0 = std::max(r.x0, 0);
+	r.y0 = std::max(r.y0, 0);
+	r.x1 = std::min(r.x1, width);
+	r.y1 = std::min(r.y1, height);
+	return ltRectEmpty(r) ? LTRect{ 0, 0, 0, 0 } : r;
+}
+
+static inline LTRect
+ltAccumRect(LTRect full, int rawWidth, int rawHeight)
+{
+	if(ltRectEmpty(full))
+		return LTRect{ 0, 0, 0, 0 };
+	LTRect h = { std::max(full.x0/2 - LT_TAP_MARGIN, 0), std::max(full.y0/2 - LT_TAP_MARGIN, 0), (full.x1 + 1)/2 + LT_TAP_MARGIN,
+		(full.y1 + 1)/2 + LT_TAP_MARGIN };
+	return ltAlignRect(h, LT_TILE, rawWidth, rawHeight);
+}
+
+static inline LTRect
+ltRayRect(LTRect accum, int rawWidth, int rawHeight)
+{
+	if(ltRectEmpty(accum))
+		return LTRect{ 0, 0, 0, 0 };
+	LTRect h = { std::max(accum.x0 - LT_CLAMP_MARGIN, 0), std::max(accum.y0 - LT_CLAMP_MARGIN, 0), accum.x1 + LT_CLAMP_MARGIN, accum.y1 + LT_CLAMP_MARGIN };
+	return ltAlignRect(h, LT_TILE, rawWidth, rawHeight);
+}
+
+static inline LTRect
+ltUpsampleRect(LTRect full, int width, int height)
+{
+	return ltAlignRect(full, LT_TILE, width, height);
+}
+
+struct LTRects { LTRect upsample, accum, ray; };
+
+static inline LTRects
+ltLightRects(LTRect full, int width, int height, int rawWidth, int rawHeight)
+{
+	LTRects r;
+	r.upsample = ltUpsampleRect(full, width, height);
+	r.accum = ltAccumRect(r.upsample, rawWidth, rawHeight);
+	r.ray = ltRayRect(r.accum, rawWidth, rawHeight);
+	return r;
 }
 #endif
 

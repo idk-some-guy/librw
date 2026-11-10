@@ -2169,6 +2169,7 @@ frameRayWork(void)
 	in.motion = frame.prepassMotion;
 	memcpy(&in.viewProj, &m.uploadedViewProj, 64);
 	memcpy(&in.view, &m.view, 64);
+	memcpy(&in.proj, &m.proj, 64);
 	in.width = (uint32)frame.internalWidth;
 	in.height = (uint32)frame.internalHeight;
 	in.samples = frame.samples;
@@ -2435,6 +2436,40 @@ readLightHistoryForTest(int32 slot, int32 x, int32 y, float32 *value, float32 *l
 		const __fp16 *px = (const __fp16*)buf.contents;
 		*value = (float32)px[0];
 		*length = (float32)px[1];
+	}
+	return 1;
+}
+
+bool32
+readLightPlaneForTest(int32 which, int32 slot, float32 *out, uint32 *width, uint32 *height)
+{
+	MetalContext *ctx = getContext();
+	id<MTLTexture> tex = which == 0 ? rtLightShadowTexture() : which == 1 ? rtLightRawTexture() : slot < 0 ? nil : rtLightHistoryTexture((uint32)slot);
+
+	if(ctx == nil || tex == nil || slot < 0 || which < 0 || which > 2 || (which < 2 && slot >= (int32)tex.arrayLength))
+		return 0;
+	*width = (uint32)tex.width;
+	*height = (uint32)tex.height;
+	if(out == nil)
+		return 1;
+	uint32 bytes = which == 0 ? 1 : which == 1 ? 2 : 4, n = *width**height;
+	@autoreleasepool {
+		flushPasses();
+		id<MTLBuffer> buf = [ctx->device newBufferWithLength:(NSUInteger)n*bytes options:MTLResourceStorageModeShared];
+		id<MTLCommandBuffer> cb = frameCommandBuffer();
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:tex sourceSlice:which < 2 ? slot : 0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			sourceSize:MTLSizeMake(*width, *height, 1) toBuffer:buf destinationOffset:0
+			destinationBytesPerRow:*width*bytes destinationBytesPerImage:n*bytes];
+		[blit endEncoding];
+		if(!commitAndWait(cb))
+			return 0;
+		if(which == 0)
+			for(uint32 i = 0; i < n; i++)
+				out[i] = (float32)((const uint8*)buf.contents)[i]/255.0f;
+		else
+			for(uint32 i = 0; i < n*(which == 1 ? 1u : 2u); i++)
+				out[i] = (float32)((const __fp16*)buf.contents)[i];
 	}
 	return 1;
 }

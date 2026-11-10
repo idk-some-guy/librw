@@ -13,6 +13,7 @@ struct ShadowRayParams
 	uint terminatorOff;
 	uint ownerOff;
 	uint listCap;
+	uint2 origin;
 };
 
 struct ShadowAccumParams
@@ -28,6 +29,8 @@ struct ShadowAccumParams
 	uint valid;
 	float maxHistory;
 	uint phase;
+	uint4 prevRect;
+	uint2 origin;
 };
 
 constant uint shadowPhase [[function_constant(0)]];
@@ -338,7 +341,15 @@ struct LightRaySlot
 	float4 dirOuter;
 	float4 misc;
 	uint4 ids;
+	uint4 rect;
+	float4 extent;
 };
+
+static bool
+lightRayInRect(constant LightRaySlot &L, uint2 g)
+{
+	return all(g >= L.rect.xy) && all(g < L.rect.zw);
+}
 
 static bool
 lightRayWanted(constant LightRaySlot &L, float3 o)
@@ -369,9 +380,12 @@ lightShadowRays(instance_acceleration_structure tlas [[buffer(0)]],
                 depth2d<float, access::read> depth [[texture(0)]],
                 texture2d_array<float, access::write> raw [[texture(1)]],
                 texture2d<float, access::read> normals [[texture(2)]],
-                uint3 gid [[thread_position_in_grid]])
+                uint3 tid [[thread_position_in_grid]])
 {
-	constant LightRaySlot &L = slots[gid.z];
+	constant LightRaySlot &L = slots[tid.z];
+	uint3 gid = uint3(tid.xy + p.origin, tid.z);
+	if(!lightRayInRect(L, gid.xy))
+		return;
 	float3 o;
 	float4 f, back;
 	bool cull, dark;
@@ -406,9 +420,12 @@ lightShadowRaysAlpha(instance_acceleration_structure tlas [[buffer(0)]],
                      depth2d<float, access::read> depth [[texture(0)]],
                      texture2d_array<float, access::write> raw [[texture(1)]],
                      texture2d<float, access::read> normals [[texture(2)]],
-                     uint3 gid [[thread_position_in_grid]])
+                     uint3 tid [[thread_position_in_grid]])
 {
-	constant LightRaySlot &L = slots[gid.z];
+	constant LightRaySlot &L = slots[tid.z];
+	uint3 gid = uint3(tid.xy + p.origin, tid.z);
+	if(!lightRayInRect(L, gid.xy))
+		return;
 	float3 o;
 	float4 f, back;
 	bool cull, dark;
@@ -608,8 +625,9 @@ lightShadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
                       depth2d<float, access::read> depth [[texture(4)]],
                       texture2d<float, access::write> out [[texture(5)]],
                       constant ShadowAccumParams &p [[buffer(0)]],
-                      uint2 gid [[thread_position_in_grid]])
+                      uint2 tid [[thread_position_in_grid]])
 {
+	uint2 gid = tid + p.origin;
 	if(gid.x >= p.rawSize.x || gid.y >= p.rawSize.y)
 		return;
 	uint2 off = uint2(shPhaseX(p.phase), shPhaseY(p.phase));
@@ -624,7 +642,7 @@ lightShadowAccumulate(texture2d<float, access::read> raw [[texture(0)]],
 	float2 huv = (float2(src) + 0.5)/float2(p.size) + motion.read(src).xy;
 	if(p.valid != 0 && all(huv >= 0.0) && all(huv < 1.0)){
 		uint2 hp = min(min(uint2(huv*float2(p.size)), p.size - 1)/2, p.rawSize - 1);
-		float2 h = hist.read(hp).rg;
+		float2 h = all(hp >= p.prevRect.xy) && all(hp < p.prevRect.zw) ? hist.read(hp).rg : float2(0.0);
 		if(h.g > 0.0){
 			float4 on = shadowStoredNormal(normals, src);
 			float2 box = shClampBoxNeeded(h.r, cur) ? shadowClampBox(raw, normals, p, int2(gid), off, on, cur, shClampBoxStart(0u)) : float2(cur);
@@ -640,8 +658,9 @@ lightShadowUpsample(texture2d<float, access::read> hist [[texture(0)]],
                     depth2d<float, access::read> depth [[texture(2)]],
                     texture2d<float, access::write> out [[texture(3)]],
                     constant ShadowAccumParams &p [[buffer(0)]],
-                    uint2 gid [[thread_position_in_grid]])
+                    uint2 tid [[thread_position_in_grid]])
 {
+	uint2 gid = tid + p.origin;
 	if(gid.x >= p.size.x || gid.y >= p.size.y)
 		return;
 	float d = depth.read(gid);
